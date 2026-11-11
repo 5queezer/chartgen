@@ -37,7 +37,7 @@ jobs:
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux' && !matrix.cross
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'

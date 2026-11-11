@@ -1,0 +1,23 @@
+name: Install system libraries
+description: >-
+  Install apt packages on an Ubuntu runner, unless they are installed already. When
+  the first mirror of the runner image's list does not answer, apt gets the first
+  official mirror that does. Needs the repository checked out.
+inputs:
+  packages:
+    description: >-
+      Package names separated by single spaces.
+    default: libfontconfig1-dev libfreetype-dev
+  mirror-only:
+    description: >-
+      "true": only the mirror choice, no install, for a job whose later steps run
+      apt themselves.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        MIRROR_ONLY: ${{ inputs.mirror-only }}
+      run: '"$GITHUB_ACTION_PATH/install.sh"'

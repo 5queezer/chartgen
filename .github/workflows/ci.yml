@@ -23,9 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
@@ -37,9 +35,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
@@ -51,9 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -69,9 +63,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -97,9 +89,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo run --example gen_docs
@@ -117,9 +107,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
@@ -143,9 +131,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
@@ -213,9 +199,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system libraries
         timeout-minutes: 5
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
+        uses: ./.github/actions/install-system-libraries
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -247,6 +231,12 @@ jobs:
         with:
           name: chartgen-e2e-debug
           path: target/debug
+      # The steps below run apt themselves, the second through Playwright's --with-deps.
+      - name: Choose an apt mirror
+        timeout-minutes: 2
+        uses: ./.github/actions/install-system-libraries
+        with:
+          mirror-only: "true"
       - name: Prepare chartgen binary
         run: |
           # Artifacts do not keep the executable bit.
