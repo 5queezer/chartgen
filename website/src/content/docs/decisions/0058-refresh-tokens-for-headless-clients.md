@@ -97,11 +97,15 @@ server log and no refresh. With the access-token hash stored, the same three run
 person once, and after the restart the server log shows no `/authorize`, `/register` or
 `/token` request at all.
 
-Hermes, the first agent this is for, behaves the same way according to its code, which was
-read on the target and not run: it stores the absolute time at which a token runs out and
-refreshes first when that has passed (`mcp_oauth.py`, lines 468 to 495;
-`mcp_oauth_manager.py`, lines 80 to 89), and has no path of its own that refreshes after a
-`401` (`mcp_oauth_manager.py`, line 5).
+Hermes, the first agent this is for, runs on MCP SDK 2.3.0 with its own token handling. It
+stores the absolute time at which a token runs out and refreshes first when that has
+passed (`mcp_oauth.py`, lines 468 to 495; `mcp_oauth_manager.py`, lines 80 to 89). After a
+`401` it reloads its tokens from disk and otherwise leaves the refresh to the SDK. Run
+against a local server with sign-in off, as reported by the operator: authorized once, a
+tool call after a restart of chartgen succeeded with the same access token and no
+`/authorize` or `/token` request, and after a restart of Hermes with a stored token that had
+run out it refreshed by itself, both tokens rotated. A real 7 days, a spent token coming
+back and sign-in on were not part of that run.
 
 Rejected: **storing every access token**, option 1 as it stands. The web app's are tied to a
 browser session and come one per page load. Rejected: **telling clients apart by a
