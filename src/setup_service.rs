@@ -119,6 +119,10 @@ pub struct Setups {
     alerts: Option<Arc<ServerAlerts>>,
     runtime: tokio::runtime::Handle,
     state: Mutex<State>,
+    /// Run by `create` between reading the alerts' pairs and its final check, so a test
+    /// can put another create exactly there.
+    #[cfg(test)]
+    before_final_check: Mutex<Option<Box<dyn Fn() + Send>>>,
     me: Weak<Setups>,
 }
 
@@ -210,6 +214,8 @@ impl Setups {
             alerts: alerts.clone(),
             runtime: tokio::runtime::Handle::current(),
             state: Mutex::default(),
+            #[cfg(test)]
+            before_final_check: Mutex::default(),
             me: me.clone(),
         });
         setups.restore();
@@ -704,6 +710,10 @@ impl Setups {
         // here to the write nobody may, alerts included, whose pairs are read afresh.
         let _pairs = crate::server_alerts::pair_gate();
         let alert_pairs = self.alert_pairs();
+        #[cfg(test)]
+        if let Some(hook) = self.before_final_check.lock().unwrap().as_ref() {
+            hook();
+        }
         let mut st = self.lock();
         self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
         let id = self.new_id(&mut st, owner);
