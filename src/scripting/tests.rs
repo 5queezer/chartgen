@@ -2083,12 +2083,7 @@ fn log(store: &persistence::Store, events: &[persistence::NewEvent]) {
 #[test]
 fn a_file_from_before_the_event_log_upgrades_and_keeps_its_rows() {
     for (version, alerts) in [(8, true), (9, true)] {
-        let dir = std::env::temp_dir().join(format!(
-            "chartgen-events-from-{version}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::new(format!("chartgen-events-from-{version}"));
         let path = dir.join("s.db");
         let conn = rusqlite::Connection::open(&path).unwrap();
         for sql in &persistence::MIGRATIONS[..version] {
