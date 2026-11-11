@@ -145,6 +145,9 @@ pub(super) struct Rotation {
     spent: Vec<String>,
     /// The time of the exchange, or `REPLACED` for the successor a retry replaces.
     spent_at: i64,
+    /// On a retry: the hash of the access token that went out with the replaced
+    /// successor, in the answer the client never got.
+    lost_access: Option<String>,
 }
 
 impl Rotation {
@@ -189,9 +192,15 @@ impl OAuthStore {
 
     /// After a refresh: a family keeps `newest` and, for `PREVIOUS_ACCESS_SECS` more,
     /// the access token before it. Any older one ends now, so a family never has more
-    /// than two.
-    fn retire_access(&mut self, family: &str, newest: &str) {
+    /// than two. After a retry the one before it is the token the client holds, not
+    /// `lost`, the one from the answer it never got, which ends here.
+    fn retire_access(&mut self, family: &str, newest: &str, lost: Option<&str>) {
         let of_family = |t: &AccessToken| t.family.as_deref() == Some(family);
+        if let Some(lost) = lost {
+            self.restored.remove(lost);
+            self.tokens
+                .retain(|token, t| !of_family(t) || hash_of(token) != lost);
+        }
         let previous = self
             .tokens
             .iter()
@@ -317,6 +326,7 @@ impl OAuthStore {
             access: access.to_string(),
             spent: Vec::new(),
             spent_at: now,
+            lost_access: None,
             token: RefreshToken {
                 family: hash_of(&family_part),
                 seq: 0,
@@ -366,15 +376,15 @@ impl OAuthStore {
             .refresh
             .iter()
             .find(|(_, l)| l.family == t.family && l.spent_at.is_none())
-            .map(|(hash, l)| (hash.clone(), l.seq));
-        let (spent, spent_at) = match (t.spent_at, live) {
-            (None, _) => (vec![hash_of(presented)], now),
+            .map(|(hash, l)| (hash.clone(), l.seq, l.access_hash.clone()));
+        let (spent, spent_at, lost_access) = match (t.spent_at, live) {
+            (None, _) => (vec![hash_of(presented)], now, None),
             // A retry by the holder of the token exchanged last: the successor it
             // never got is replaced, and marked so that it can never retry in turn.
-            (Some(at), Some((successor, seq)))
+            (Some(at), Some((successor, seq, access)))
                 if now - at <= RETRY_WINDOW_SECS && seq == t.seq + 1 =>
             {
-                (vec![successor], REPLACED)
+                (vec![successor], REPLACED, access)
             }
             _ => return Err(Refused::Reused(t.family)),
         };
@@ -385,6 +395,7 @@ impl OAuthStore {
             value,
             spent,
             spent_at,
+            lost_access,
             token: RefreshToken {
                 seq: t.seq + 1,
                 created_at: now,
@@ -505,7 +516,11 @@ pub(super) async fn grant(
             });
             let family = Some(rotation.token.family.clone());
             let token = s.issue_access(rotation.access.clone(), client_id, user, family);
-            s.retire_access(&rotation.token.family, &token);
+            s.retire_access(
+                &rotation.token.family,
+                &token,
+                rotation.lost_access.as_deref(),
+            );
             // The user's limits count what a refresh adds, as they do a code exchange.
             let kept = Some(rotation.token.family.as_str());
             let ended = rotation
@@ -1055,6 +1070,37 @@ mod tests {
             assert!(exchange(&state, &next, CLIENT, &write).await.is_err());
             assert!(store.refresh_tokens(0).unwrap().is_empty());
         }
+    }
+
+    /// A client that lost the answer to an exchange still holds the access token from
+    /// before it, and may have a request under way with it. After its retry that is the
+    /// token to keep for the 60 seconds, not the one in the answer nobody received.
+    #[tokio::test]
+    async fn after_a_retry_the_access_token_the_client_holds_keeps_working() {
+        let (store, _) = temp_store("retry-access");
+        let state = started(&store, false, &[CLIENT]);
+        let write = to(&store);
+        let (held, first) = authorize(&state, CLIENT, None, &write).await;
+        let first = first.unwrap();
+        let (lost, _) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+        let (newest, _) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+
+        assert!(valid(&state, &newest));
+        assert!(valid(&state, &held), "the one the client was using");
+        assert!(
+            !valid(&state, &lost),
+            "the one from the answer that was lost"
+        );
+        // A second lost answer changes nothing for the one in hand.
+        let (newest, _) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+        assert!(valid(&state, &newest) && valid(&state, &held));
+        assert_eq!(state.oauth.lock().unwrap().tokens.len(), 2);
+
+        // For 60 seconds, as after any refresh: seen 61 seconds on.
+        let mut s = state.oauth.lock().unwrap();
+        let t = s.tokens.get_mut(&held).unwrap();
+        t.expires_in = t.expires_in.saturating_sub(Duration::from_secs(61));
+        assert!(!s.validate_token(&held) && s.validate_token(&newest));
     }
 
     /// A client may lose more than one answer. Each retry leaves one usable token, and

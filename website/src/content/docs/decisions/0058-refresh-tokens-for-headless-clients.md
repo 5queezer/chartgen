@@ -274,7 +274,9 @@ A family counts as a token of its client, in every limit that counts tokens.
   before is not ended at once, because a request sent with it just before the refresh can
   arrive just after, and a `401` for a token the client believes valid is what sends it
   back to a browser. Revoking, a token that comes back and every other way a family ends
-  take both at once, with no 60 seconds. A restart brings back only the newest.
+  take both at once, with no 60 seconds. A restart brings back only the newest. After a
+  retry, the one kept for the 60 seconds is the access token the client was using before
+  the exchange, and the one that went out in the answer it never got ends.
 - **Access tokens with sign-in off** had no limit either: a loop of `/authorize` and
   `/token` for one client minted 7-day tokens without end, and every request walks all of
   them. A client now keeps 100 that belong to no family, the web app's number with sign-in
