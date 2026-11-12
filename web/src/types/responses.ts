@@ -871,9 +871,21 @@ export const SetupSchema = SetupLevelsSchema.extend({
   // filled before the server kept them.
   mae_r: z.number().nonpositive().nullable(),
   mfe_r: z.number().nonnegative().nullable(),
-  // Scored 1m bars from the fill bar to the exit bar (0 when one bar did both); while
-  // the setup is filled, those so far. Null when mae_r is.
-  bars_to_exit: z.number().int().nonnegative().nullable(),
+  // Open time (ms) of the 1m bar that set each extreme; null when its value is.
+  mae_at: z.number().nullable(),
+  mfe_at: z.number().nullable(),
+  // While watching, the least distance from a bar's high or low to the entry zone, in R
+  // of the risk from the zone's edge nearest the price to the invalidation; 0 once
+  // filled. Null before the first bar, and on setups stored before the server kept it.
+  closest_approach_r: z.number().nonnegative().nullable(),
+  // In bars of the setup's own interval, to two places; null before a fill.
+  // bars_to_exit runs to the newest scored bar while filled, and is null on a setup
+  // that expired filled while nobody scored it. bars_to_mae/mfe are null when
+  // mae_at/mfe_at are.
+  bars_to_fill: z.number().nonnegative().nullable(),
+  bars_to_exit: z.number().nonnegative().nullable(),
+  bars_to_mae: z.number().nonnegative().nullable(),
+  bars_to_mfe: z.number().nonnegative().nullable(),
 });
 export type Setup = z.infer<typeof SetupSchema>;
 

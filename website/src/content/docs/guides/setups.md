@@ -71,9 +71,9 @@ after the fact. They are read with the same 1m bars and the same rule as the res
 - `mae_r`: the furthest the price went **against** the position, in R from the fill. It is 0 or
   less: `-0.5` means half the risk.
 - `mfe_r`: the furthest it went **for** the position, in R. It is 0 or more.
-- `bars_to_exit`: the **1m bars** scored from the fill bar to the exit bar. A bar that fills and
-  closes a setup gives 0; one filled in a bar and closed at the open of the next gives 1. Bars
-  the server missed (`gap: true`) are not counted.
+- `mae_at` and `mfe_at`: the open time (ms) of the 1m bar that set each, the first one where two
+  went as far. Comparing `mae_at` with when the first target would have been reached tells
+  whether a break-even stop would have been hit.
 
 They are measured from the fill price with the bars' highs and lows, **before costs**, so a
 setup that won at a target 2 R away has `mfe_r` 2 while its `result_r` is a little less. Where a
@@ -85,6 +85,34 @@ has `mae_r` -1, or less if the price gapped through.
 While a setup is filled they are the values so far. Before a fill they are null, and they stay
 null on a setup that is never filled. Setups filled before the server kept them have none.
 
+### Durations
+
+Durations are in **bars of the setup's own interval**, the one it was created with (`1h`, `4h`,
+or a custom one such as `45m`): the elapsed time over the interval's length, to two places. A
+month counts as 30 days. They are measured between the open times of the 1m bars involved, so
+they move in steps of one minute.
+
+- `bars_to_fill`: from creation to the bar that filled it.
+- `bars_to_exit`: from the fill to the exit. While filled, to the newest bar scored so far.
+- `bars_to_mae` and `bars_to_mfe`: from the fill to `mae_at` and `mfe_at`.
+
+All are null before a fill. `bars_to_exit` is also null on a setup that expired filled while
+nobody scored it, since it has no exit.
+
+### How close an unfilled setup came
+
+`closest_approach_r` is, while a setup is watching, the least distance between a bar's high or
+low and the entry zone, in R of the risk from the zone's edge nearest the price to the
+invalidation. `0.1` means the price came within a tenth of the planned risk. It is 0 once a bar
+reaches the zone, so on a setup that expired or was cancelled unfilled it says how near it came.
+It is null before the first bar is scored, and on setups that were already being scored before
+the server kept it.
+
+### Why a setup closed
+
+There is no separate exit reason: `status` says it. `won` is the first target, `invalidated` the
+invalidation, `expired` the expiry and `cancelled` your cancel.
+
 ## Tags
 
 `tags` labels a setup so that you can group your track record: `strategy:retest-short`,
@@ -92,7 +120,9 @@ null on a setup that is never filled. Setups filled before the server kept them 
 characters of lowercase letters, digits and `: - _ . /`, starting with a letter or digit; a
 tag given twice is kept once. `list_setups` with `tags` returns only
 the setups that have all of them. Tags are not levels: `revise_setup` can change them after the
-fill too, and the change goes to the log like any other.
+fill, and even after a setup closed, for labels such as `review:r1` added in a review. On a
+closed setup, or one being cancelled, a revision may change the tags only. The change goes to
+the log like any other.
 
 ## Changing a setup
 

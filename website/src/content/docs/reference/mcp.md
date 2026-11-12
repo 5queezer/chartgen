@@ -1315,7 +1315,10 @@ its own, in this order:
     "symbol": "BTCUSDT", "interval": "1h", "direction": "long", "decision": "take",
     "levels": { "entry": { "low": 64000.0, "high": 64200.0 }, "invalidation": 63000.0,
                 "targets": [66000.0], "expires_at": 1794051751000 },
-    "fill": null, "exit": null, "result_r": null, "gap": false,
+    "fill": null, "exit": null, "result_r": null,
+    "mae_r": null, "mfe_r": null, "mae_at": null, "mfe_at": null, "closest_approach_r": 0.42,
+    "bars_to_fill": null, "bars_to_exit": null, "bars_to_mae": null, "bars_to_mfe": null,
+    "tags": ["strategy:retest-short"], "gap": false,
     "thesis": "the setup's thesis, as you wrote it"
   }
 }
@@ -1385,9 +1388,10 @@ setups; `can_create` in the list says so.
 - `tags`: at most 10 labels, each 1 to 64 characters of lowercase letters, digits and
   `: - _ . /`, starting with a letter or digit, such as `strategy:retest-short` or
   `trigger:100eyes:abnormal-volatility`. A tag given twice is kept once. On `revise_setup` the
-  list replaces the old one (`[]` clears it), and it can change after the fill too.
-- `status`, `result_r`, `mae_r`, `mfe_r`, `bars_to_exit`, `fill`, `exit` and `costs` are set by
-  the server. Sending one is an error.
+  list replaces the old one (`[]` clears it), and it can change after the fill too. A closed
+  setup, or one being cancelled, takes a revision with `tags` alone.
+- `status`, `result_r`, the excursion and duration fields, `closest_approach_r`, `fill`, `exit`
+  and `costs` are set by the server. Sending one is an error.
 - `as_of`: [replay servers](/chartgen/guides/setups/#replay) only, where every call needs it.
   `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
 
@@ -1395,8 +1399,9 @@ A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `
 which rule set its levels), `status` (`watching`, `triggered`, `won`,
 `invalidated`, `expired`, `cancelled`), `created_at`, `costs`, `fill` and `exit` (each
 `{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off
-the operator's list), `mae_r` and `mfe_r` and `bars_to_exit` (see
-[excursions](/chartgen/guides/setups/#excursions); null before a fill), `tags`, `scored_through`, `gap` (true if bars were missed and could
+the operator's list), `mae_r`, `mfe_r`, `mae_at`, `mfe_at`, `bars_to_fill`,
+`bars_to_exit`, `bars_to_mae`, `bars_to_mfe` and `closest_approach_r` (see
+[excursions](/chartgen/guides/setups/#excursions)), `tags`, `scored_through`, `gap` (true if bars were missed and could
 not be read afterwards, so the result is incomplete), `pending`
 (changes that count from the next 1m bar), `revisions` and `agent_revisions`. `log` holds every
 entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `cancelled`,
