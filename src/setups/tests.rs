@@ -1502,6 +1502,46 @@ fn v2_moves_its_stop_at_1r_and_is_stopped_at_break_even() {
 }
 
 #[test]
+fn a_gap_through_the_invalidation_past_a_moved_stop_is_stopped_not_breakeven() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        shadow_walk(
+            &mut r,
+            &[
+                bar(1, 101.2, 104.1, 102.0, 103.8),
+                bar(2, 97.0, 97.5, 96.5, 97.2),
+            ],
+        );
+        let v2 = &shadows(&r).v2_be_at_1r;
+        assert_ne!(v2.stop, px(d, 98.0), "{d:?}: its stop had moved");
+        assert_eq!(v2.status, ShadowStatus::Stopped);
+        assert_eq!(v2.exits[0].price, px(d, 97.0));
+        assert_eq!(v2.result_r, r.result_r);
+        assert!(v2.result_r.unwrap() < -1.0);
+    }
+}
+
+#[test]
+fn v1s_moved_stop_is_never_beyond_a_t1_nearer_than_the_costs() {
+    for d in BOTH {
+        // T1 is 5 bps from the fill, less than break-even after 14 bps of costs.
+        let mut r = shadow_setup(d, &[101.05, 106.0], "1h", 1);
+        shadow_walk(&mut r, &[bar(1, 101.0, 101.06, 100.95, 101.0)]);
+        let fill = r.fill.unwrap().price;
+        assert!(d.sign() * (r.break_even(fill) - px(d, 101.05)) > 0.0);
+        let v1 = &shadows(&r).v1_half_t1_be;
+        assert_eq!(v1.stop, px(d, 101.05), "{d:?}: capped at T1");
+        shadow_walk_on(&mut r, &[bar(2, 101.06, 101.07, 101.0, 101.02)]);
+        let v1 = &shadows(&r).v1_half_t1_be;
+        assert_eq!(v1.status, ShadowStatus::Breakeven);
+        assert_eq!(v1.exits[1].price, px(d, 101.05));
+        // Both halves out at T1: a little under 0 R after costs.
+        assert_eq!(v1.result_r, Some(r.score(fill, px(d, 101.05))));
+        assert!(v1.result_r.unwrap() < 0.0);
+    }
+}
+
+#[test]
 fn v2_wins_at_t1_after_moving_its_stop() {
     for d in BOTH {
         let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);

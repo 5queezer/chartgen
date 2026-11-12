@@ -243,9 +243,10 @@ pub enum ShadowStatus {
     Open,
     /// Out at its last target: T2 for v1, T1 for v2 and v3.
     Won,
-    /// Out at the setup's invalidation.
+    /// Out at or through the setup's invalidation, a moved stop or not.
     Stopped,
-    /// Out at a stop moved to break-even after costs.
+    /// Out at a moved stop, short of the invalidation: near 0 R, a little under after a
+    /// gap or where v1's stop is T1.
     Breakeven,
     /// Out at the close the time stop judged.
     TimedOut,
@@ -1401,7 +1402,9 @@ impl Record {
                     true => bar.open,
                     false => s.stop,
                 };
-                let status = match s.stop == self.levels.invalidation {
+                // Named by where it got out: at or through the invalidation is stopped,
+                // even past a moved stop; short of it, the moved stop was hit.
+                let status = match sign * (exit - self.levels.invalidation) <= 0.0 {
                     true => ShadowStatus::Stopped,
                     false => ShadowStatus::Breakeven,
                 };
@@ -1416,7 +1419,12 @@ impl Record {
                             fraction: SHADOW_PARTIAL_AT_T1,
                             bar_time: bar.time,
                         });
-                        s.stop = be;
+                        // Never beyond T1: where T1 is nearer the fill than the costs,
+                        // break-even would be a stop on the far side of the market.
+                        s.stop = match sign * (be - t1) > 0.0 {
+                            true => t1,
+                            false => be,
+                        };
                     }
                     // T2 may come in the bar that took T1: price passed T1 to reach it.
                     if !s.exits.is_empty() && t2.is_some_and(reached) {

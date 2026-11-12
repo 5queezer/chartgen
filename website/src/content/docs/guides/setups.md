@@ -125,7 +125,7 @@ on the same 1m bars, under `shadow_results`
 
 | Variant | Rule |
 |---|---|
-| `v1_half_t1_be` | Half out at T1. The other half runs to T2 with its stop moved to break-even after costs. With one target it runs until that stop or the expiry. |
+| `v1_half_t1_be` | Half out at T1. The other half runs to T2 with its stop moved to break-even after costs, or to T1 where T1 is nearer the fill than that. With one target it runs until that stop or the expiry. |
 | `v2_be_at_1r` | All out at T1. Once price has gone +1R from the fill, the stop moves to break-even after costs. |
 | `v3_time_stop` | The setup as it is, but if T1 and the stop have not been reached by the close of the 12th bar of its interval after the fill bar (the 6th for 4h and longer), out at that close when it is below +0.5R. |
 
@@ -146,9 +146,10 @@ on the same 1m bars, under `shadow_results`
 
 Each variant has:
 
-- `status`: `open`, `won` (its last target), `stopped` (the invalidation), `breakeven` (the
-  moved stop; slightly below 0 R if the price gapped through it), `timed_out`, `expired` or
-  `cancelled`.
+- `status`: `open`, `won` (its last target), `stopped` (out at or through the invalidation, also
+  when a gap went past a moved stop to it), `breakeven` (the moved stop was hit; its result is
+  near 0 R, a little under after a gap through the stop or when v1's stop is T1 because T1 is
+  nearer the fill than the costs), `timed_out`, `expired` or `cancelled`.
 - `result_r`: each part's R net of its own costs, weighted by its share. Null while open.
 - `stop`: the stop in force from the next bar on.
 - `exits`: each part closed, `{price, fraction, bar_time}`; v1 has two once both halves are out.

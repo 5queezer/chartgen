@@ -55,7 +55,8 @@ setup's assumed costs on both sides: `fill × (1 + s·c/2) / (1 − s·c/2)`, wi
 cost as a fraction (14 bps) and `s` +1 for a long, −1 for a short.
 
 - **`v1_half_t1_be`.** Half out at T1. From the next bar on, the other half's stop is break-even
-  after costs. That half runs to T2, or with one target only to that stop or the expiry. T2 may be
+  after costs, or T1 where T1 is nearer the fill than that: T1 only has to lie beyond the entry
+  zone, and a stop beyond T1 would sit on the far side of the market. That half runs to T2, or with one target only to that stop or the expiry. T2 may be
   reached in the bar that took T1, since the price passed T1 to get there. `result_r` is
   `0.5 · R(T1) + 0.5 · R(second exit)`, each part net of its own costs.
 - **`v2_be_at_1r`.** All out at T1, no partial. Once a bar after the fill bar reaches +1R (its high
@@ -70,8 +71,13 @@ cost as a fraction (14 bps) and `s` +1 for a long, −1 for a short.
   and from then on it is the canonical setup. `time_stop_at` holds the judged close time until
   then and is null after.
 
-A variant's status is one of `open`, `won` (its last target), `stopped` (the invalidation),
-`breakeven` (a stop moved to break-even), `timed_out`, `expired` and `cancelled`. `stop` is the
+A variant's status is one of `open`, `won` (its last target), `stopped`, `breakeven`, `timed_out`,
+`expired` and `cancelled`. A stop exit is named by where it got out, not by which stop was in
+force: `stopped` when the exit is at or through the invalidation, even after the stop had moved (a
+gap through both); `breakeven` when the moved stop was hit short of it. So `breakeven` means "the
+moved stop was hit", and its result is near 0 R but not always exactly 0: a gap through the moved
+stop exits at the open, below it, and a v1 stop capped at T1 exits at T1, a little under 0 R
+after costs. `stop` is the
 stop in force from the next bar; `exits` lists each part with its price, fraction and 1m bar.
 
 ### The ambiguity rules
@@ -136,8 +142,9 @@ the last shadow closes, the setup stops scoring and its feed is let go at the ne
 ### Testing
 
 `src/setups/tests.rs` walks each variant on a long and on its mirrored short: v1 with T2, v1 stopped
-at break-even from the bar after T1, v1 with one target to the expiry, v2 moving its stop at +1R and
-stopped at break-even, v2 winning, v3 timing out at its 12th 1h bar and its 6th 4h bar, v3 kept at
+at break-even from the bar after T1, v1 with one target to the expiry, v1's moved stop capped at a T1
+nearer than the costs, v2 moving its stop at +1R and stopped at break-even, a gap past v2's moved
+stop through the invalidation named `stopped`, v2 winning, v3 timing out at its 12th 1h bar and its 6th 4h bar, v3 kept at
 +0.5R and judged once, the fill-bar rule, a stop and a target in one bar, gaps through the
 invalidation and through a moved stop, a cancel, an unscored expiry, and a record from before. A
 service test in `src/setup_service/tests.rs` keeps v1's other half scored after the setup won,

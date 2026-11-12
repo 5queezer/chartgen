@@ -867,7 +867,9 @@ export const SetupShadowSchema = z
     // when it expired while nobody scored it.
     result_r: z.number().nullable(),
     // The stop in force from the next bar on: the invalidation, or break-even after
-    // costs once v1 took T1 or v2 reached +1R.
+    // costs once v1 took T1 (T1 where that is nearer) or v2 reached +1R. A stop exit at
+    // or through the invalidation is "stopped"; one at a moved stop short of it is
+    // "breakeven", near 0 R.
     stop: z.number(),
     // Each part closed: price, share of the position, 1m bar open time (ms).
     exits: z.array(
