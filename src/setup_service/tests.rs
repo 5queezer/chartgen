@@ -1663,7 +1663,7 @@ async fn setup_answers_match_the_file_the_web_types_are_tested_against() {
             "create_setup",
             json!({
                 "symbol": "BTCUSDT", "interval": "15m", "direction": "long",
-                "thesis": "example thesis",
+                "thesis": "example thesis", "tags": ["strategy:example"],
                 "entry": { "low": p * 0.997, "high": p * 0.999 }, "invalidation": p * 0.99,
                 "targets": [p * 1.008, p * 1.02], "expires_at": at(600), "as_of": at(0),
                 "drawings": [{ "tool": "horizontalStraightLine",
@@ -1777,5 +1777,99 @@ async fn an_alert_cannot_name_a_setup_that_is_closed() {
     assert_eq!(
         alert("update_server_alert", moved),
         (true, "That setup is closed".to_string())
+    );
+}
+
+#[tokio::test]
+async fn list_setups_keeps_those_with_every_tag_asked_for() {
+    let s = live();
+    let tagged = |tags: Value| {
+        let mut args = long();
+        args["tags"] = tags;
+        call(&s, "create_setup", args, "owner").unwrap()
+    };
+    let both = tagged(json!(["strategy:retest-short", "pattern:double-top-ee"]));
+    let one = tagged(json!(["strategy:retest-short"]));
+    let none = tagged(json!([]));
+    assert_eq!(none["tags"], json!([]));
+    // In any order: two setups made in the same millisecond sort by their random ids.
+    let ids = |args: Value| -> HashSet<String> {
+        let list = call(&s, "list_setups", args, "owner").unwrap();
+        list["setups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(id_of)
+            .collect()
+    };
+    assert_eq!(
+        ids(json!({ "tags": ["strategy:retest-short"] })),
+        HashSet::from([id_of(&one), id_of(&both)])
+    );
+    assert_eq!(
+        ids(json!({ "tags": ["pattern:double-top-ee", "strategy:retest-short"] })),
+        HashSet::from([id_of(&both)])
+    );
+    assert_eq!(ids(json!({ "tags": [] })).len(), 3);
+    assert!(ids(json!({ "tags": ["strategy:other"] })).is_empty());
+    let refused = call(&s, "list_setups", json!({ "tags": ["Bad Tag"] }), "owner").unwrap_err();
+    assert_eq!(errors(&refused), ["tags[0]"]);
+
+    // Tags change after the fill too, and the change is in the log.
+    let (t, p) = (first_bar(&one), mid(&one));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    let filled = call(&s, "get_setup", json!({ "id": one["id"] }), "owner").unwrap();
+    assert_eq!(filled["status"], "triggered");
+    assert_eq!(filled["mfe_r"], 0.0);
+    assert_eq!(filled["bars_to_exit"], 0);
+    let args = json!({ "id": one["id"], "reason": "reviewed", "tags": ["review:late-entry"] });
+    let revised = call(&s, "revise_setup", args, "owner").unwrap();
+    assert_eq!(revised["tags"], json!(["review:late-entry"]));
+    assert_eq!(
+        revised["log"].as_array().unwrap().last().unwrap()["changes"]["tags"],
+        json!({ "from": ["strategy:retest-short"], "to": ["review:late-entry"] })
+    );
+    let bad = json!({ "id": one["id"], "reason": "r", "tags": ["x".repeat(65)] });
+    assert_eq!(
+        errors(&call(&s, "revise_setup", bad, "owner").unwrap_err()),
+        ["tags[0]"]
+    );
+}
+
+/// A row stored before tags and excursions existed loads with none, and is listed.
+#[tokio::test]
+async fn a_row_from_before_tags_and_excursions_loads() {
+    let (store, dir) = store_at("old-rows");
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let new = created(&s, "owner");
+    let mut old: Value = serde_json::from_str(&store.setups().unwrap()[0].0).unwrap();
+    for field in ["tags", "mae_r", "mfe_r", "bars_to_exit"] {
+        old.as_object_mut().unwrap().remove(field);
+    }
+    old["id"] = json!("old");
+    let row = StoredSetup {
+        id: "old".into(),
+        owner: "owner".into(),
+        record: old.to_string(),
+        revisions: vec![],
+    };
+    store.save_setups(&[row]).unwrap();
+    drop(s);
+    let s = live_on(
+        reopen(&dir.db()),
+        hub(),
+        Access::parse(None),
+        Limits::default(),
+        None,
+    );
+    let got = call(&s, "get_setup", json!({ "id": "old" }), "owner").unwrap();
+    assert_eq!(got["tags"], json!([]));
+    assert_eq!(got["mae_r"], Value::Null);
+    assert_eq!(got["bars_to_exit"], Value::Null);
+    let list = call(&s, "list_setups", json!({}), "owner").unwrap();
+    assert_eq!(list["total"], 2);
+    assert_eq!(
+        call(&s, "get_setup", json!({ "id": new["id"] }), "owner").unwrap()["tags"],
+        json!([])
     );
 }

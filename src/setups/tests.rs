@@ -402,7 +402,9 @@ fn a_skip_keeps_its_bracket_and_runs_to_its_end() {
     let mut r = skip("long");
     assert!(r.cancel("changed my mind".into(), T0).is_err());
     let levels = Some(r.levels.clone());
-    assert!(r.revise(None, None, levels, "tighter".into(), T0).is_err());
+    assert!(r
+        .revise(None, None, None, levels, "tighter".into(), T0)
+        .is_err());
     assert_eq!(r.revisions, 1);
 }
 
@@ -482,6 +484,7 @@ fn a_revise_inside_a_filling_bar_does_not_undo_the_fill() {
     r.revise(
         None,
         None,
+        None,
         Some(revised_levels(95.0)),
         "more room".into(),
         T0 + 20_000,
@@ -496,6 +499,7 @@ fn a_revise_inside_a_filling_bar_does_not_undo_the_fill() {
     let mut filled = create(long_args());
     filled
         .revise(
+            None,
             None,
             None,
             Some(revised_levels(95.0)),
@@ -513,6 +517,7 @@ fn a_revise_inside_a_filling_bar_does_not_undo_the_fill() {
 fn a_revise_counts_from_the_next_bar() {
     let mut r = create(long_args());
     r.revise(
+        None,
         None,
         None,
         Some(revised_levels(97.0)),
@@ -535,6 +540,7 @@ fn revise_after_trigger_changes_thesis_and_drawings_only() {
         .revise(
             None,
             None,
+            None,
             Some(revised_levels(95.0)),
             "more room".into(),
             T0 + MIN,
@@ -544,6 +550,7 @@ fn revise_after_trigger_changes_thesis_and_drawings_only() {
     let revision = r
         .revise(
             Some("updated thesis".into()),
+            None,
             None,
             None,
             "new information".into(),
@@ -561,9 +568,18 @@ fn revise_after_trigger_changes_thesis_and_drawings_only() {
 fn a_revision_must_change_something_and_be_valid() {
     let mut r = create(long_args());
     let same = Some(r.levels.clone());
-    assert!(r.revise(None, None, same, "no change".into(), T0).is_err());
+    assert!(r
+        .revise(None, None, None, same, "no change".into(), T0)
+        .is_err());
     let bad = r
-        .revise(None, None, Some(revised_levels(100.5)), "closer".into(), T0)
+        .revise(
+            None,
+            None,
+            None,
+            Some(revised_levels(100.5)),
+            "closer".into(),
+            T0,
+        )
         .unwrap_err();
     assert_eq!(fields(&bad), ["invalidation"]);
     assert_eq!(r.revisions, 1);
@@ -574,8 +590,15 @@ fn the_log_numbers_every_entry_in_order() {
     let mut r = create(long_args());
     let mut log = vec![];
     log.push(
-        r.revise(Some("second".into()), None, None, "why".into(), T0 + 1)
-            .unwrap(),
+        r.revise(
+            Some("second".into()),
+            None,
+            None,
+            None,
+            "why".into(),
+            T0 + 1,
+        )
+        .unwrap(),
     );
     log.extend(r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6)));
     log.push(r.cancel("done".into(), T0 + MIN + 1).unwrap());
@@ -598,7 +621,14 @@ fn a_closed_setup_takes_no_change_and_no_bar() {
     assert_eq!(r.status, Status::Invalidated);
     assert!(r.cancel("late".into(), T0 + MIN).is_err());
     assert!(r
-        .revise(Some("late".into()), None, None, "late".into(), T0 + MIN)
+        .revise(
+            Some("late".into()),
+            None,
+            None,
+            None,
+            "late".into(),
+            T0 + MIN
+        )
         .is_err());
     assert!(r.apply_bar(&bar(1, 100.5, 104.5, 100.2, 104.0)).is_empty());
 }
@@ -894,4 +924,187 @@ fn a_message_shows_numbers_as_a_person_would_write_them() {
         !text.contains("000000") && !text.contains("999999"),
         "{text}"
     );
+}
+
+#[test]
+fn excursions_of_a_long_are_read_from_the_fill_to_the_exit() {
+    let mut r = create(long_args());
+    walk(
+        &mut r,
+        &[
+            bar(0, 103.0, 103.5, 102.0, 102.5),
+            // Filled at 101, risk 3. Its high is not counted: the fill bar cannot win.
+            bar(1, 102.5, 102.6, 100.8, 101.2),
+        ],
+    );
+    assert_eq!(r.status, Status::Triggered);
+    assert_eq!(
+        (r.mae_r, r.mfe_r, r.bars_to_exit),
+        (Some(-0.0667), Some(0.0), Some(0))
+    );
+    walk(
+        &mut r,
+        &[
+            bar(2, 101.2, 103.0, 99.5, 102.9),
+            // Won at 104: what traded beyond it is not counted.
+            bar(3, 102.9, 104.6, 102.8, 104.0),
+        ],
+    );
+    assert_eq!(r.status, Status::Won);
+    assert_eq!(
+        (r.mae_r, r.mfe_r, r.bars_to_exit),
+        (Some(-0.5), Some(1.0), Some(2))
+    );
+    // Before costs, unlike the result.
+    assert!(r.result_r.unwrap() < 1.0);
+
+    // Filled and stopped in one bar: out at the stop, whatever the wick did.
+    let mut stopped = create(long_args());
+    stopped.apply_bar(&bar(0, 102.0, 102.1, 97.5, 97.8));
+    assert_eq!(
+        (stopped.mae_r, stopped.mfe_r, stopped.bars_to_exit),
+        (Some(-1.0), Some(0.0), Some(0))
+    );
+}
+
+#[test]
+fn excursions_of_a_short_count_highs_against_it_and_stop_at_the_exit() {
+    let mut r = create(short_args());
+    walk(
+        &mut r,
+        &[
+            // Filled at 100, risk 3.
+            bar(0, 99.0, 100.4, 98.9, 100.2),
+            bar(1, 100.2, 100.5, 98.0, 98.4),
+        ],
+    );
+    assert_eq!(
+        (r.mae_r, r.mfe_r, r.bars_to_exit),
+        (Some(-0.1667), Some(0.6667), Some(1))
+    );
+    // Stopped at 103: the stop counts first, so of this bar its open went with the
+    // position, not its low.
+    r.apply_bar(&bar(2, 98.4, 103.5, 97.0, 103.2));
+    assert_eq!(r.status, Status::Invalidated);
+    assert_eq!(
+        (r.mae_r, r.mfe_r, r.bars_to_exit),
+        (Some(-1.0), Some(0.6667), Some(2))
+    );
+
+    // A cancel closes at the next bar's open and counts that bar.
+    let mut cancelled = create(short_args());
+    cancelled.apply_bar(&bar(0, 99.0, 100.4, 98.9, 100.2));
+    cancelled.cancel("done".into(), T0 + MIN + 1).unwrap();
+    walk(
+        &mut cancelled,
+        &[
+            bar(1, 100.2, 100.3, 99.4, 99.5),
+            bar(2, 99.1, 99.2, 90.0, 91.0),
+        ],
+    );
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert_eq!(
+        (cancelled.mae_r, cancelled.mfe_r, cancelled.bars_to_exit),
+        (Some(-0.1333), Some(0.3), Some(2))
+    );
+}
+
+#[test]
+fn excursions_wait_for_the_fill() {
+    let mut r = create(long_args());
+    walk(&mut r, &[bar(0, 103.0, 110.0, 102.0, 102.5)]);
+    assert_eq!(r.status, Status::Watching);
+    assert_eq!((r.mae_r, r.mfe_r, r.bars_to_exit), (None, None, None));
+    let view = r.view();
+    assert_eq!(view["mae_r"], Value::Null);
+    assert_eq!(view["bars_to_exit"], Value::Null);
+    // Closed without a fill, it has none either.
+    r.apply_bar(&bar(1, 97.0, 97.5, 96.5, 97.2));
+    assert_eq!(r.status, Status::Invalidated);
+    assert_eq!((r.mae_r, r.mfe_r, r.bars_to_exit), (None, None, None));
+}
+
+#[test]
+fn a_record_written_before_tags_and_excursions_loads_without_them() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
+    let mut old = serde_json::to_value(&r).unwrap();
+    for field in ["tags", "mae_r", "mfe_r", "bars_to_exit"] {
+        old.as_object_mut().unwrap().remove(field);
+    }
+    let mut old: Record = serde_json::from_value(old).unwrap();
+    assert_eq!(old.tags, Vec::<String>::new());
+    assert_eq!((old.mae_r, old.mfe_r, old.bars_to_exit), (None, None, None));
+    // Filled before they were kept: none, rather than ones that miss its start.
+    old.apply_bar(&bar(1, 100.6, 103.0, 99.0, 102.0));
+    assert_eq!(old.status, Status::Triggered);
+    assert_eq!((old.mae_r, old.mfe_r, old.bars_to_exit), (None, None, None));
+}
+
+#[test]
+fn tags_are_checked_and_kept_once() {
+    let r = create(with(
+        long_args(),
+        "tags",
+        json!([
+            "strategy:retest-short",
+            "trigger:100eyes:abnormal-volatility",
+            "pattern:double-top-ee",
+            "strategy:retest-short"
+        ]),
+    ));
+    assert_eq!(
+        r.tags,
+        [
+            "strategy:retest-short",
+            "trigger:100eyes:abnormal-volatility",
+            "pattern:double-top-ee"
+        ]
+    );
+    assert_eq!(create(long_args()).tags, Vec::<String>::new());
+
+    let bad = json!([
+        "Strategy",
+        "has space",
+        ":lead",
+        "",
+        "x".repeat(MAX_TAG + 1),
+        5,
+        "ok/1.2_a"
+    ]);
+    let problems = problems_of(with(long_args(), "tags", bad));
+    assert_eq!(
+        fields(&problems),
+        ["tags[0]", "tags[1]", "tags[2]", "tags[3]", "tags[4]", "tags[5]"]
+    );
+    assert!(problems.iter().all(|p| p.hint.is_some()));
+    let many = json!((0..=MAX_TAGS).map(|i| format!("t{i}")).collect::<Vec<_>>());
+    assert_eq!(
+        fields(&problems_of(with(long_args(), "tags", many))),
+        ["tags"]
+    );
+    assert_eq!(
+        fields(&problems_of(with(long_args(), "tags", json!("a")))),
+        ["tags"]
+    );
+}
+
+#[test]
+fn tags_can_be_revised_after_the_fill_and_are_logged() {
+    let mut r = create(with(long_args(), "tags", json!(["a"])));
+    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
+    assert_eq!(r.status, Status::Triggered);
+    let tags = Some(vec!["a".to_string(), "review:late-entry".to_string()]);
+    let revision = r
+        .revise(None, None, tags, None, "tagged".into(), T0 + MIN)
+        .unwrap();
+    assert_eq!(r.tags, ["a", "review:late-entry"]);
+    assert_eq!(
+        revision.changes["tags"],
+        json!({ "from": ["a"], "to": ["a", "review:late-entry"] })
+    );
+    let same = Some(r.tags.clone());
+    assert!(r
+        .revise(None, None, same, None, "again".into(), T0 + MIN)
+        .is_err());
 }
