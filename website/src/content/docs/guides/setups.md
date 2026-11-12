@@ -192,7 +192,9 @@ A fixture is one JSON file per symbol, of 1m bars in order:
 ```
 
 Each bar is `[open time in unix seconds, open, high, low, close, volume]`. The files in
-`tests/fixtures/replay/` are synthetic.
+`tests/fixtures/replay/` are synthetic. `chartgen replay-fixtures` writes fixtures from real
+Binance history; see [Replay over real history](/chartgen/guides/replay/), which also shows how to
+keep a replay server private.
 
 - **Every call needs `as_of`**: unix seconds, unix ms or an ISO 8601 time. It is taken by the
   five setup tools and by `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes`.

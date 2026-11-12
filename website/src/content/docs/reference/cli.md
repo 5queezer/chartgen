@@ -19,6 +19,28 @@ description: Command-line flags for chartgen.
 |  | `--trade` | flag | off | Start the trading engine: live WebSocket feed, indicator state manager, order tracker, alert engine, and the same HTTP + OAuth server as `--serve`. Exposes the 12 trading MCP tools on top of the charting tools. Mutually exclusive with `--serve`. See the [trading guide](/chartgen/guides/trading/). |
 |  | `--testnet` | flag | off | Meant to route `--trade` orders to Binance testnet. Currently a no-op — see the caution in the [trading guide](/chartgen/guides/trading/). |
 
+## `replay-fixtures`
+
+`chartgen replay-fixtures` writes [replay](/chartgen/guides/setups/#replay) fixtures from real
+Binance 1m history and exits. The guide is [Replay over real history](/chartgen/guides/replay/).
+
+```bash
+chartgen replay-fixtures --symbols BTCUSDT,ETHUSDT \
+  --from 2026-08-01 --to 2026-10-31 --out fixtures/2026-q3 [--shift-days 14]
+```
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--symbols` | string, comma-separated | Binance spot symbols. Required. |
+| `--from` | date `YYYY-MM-DD` | First day of the window, UTC. Required. |
+| `--to` | date `YYYY-MM-DD` | Last day, UTC, included; it must have ended. Required. |
+| `--out` | path | Directory for one `<SYMBOL>.json` per symbol. Required. |
+| `--shift-days` | integer | Move every timestamp by this many days. Default `0`. |
+
+A run writes at most 460 symbol-days (5 symbols over 92 days), the memory a replay server can
+spare. A rerun keeps the symbols already written for the same window. It exits with status 1
+on any error.
+
 ## Operating modes
 
 `chartgen` has four modes, picked by the **first** matching flag in this

@@ -35,6 +35,7 @@ export default defineConfig({
             { label: 'Push notifications', slug: 'guides/notifications' },
             { label: 'Scripted indicators', slug: 'guides/scripted-indicators' },
             { label: 'Setups', slug: 'guides/setups' },
+            { label: 'Replay over real history', slug: 'guides/replay' },
             { label: 'Web frontend', slug: 'guides/web' },
             { label: 'TradingView parity', slug: 'guides/tradingview-parity' },
             { label: 'Testing', slug: 'guides/testing' },
