@@ -1088,6 +1088,50 @@ pub(crate) fn binance() -> &'static BinanceClient {
     })
 }
 
+/// Up to 1000 1m klines of `symbol` that open from `start_ms` to `last_ms`, both
+/// included, oldest first: one forward page of a replay fixture (ADR-0068). Through the
+/// spot gate, and past the caches, which would only hold each page for nothing.
+pub(crate) fn fetch_binance_minutes(
+    symbol: &str,
+    start_ms: i64,
+    last_ms: i64,
+) -> Result<Vec<Bar>, String> {
+    let url = format!(
+        "https://api.binance.com/api/v3/klines?symbol={}&interval=1m&startTime={start_ms}&endTime={last_ms}&limit={BINANCE_MAX_LIMIT}",
+        percent_encode(&symbol.to_uppercase())
+    );
+    Ok(fetch_binance_page(binance(), &url)?
+        .into_iter()
+        .map(|k| k.bar)
+        .collect())
+}
+
+/// Put a pretend exchange behind `binance()` on this thread: `answer(url)` is the status
+/// and body of each request.
+#[cfg(test)]
+pub(crate) fn pretend_binance(answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) {
+    let client = Box::leak(Box::new(BinanceClient {
+        gate: Box::leak(Box::new(Gate::new(6_000))),
+        walks: Walks::default(),
+        klines: KlineCache::default(),
+        pages: PageCache::default(),
+        now: Box::new(|| Now {
+            mono: Instant::now(),
+            wall_ms: now_ms(),
+        }),
+        send: Box::new(move |url| {
+            let (status, body) = answer(url);
+            Ok(BinanceResponse {
+                status,
+                retry_after: None,
+                used_weight: None,
+                body,
+            })
+        }),
+    }));
+    TEST_CLIENT.set(Some(client));
+}
+
 fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Kline>, String> {
     let resp = client.get(url)?;
 

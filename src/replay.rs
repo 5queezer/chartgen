@@ -366,6 +366,38 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_of_hours_leaves_out_whole_buckets_and_shortens_the_rest() {
+        // No minutes from 00:30 to 03:20 (T0 is on the 4h grid): real history has
+        // gaps like it, and a fixture builder does not fill them (ADR-0068).
+        let mut bars = minutes(600, 0.0);
+        bars.drain(30..200);
+        let r = Replay::of(BTreeMap::from([("BTCUSDT".to_string(), bars)]));
+        let as_of = (T0 + 6 * 3600) * 1000;
+        let (hours, _) = r.bars("BTCUSDT", "1h", 10, as_of, None).unwrap();
+        // Hours 1 and 2 had no minute, so there is no bar for them, as on Binance.
+        let starts: Vec<i64> = hours.iter().map(|b| open_ms(b) / 1000 - T0).collect();
+        assert_eq!(starts, [0, 3 * 3600, 4 * 3600, 5 * 3600]);
+        // An hour with a gap is built from the minutes it has, on its grid start.
+        assert_eq!((hours[0].close, hours[0].volume), (129.0, 30.0));
+        assert_eq!((hours[1].open, hours[1].volume), (299.5, 40.0));
+        // The 4h bar over the gap: the minutes before and after it.
+        let (four, _) = r.bars("BTCUSDT", "4h", 10, as_of, None).unwrap();
+        assert_eq!(four.len(), 1, "the second 4h bar has not closed");
+        assert_eq!(four[0].date, T0.to_string());
+        assert_eq!(
+            (four[0].open, four[0].high, four[0].low, four[0].close),
+            (99.5, 340.0, 99.0, 339.0)
+        );
+        assert_eq!(four[0].volume, 70.0);
+        // In the gap, the cut is still by time: the hour that held the last minute is
+        // whole once its end has passed, and nothing later is there yet.
+        let (early, _) = r
+            .bars("BTCUSDT", "1h", 10, (T0 + 9000) * 1000, None)
+            .unwrap();
+        assert_eq!(early.len(), 1);
+    }
+
+    #[test]
     fn end_time_and_limit_page_within_the_cut() {
         let r = replay(300);
         let as_of = (T0 + 600) * 1000;
