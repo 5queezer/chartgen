@@ -1625,6 +1625,17 @@ fn a_stop_and_a_target_in_one_bar_and_a_gap_are_read_as_the_setup_reads_them() {
             assert_eq!(s.result_r, r.result_r);
         }
 
+        // A bar that opens past T1 and reaches the stop: the stop too, as the setup
+        // reads it (ADR-0066 leaves changing that open).
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        shadow_walk(&mut r, &[bar(1, 105.5, 106.0, 97.5, 98.5)]);
+        assert_eq!(r.status, Status::Invalidated);
+        for s in all(&r) {
+            assert_eq!(s.status, ShadowStatus::Stopped);
+            assert_eq!((s.exits.len(), s.exits[0].price), (1, px(d, 98.0)));
+            assert_eq!(s.result_r, r.result_r);
+        }
+
         // A gap through the setup's stop: out at the open.
         let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
         shadow_walk(&mut r, &[bar(1, 96.0, 96.5, 95.0, 96.2)]);

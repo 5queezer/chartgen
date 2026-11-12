@@ -111,6 +111,16 @@ the last shadow closes, the setup stops scoring and its feed is let go at the ne
   shadows were being scored, goes to the log only: the setup's own result covers all of its bars,
   and `gap` keeps saying that.
 
+### Open questions
+
+- **A stop bar that opens past T1.** The canonical scorer reads the stop first on any bar that
+  reaches it, even one that opened beyond T1, where a resting target order would have filled at
+  the open: the setup is a loss, and since
+  [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)'s review fix nothing past T1 counts
+  for its excursion either. The variants do the same: such a bar stops every open variant, and v1
+  takes no half at T1 in it. Whether a bar opening past a target should count the target first is
+  a change to the canonical rule, for a decision of its own; the variants would follow it.
+
 ### Consequences
 
 - Good, because after a handful of setups the agent has, per setup, what each exit would have done
