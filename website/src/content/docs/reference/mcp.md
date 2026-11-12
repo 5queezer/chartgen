@@ -1272,8 +1272,11 @@ and compares:
   `adx`. An EMA or SMA of a length is `ma` with `type` and `length` (`ema` is the fixed
   8/21/50/200 stack). Your own scripts and indicators that fetch other data (funding, open
   interest) are refused.
-- `params`: as [`list_indicators`](#list_indicators) gives them. The indicator must settle within
-  the 1000 bars the server keeps: EMA 200 and RSI up to about 120 do. `offset` is refused.
+- `params`: as [`list_indicators`](#list_indicators) gives them. A name the indicator does not
+  take is refused. The alert keeps every param it takes, with the defaults filled in, and shows
+  and sends them so. The indicator must settle within the 999 closed bars the server reads: EMA
+  200 and RSI up to about 120 do. `stoch`, `cci`, `mfi`, `williams_r` and `roc` take at most 200
+  for each param. `offset` is refused.
 - `line`: the line's legend label, any case, e.g. `Signal` of `macd` or `%D` of `stoch`. Default:
   the first line.
 - `evaluate_on` must be `close`, and `interval` 1h or longer.
@@ -1284,7 +1287,8 @@ and compares:
   alert fired on does not fire again after a restart.
 - When the alert is created, or after a restart, the server reads the symbol's last 1000 bars
   once, through the same Binance budget as a chart; `feed` is `waiting` until it has them. If
-  a close goes missing (a reconnect, a lag) it reads them again and then reads that close.
+  a close goes missing (a reconnect, a lag) it reads them again and then reads that close, at
+  most once a minute per symbol and interval.
 - The alert in a list has `"indicator": {"name", "params", "line", "compare", "value"}`, where
   `value` is the line at the last close read, or `null` before the first.
 - `update_server_alert` changes its `condition`, `level` and `trigger` like a price alert's.

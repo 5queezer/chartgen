@@ -1,6 +1,6 @@
 ---
 title: "0067 — Server alerts on an indicator's line, at bar closes"
-description: "A server alert can watch a built-in indicator's line instead of the price, at the closes of bars of 1h or longer: the line against a level, or the close against the line. Each watched pair keeps its last 1000 closed bars, read once over REST and kept up from the feed. Ten line indicators are allowed; scripts and indicators that fetch other data are not."
+description: "A server alert can watch a built-in indicator's line instead of the price, at the closes of bars of 1h or longer: the line against a level, or the close against the line. Each watched pair keeps its last 999 closed bars, read once over REST and kept up from the feed. Ten line indicators are allowed, with their params checked by name and stored whole; scripts and indicators that fetch other data are not."
 sidebar:
   order: 67
 ---
@@ -87,8 +87,13 @@ Chosen: **3**, **a** and **ii**, in `src/server_alerts/indicator.rs` and `src/se
 - `indicator` is one of `rsi`, `ma`, `macd`, `stoch`, `cci`, `mfi`, `williams_r`, `roc`, `atr`,
   `adx`: built-ins with lines, computed from the bars alone, about linear in them. An EMA of a
   length is `ma` with `type: "ema"`; the registry's `ema` is the fixed 8/21/50/200 stack.
-- `params` are checked as a chart checks them. `offset` is refused: the alert reads the line at
-  the bar that closed.
+- `params` are checked as a chart checks them, and **by name**: a key the indicator does not
+  take is refused (`rsi has no parameter lenght; it takes length`) rather than ignored. The
+  alert stores every param the indicator takes, with the defaults filled in, so the stored row,
+  the list and every webhook say exactly what is computed. `offset` is refused: the alert reads
+  the line at the bar that closed.
+- `stoch`, `cci`, `mfi`, `williams_r` and `roc` take **at most 200** for each param on a server
+  alert. They rescan a window at every bar, so they cost bars times period (see the cost below).
 - `line` is a legend label, any case, defaulting to the first line. It is resolved when the alert
   is made, so a stored alert names a line that exists.
 - `evaluate_on` must be `close` and the interval 1h or longer. A close of 1h is the finest Hermes
@@ -106,10 +111,19 @@ general case (one indicator against another) was not asked for.
 
 When an indicator alert runs on a pair, the server reads that pair's last 1000 bars once,
 through the path a chart seeds with (`ChartHub::seed_bars`), so through the Binance gate. It keeps
-the closed ones; the forming bar is not a close. Each close the feed sends is then added, and
-the window stays at 1000. **1000 is one Binance page**, and enough for EMA 200 (891 bars to
-settle) and RSI up to about 120: an indicator whose `warmup_bars` with its params needs more is
-refused when the alert is made.
+the closed ones, usually 999: the forming bar is not a close. Each close the feed sends is then
+added, and the window stays at most 1000. **1000 is one Binance page**, and 999 closed bars are
+enough for EMA 200 (891 bars to settle) and RSI up to about 120. An indicator whose
+`warmup_bars` with its params, plus the two closes a crossing reads, is more than 999 is refused
+when the alert is made.
+
+That bound is only as good as `warmup_bars`. `stoch`, `cci`, `mfi`, `williams_r` and `roc` used
+to declare 0, so any period passed and a large one read nothing, forever. They now declare what
+their first value reads: the period, and for `stoch` period + %K smoothing + %D smoothing - 2.
+A test reads every allowed indicator at the largest params an alert accepts on a 999-bar window,
+so an indicator that under-declares again fails it. Charts read these needs too: a series asked
+with a non-zero `warmup` below them is raised to them (ADR-0032), which only fills their first
+values; the web chart and images already read more.
 
 - **Read again, not patched.** A close that does not follow the last bar of the window, or a
   feed that lagged, drops the window and reads it again. The close that showed the gap waits
@@ -117,6 +131,9 @@ refused when the alert is made.
   are read are added after them.
 - A refused or failed read is tried again by the upkeep, each minute, and the alert's `feed`
   reads `waiting` meanwhile.
+- **At most one read a minute per pair after a gap or a lag.** A feed that keeps dropping closes
+  waits out the minute since the last such read that succeeded, then the upkeep reads it, so
+  within two minutes. The first read of a pair does not count.
 - A pair whose last indicator alert goes keeps no window.
 - These reads are the only new REST traffic: one per pair when its first indicator alert
   starts, after a restart, and after a gap or a lag.
@@ -164,14 +181,26 @@ of 25 as a price of 25. Price alerts are stored as before.
 
 - **Memory.** A window is 1000 bars of about 100 bytes: 100 KB per pair, at most 1.6 MB with the
   16 pairs the server watches, and nothing for pairs with no indicator alert.
-- **CPU.** Per alert and per close, one computation over at most 1000 bars and a copy of them:
-  tens of microseconds for RSI or an EMA. The worst the limits allow, 200 alerts on one 1h pair,
-  is a few milliseconds once an hour, under the alerts' lock. Nothing runs on ticks.
+- **CPU.** Per alert and per close, one computation over the window and a copy of it, under
+  the alerts' lock. Nothing runs on ticks. Measured on x86 (release build, 999 bars, one read):
+
+  | Indicator, params | Per close |
+  |---|---|
+  | `rsi` 14 or 126, `ma` ema 200 or sma 997, `macd`, `atr`, `mfi` 200, `roc` 200 | 40-70 µs |
+  | `adx` 14 | 93 µs |
+  | `cci` 200 | 0.3 ms |
+  | `williams_r` 200, `stoch` 200/200/200 | 0.7 ms |
+
+  Most of the linear ones' time is the copy of the bars. The rescanning five grow with their
+  period, which is why they stop at 200. The worst the limits allow, 200 alerts of
+  `williams_r` 200 on one 1h pair, is about 0.14 s once an hour on x86; the radxa's ARM cores
+  are slower, by an unmeasured factor of a few. Typical alerts, RSI and EMAs,
+  cost 200 × 60 µs = 12 ms at that worst.
 - **Network.** One REST page per pair as above, through the gate that charts use.
 
 The limits of ADR-0042 are unchanged and count indicator alerts like any: 20 per client, 200
-live, 16 pairs and 2 per client, 10 changes a minute. The 1h minimum, the 1000-bar window and
-the allowlist are what bound the cost per alert.
+live, 16 pairs and 2 per client, 10 changes a minute. The 1h minimum, the 999-bar window, the
+cap of 200 on the rescanning five and the allowlist are what bound the cost per alert.
 
 ### What it does not do yet
 
