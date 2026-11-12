@@ -862,6 +862,30 @@ export const SetupSchema = SetupLevelsSchema.extend({
   pending: z.array(SetupPendingSchema),
   revisions: z.number().int(),
   agent_revisions: z.number().int(),
+  // The agent's labels, such as strategy:retest-short. Empty on setups stored before
+  // tags existed.
+  tags: z.array(z.string()),
+  // From the fill on, in R of the risk at the fill and before costs: the furthest price
+  // went against the position (0 or less) and with it (0 or more). The fill bar counts
+  // only against it; nothing beyond the exit counts. Null before a fill, and on a setup
+  // filled before the server kept them.
+  mae_r: z.number().nonpositive().nullable(),
+  mfe_r: z.number().nonnegative().nullable(),
+  // Open time (ms) of the 1m bar that set each extreme; null when its value is.
+  mae_at: z.number().nullable(),
+  mfe_at: z.number().nullable(),
+  // While watching, the least distance from a bar's high or low to the entry zone, in R
+  // of the risk from the zone's edge nearest the price to the invalidation; 0 once
+  // filled. Null before the first bar, and on setups stored before the server kept it.
+  closest_approach_r: z.number().nonnegative().nullable(),
+  // In bars of the setup's own interval, to two places; null before a fill.
+  // bars_to_exit runs to the newest scored bar while filled, and is null on a setup
+  // that expired filled while nobody scored it. bars_to_mae/mfe are null when
+  // mae_at/mfe_at are.
+  bars_to_fill: z.number().nonnegative().nullable(),
+  bars_to_exit: z.number().nonnegative().nullable(),
+  bars_to_mae: z.number().nonnegative().nullable(),
+  bars_to_mfe: z.number().nonnegative().nullable(),
 });
 export type Setup = z.infer<typeof SetupSchema>;
 

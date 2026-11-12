@@ -402,7 +402,9 @@ fn a_skip_keeps_its_bracket_and_runs_to_its_end() {
     let mut r = skip("long");
     assert!(r.cancel("changed my mind".into(), T0).is_err());
     let levels = Some(r.levels.clone());
-    assert!(r.revise(None, None, levels, "tighter".into(), T0).is_err());
+    assert!(r
+        .revise(None, None, None, levels, "tighter".into(), T0)
+        .is_err());
     assert_eq!(r.revisions, 1);
 }
 
@@ -482,6 +484,7 @@ fn a_revise_inside_a_filling_bar_does_not_undo_the_fill() {
     r.revise(
         None,
         None,
+        None,
         Some(revised_levels(95.0)),
         "more room".into(),
         T0 + 20_000,
@@ -496,6 +499,7 @@ fn a_revise_inside_a_filling_bar_does_not_undo_the_fill() {
     let mut filled = create(long_args());
     filled
         .revise(
+            None,
             None,
             None,
             Some(revised_levels(95.0)),
@@ -513,6 +517,7 @@ fn a_revise_inside_a_filling_bar_does_not_undo_the_fill() {
 fn a_revise_counts_from_the_next_bar() {
     let mut r = create(long_args());
     r.revise(
+        None,
         None,
         None,
         Some(revised_levels(97.0)),
@@ -535,6 +540,7 @@ fn revise_after_trigger_changes_thesis_and_drawings_only() {
         .revise(
             None,
             None,
+            None,
             Some(revised_levels(95.0)),
             "more room".into(),
             T0 + MIN,
@@ -544,6 +550,7 @@ fn revise_after_trigger_changes_thesis_and_drawings_only() {
     let revision = r
         .revise(
             Some("updated thesis".into()),
+            None,
             None,
             None,
             "new information".into(),
@@ -561,9 +568,18 @@ fn revise_after_trigger_changes_thesis_and_drawings_only() {
 fn a_revision_must_change_something_and_be_valid() {
     let mut r = create(long_args());
     let same = Some(r.levels.clone());
-    assert!(r.revise(None, None, same, "no change".into(), T0).is_err());
+    assert!(r
+        .revise(None, None, None, same, "no change".into(), T0)
+        .is_err());
     let bad = r
-        .revise(None, None, Some(revised_levels(100.5)), "closer".into(), T0)
+        .revise(
+            None,
+            None,
+            None,
+            Some(revised_levels(100.5)),
+            "closer".into(),
+            T0,
+        )
         .unwrap_err();
     assert_eq!(fields(&bad), ["invalidation"]);
     assert_eq!(r.revisions, 1);
@@ -574,8 +590,15 @@ fn the_log_numbers_every_entry_in_order() {
     let mut r = create(long_args());
     let mut log = vec![];
     log.push(
-        r.revise(Some("second".into()), None, None, "why".into(), T0 + 1)
-            .unwrap(),
+        r.revise(
+            Some("second".into()),
+            None,
+            None,
+            None,
+            "why".into(),
+            T0 + 1,
+        )
+        .unwrap(),
     );
     log.extend(r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6)));
     log.push(r.cancel("done".into(), T0 + MIN + 1).unwrap());
@@ -598,7 +621,14 @@ fn a_closed_setup_takes_no_change_and_no_bar() {
     assert_eq!(r.status, Status::Invalidated);
     assert!(r.cancel("late".into(), T0 + MIN).is_err());
     assert!(r
-        .revise(Some("late".into()), None, None, "late".into(), T0 + MIN)
+        .revise(
+            Some("late".into()),
+            None,
+            None,
+            None,
+            "late".into(),
+            T0 + MIN
+        )
         .is_err());
     assert!(r.apply_bar(&bar(1, 100.5, 104.5, 100.2, 104.0)).is_empty());
 }
@@ -894,4 +924,398 @@ fn a_message_shows_numbers_as_a_person_would_write_them() {
         !text.contains("000000") && !text.contains("999999"),
         "{text}"
     );
+}
+
+/// The excursions with the bars that set them, in minutes from T0.
+fn extremes(r: &Record) -> (Option<f64>, Option<i64>, Option<f64>, Option<i64>) {
+    let minute = |t: Option<i64>| t.map(|t| (t - T0) / MIN);
+    (r.mae_r, minute(r.mae_at), r.mfe_r, minute(r.mfe_at))
+}
+
+#[test]
+fn excursions_of_a_long_are_read_from_the_fill_to_the_exit() {
+    let mut r = create(long_args());
+    walk(
+        &mut r,
+        &[
+            bar(0, 103.0, 103.5, 102.0, 102.5),
+            // Filled at 101, risk 3. Its high is not counted: the fill bar cannot win.
+            bar(30, 102.5, 102.6, 100.8, 101.2),
+        ],
+    );
+    assert_eq!(r.status, Status::Triggered);
+    assert_eq!(extremes(&r), (Some(-0.0667), Some(30), Some(0.0), Some(30)));
+    r.apply_bar(&bar(90, 101.2, 103.0, 99.5, 102.9));
+    assert_eq!(extremes(&r), (Some(-0.5), Some(90), Some(0.6667), Some(90)));
+    // Filled, the durations so far, in bars of its 1h interval.
+    assert_eq!(
+        r.durations(),
+        Durations {
+            bars_to_fill: Some(0.5),
+            bars_to_exit: Some(1.0),
+            bars_to_mae: Some(1.0),
+            bars_to_mfe: Some(1.0),
+        }
+    );
+    // Won at 104: what traded beyond it is not counted.
+    r.apply_bar(&bar(150, 102.9, 104.6, 102.8, 104.0));
+    assert_eq!(r.status, Status::Won);
+    assert_eq!(extremes(&r), (Some(-0.5), Some(90), Some(1.0), Some(150)));
+    assert_eq!(
+        r.durations(),
+        Durations {
+            bars_to_fill: Some(0.5),
+            bars_to_exit: Some(2.0),
+            bars_to_mae: Some(1.0),
+            bars_to_mfe: Some(2.0),
+        }
+    );
+    // Before costs, unlike the result.
+    assert!(r.result_r.unwrap() < 1.0);
+    let view = r.view();
+    assert_eq!(view["bars_to_exit"], 2.0);
+    assert_eq!(view["mfe_at"], T0 + 150 * MIN);
+
+    // Filled and stopped in one bar: out at the stop, whatever the wick did.
+    let mut stopped = create(long_args());
+    stopped.apply_bar(&bar(0, 102.0, 102.1, 97.5, 97.8));
+    assert_eq!(
+        extremes(&stopped),
+        (Some(-1.0), Some(0), Some(0.0), Some(0))
+    );
+    assert_eq!(stopped.durations().bars_to_exit, Some(0.0));
+
+    // A bar that opens past the target was out at the open: its later low does not count.
+    let mut gapped = create(long_args());
+    walk(
+        &mut gapped,
+        &[
+            bar(0, 103.0, 103.5, 102.0, 102.5),
+            bar(30, 102.5, 102.6, 100.8, 101.2),
+        ],
+    );
+    gapped.apply_bar(&bar(90, 105.0, 105.5, 99.5, 100.0));
+    assert_eq!(gapped.status, Status::Won);
+    assert_eq!(
+        extremes(&gapped),
+        (Some(-0.0667), Some(30), Some(1.0), Some(90))
+    );
+}
+
+#[test]
+fn excursions_of_a_short_say_which_extreme_came_first() {
+    let mut r = create(short_args());
+    walk(
+        &mut r,
+        &[
+            // Filled at 100, risk 3.
+            bar(0, 99.0, 100.4, 98.9, 100.2),
+            bar(60, 100.2, 100.5, 98.0, 98.4),
+        ],
+    );
+    assert_eq!(
+        extremes(&r),
+        (Some(-0.1667), Some(60), Some(0.6667), Some(60))
+    );
+    // Stopped at 103: the stop counts first, so of this bar its open went with the
+    // position, not its low.
+    r.apply_bar(&bar(240, 98.4, 103.5, 97.0, 103.2));
+    assert_eq!(r.status, Status::Invalidated);
+    assert_eq!(
+        extremes(&r),
+        (Some(-1.0), Some(240), Some(0.6667), Some(60))
+    );
+    let d = r.durations();
+    assert_eq!((d.bars_to_mfe, d.bars_to_mae), (Some(1.0), Some(4.0)));
+    assert_eq!((d.bars_to_fill, d.bars_to_exit), (Some(0.0), Some(4.0)));
+
+    // A cancel closes at the next bar's open: that open counts, the rest of the bar not.
+    let mut cancelled = create(short_args());
+    cancelled.apply_bar(&bar(0, 99.0, 100.4, 98.9, 100.2));
+    cancelled.cancel("done".into(), T0 + MIN + 1).unwrap();
+    walk(
+        &mut cancelled,
+        &[
+            bar(1, 100.2, 100.3, 99.4, 99.5),
+            bar(2, 99.1, 99.2, 90.0, 91.0),
+        ],
+    );
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert_eq!(
+        extremes(&cancelled),
+        (Some(-0.1333), Some(0), Some(0.3), Some(2))
+    );
+}
+
+#[test]
+fn durations_are_in_bars_of_the_setups_own_interval() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
+    r.apply_bar(&bar(120, 100.6, 100.9, 100.2, 100.6));
+    for (interval, bars) in [
+        ("1h", 2.0),
+        ("4h", 0.5),
+        ("7m", 17.14),
+        ("45m", 2.67),
+        ("1m", 120.0),
+        ("2D", 0.04),
+    ] {
+        r.interval = interval.into();
+        assert_eq!(r.durations().bars_to_exit, Some(bars), "{interval}");
+    }
+    r.interval = "nonsense".into();
+    assert_eq!(r.durations(), Durations::default());
+}
+
+#[test]
+fn excursions_and_durations_wait_for_the_fill() {
+    let mut r = create(long_args());
+    walk(&mut r, &[bar(0, 103.0, 110.0, 102.0, 102.5)]);
+    assert_eq!(r.status, Status::Watching);
+    assert_eq!(extremes(&r), (None, None, None, None));
+    assert_eq!(r.durations(), Durations::default());
+    let view = r.view();
+    for field in [
+        "mae_r",
+        "mfe_at",
+        "bars_to_fill",
+        "bars_to_exit",
+        "bars_to_mae",
+    ] {
+        assert_eq!(view[field], Value::Null, "{field}");
+    }
+    // Closed without a fill, it has none either.
+    r.apply_bar(&bar(1, 97.0, 97.5, 96.5, 97.2));
+    assert_eq!(r.status, Status::Invalidated);
+    assert_eq!(extremes(&r), (None, None, None, None));
+    assert_eq!(r.durations(), Durations::default());
+}
+
+#[test]
+fn closest_approach_says_how_near_an_unfilled_setup_came() {
+    // Above the zone of a long: from its high edge, 101, risk 3 to 98.
+    let mut r = create(long_args());
+    walk(
+        &mut r,
+        &[
+            bar(0, 103.0, 103.5, 102.0, 102.5),
+            bar(1, 102.5, 102.6, 101.6, 102.0),
+            bar(2, 102.0, 104.0, 101.9, 103.5),
+        ],
+    );
+    assert_eq!(r.closest_approach_r, Some(0.2));
+    r.cancel("not coming".into(), T0 + 2 * MIN + 1).unwrap();
+    r.apply_bar(&bar(3, 103.5, 103.6, 100.5, 101.0));
+    assert_eq!(r.status, Status::Cancelled);
+    assert_eq!(
+        r.closest_approach_r,
+        Some(0.2),
+        "the cancel bar is not scored"
+    );
+
+    // Below the zone of a long, a breakout: from its low edge, 100, risk 2.
+    let mut below = create(long_args());
+    below.apply_bar(&bar(0, 99.0, 99.5, 98.5, 99.2));
+    assert_eq!(below.closest_approach_r, Some(0.25));
+    // Below the zone of a short: from its low edge, 100, risk 3 to 103.
+    let mut short = create(short_args());
+    short.apply_bar(&bar(0, 98.0, 99.0, 97.5, 98.5));
+    assert_eq!(short.closest_approach_r, Some(0.3333));
+    // Filled, it is 0.
+    short.apply_bar(&bar(1, 98.5, 100.2, 98.4, 100.1));
+    assert_eq!(short.status, Status::Triggered);
+    assert_eq!(short.closest_approach_r, Some(0.0));
+
+    // Expired unfilled, it still says how near it came.
+    let mut expired = create(long_args());
+    walk(
+        &mut expired,
+        &[
+            bar(0, 103.0, 103.5, 101.3, 102.5),
+            bar(1440, 103.0, 103.5, 101.0, 102.5),
+        ],
+    );
+    assert_eq!(expired.status, Status::Expired);
+    assert_eq!(expired.closest_approach_r, Some(0.1));
+
+    // New levels in effect start it again: it is to the zone the setup has.
+    let mut moved = create(long_args());
+    moved.apply_bar(&bar(0, 102.0, 102.0, 101.25, 101.5));
+    assert_eq!(moved.closest_approach_r, Some(0.0833));
+    let mut lower = moved.levels.clone();
+    (lower.entry.low, lower.entry.high, lower.invalidation) = (95.0, 96.0, 93.0);
+    moved
+        .revise(None, None, None, Some(lower), "lower".into(), T0 + 90_000)
+        .unwrap();
+    walk(
+        &mut moved,
+        &[
+            bar(2, 102.0, 102.5, 101.25, 102.0),
+            bar(3, 102.0, 102.5, 101.25, 102.0),
+        ],
+    );
+    assert_eq!(moved.closest_approach_r, Some(1.75));
+}
+
+#[test]
+fn a_stop_bar_that_opens_past_the_target_counts_no_more_than_the_target() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 100.5, 100.8, 100.2, 100.6));
+    assert_eq!(r.status, Status::Triggered);
+    r.apply_bar(&bar(1, 105.0, 105.0, 97.5, 98.0));
+    assert_eq!(r.status, Status::Invalidated);
+    // Filled at 100.5, risk 2.5: the target 104 is 1.4 R, the 105 open 1.8 R.
+    assert_eq!(r.mfe_r, Some(1.4));
+    assert_eq!(r.mae_r, Some(-1.0));
+}
+
+#[test]
+fn a_record_written_before_tags_and_excursions_loads_without_them() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 103.0, 103.5, 102.0, 102.5));
+    let mut watching = serde_json::to_value(&r).unwrap();
+    r.apply_bar(&bar(1, 100.5, 100.9, 100.2, 100.6));
+    let mut filled = serde_json::to_value(&r).unwrap();
+    let new = [
+        "tags",
+        "mae_r",
+        "mfe_r",
+        "mae_at",
+        "mfe_at",
+        "closest_approach_r",
+    ];
+    for old in [&mut watching, &mut filled] {
+        for field in new {
+            old.as_object_mut().unwrap().remove(field);
+        }
+    }
+    let mut watching: Record = serde_json::from_value(watching).unwrap();
+    assert_eq!(watching.tags, Vec::<String>::new());
+    // Its first bars were scored before the approach was kept: none, rather than one
+    // that may miss a closer bar.
+    watching.apply_bar(&bar(1, 102.5, 102.6, 101.6, 102.0));
+    assert_eq!(watching.closest_approach_r, None);
+
+    let mut filled: Record = serde_json::from_value(filled).unwrap();
+    assert_eq!(extremes(&filled), (None, None, None, None));
+    // Filled before they were kept: none, rather than ones that miss its start.
+    filled.apply_bar(&bar(2, 100.6, 103.0, 99.0, 102.0));
+    assert_eq!(filled.status, Status::Triggered);
+    assert_eq!(extremes(&filled), (None, None, None, None));
+    // The durations come from times every record keeps.
+    assert_eq!(filled.durations().bars_to_fill, Some(0.02));
+    assert_eq!(filled.durations().bars_to_mae, None);
+}
+
+#[test]
+fn tags_are_checked_and_kept_once() {
+    let r = create(with(
+        long_args(),
+        "tags",
+        json!([
+            "strategy:retest-short",
+            "trigger:100eyes:abnormal-volatility",
+            "pattern:double-top-ee",
+            "strategy:retest-short"
+        ]),
+    ));
+    assert_eq!(
+        r.tags,
+        [
+            "strategy:retest-short",
+            "trigger:100eyes:abnormal-volatility",
+            "pattern:double-top-ee"
+        ]
+    );
+    assert_eq!(create(long_args()).tags, Vec::<String>::new());
+
+    let bad = json!([
+        "Strategy",
+        "has space",
+        ":lead",
+        "",
+        "x".repeat(MAX_TAG + 1),
+        5,
+        "ok/1.2_a"
+    ]);
+    let problems = problems_of(with(long_args(), "tags", bad));
+    assert_eq!(
+        fields(&problems),
+        ["tags[0]", "tags[1]", "tags[2]", "tags[3]", "tags[4]", "tags[5]"]
+    );
+    assert!(problems.iter().all(|p| p.hint.is_some()));
+    let many = json!((0..=MAX_TAGS).map(|i| format!("t{i}")).collect::<Vec<_>>());
+    assert_eq!(
+        fields(&problems_of(with(long_args(), "tags", many))),
+        ["tags"]
+    );
+    assert_eq!(
+        fields(&problems_of(with(long_args(), "tags", json!("a")))),
+        ["tags"]
+    );
+}
+
+#[test]
+fn tags_can_be_revised_after_the_fill_and_are_logged() {
+    let mut r = create(with(long_args(), "tags", json!(["a"])));
+    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
+    assert_eq!(r.status, Status::Triggered);
+    let tags = Some(vec!["a".to_string(), "review:late-entry".to_string()]);
+    let revision = r
+        .revise(None, None, tags, None, "tagged".into(), T0 + MIN)
+        .unwrap();
+    assert_eq!(r.tags, ["a", "review:late-entry"]);
+    assert_eq!(
+        revision.changes["tags"],
+        json!({ "from": ["a"], "to": ["a", "review:late-entry"] })
+    );
+    let same = Some(r.tags.clone());
+    assert!(r
+        .revise(None, None, same, None, "again".into(), T0 + MIN)
+        .is_err());
+}
+
+#[test]
+fn a_closed_setup_takes_tags_alone() {
+    let mut r = create(with(long_args(), "tags", json!(["a"])));
+    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
+    r.apply_bar(&bar(1, 100.6, 104.5, 100.5, 104.2));
+    assert_eq!(r.status, Status::Won);
+    let review = || Some(vec!["a".to_string(), "review:r1".to_string()]);
+    // With anything else, the whole call is refused, and the hint says what may change.
+    for (thesis, drawings) in [(Some("later".to_string()), None), (None, Some(vec![]))] {
+        let refused = r
+            .revise(thesis, drawings, review(), None, "r".into(), T0 + 2 * MIN)
+            .unwrap_err();
+        assert_eq!(fields(&refused), ["id"]);
+        assert!(refused[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("only its tags"));
+    }
+    let levels = Some(r.levels.clone());
+    assert!(r
+        .revise(None, None, review(), levels, "r".into(), T0 + 2 * MIN)
+        .is_err());
+    assert_eq!(r.tags, ["a"]);
+    let revision = r
+        .revise(None, None, review(), None, "reviewed".into(), T0 + 2 * MIN)
+        .unwrap();
+    assert_eq!(r.tags, ["a", "review:r1"]);
+    assert_eq!(
+        revision.changes["tags"],
+        json!({ "from": ["a"], "to": ["a", "review:r1"] })
+    );
+    assert_eq!(r.status, Status::Won, "nothing else moves");
+
+    // Being cancelled, the same.
+    let mut cancelling = create(long_args());
+    cancelling.cancel("done".into(), T0 + 1).unwrap();
+    assert!(cancelling
+        .revise(None, None, review(), None, "r".into(), T0 + 2)
+        .is_ok());
+    assert!(cancelling
+        .revise(Some("x".into()), None, None, None, "r".into(), T0 + 3)
+        .is_err());
 }

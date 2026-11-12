@@ -27,6 +27,11 @@ pub const MAX_THESIS: usize = 2000;
 pub const MAX_REASON: usize = 500;
 pub const MAX_TARGETS: usize = 4;
 pub const MAX_EXPIRY_MS: i64 = 90 * 86_400_000;
+pub const MAX_TAGS: usize = 10;
+pub const MAX_TAG: usize = 64;
+/// The characters a tag may have besides lowercase letters and digits.
+pub const TAG_PUNCTUATION: &str = ":-_./";
+const TAG_HINT: &str = "lowercase letters, digits and : - _ . /, starting with a letter or digit, such as strategy:retest-short";
 
 const MINUTE_MS: i64 = 60_000;
 
@@ -191,6 +196,42 @@ pub struct Record {
     pub revisions: u32,
     #[serde(default)]
     pub agent_revisions: u32,
+    /// The agent's labels, such as `strategy:retest-short`, to group setups by.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// From the fill on: the furthest price went against the position (0 or less) and
+    /// with it (0 or more), in R of the risk at the fill, before costs, read from 1m
+    /// bar highs and lows as the scorer reads them. None before a fill, and on a setup
+    /// filled before the server kept them.
+    #[serde(default)]
+    pub mae_r: Option<f64>,
+    #[serde(default)]
+    pub mfe_r: Option<f64>,
+    /// Open time of the 1m bar that set `mae_r`, and of the one that set `mfe_r`: the
+    /// first, where two bars went as far.
+    #[serde(default)]
+    pub mae_at: Option<i64>,
+    #[serde(default)]
+    pub mfe_at: Option<i64>,
+    /// While watching: the least distance from a bar's high or low to the entry zone, in
+    /// R of the risk from the zone's edge nearest the price to the invalidation. 0 once
+    /// filled. None when the setup's first bars were not scored here, as on a setup
+    /// stored before the server kept it.
+    #[serde(default)]
+    pub closest_approach_r: Option<f64>,
+}
+
+/// How long a setup took, in bars of its own interval, from times the record keeps:
+/// elapsed ms over the interval's ms, to two places.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct Durations {
+    /// Creation to the fill bar.
+    pub bars_to_fill: Option<f64>,
+    /// Fill bar to the exit bar; while filled, to the newest bar scored.
+    pub bars_to_exit: Option<f64>,
+    /// Fill bar to the bars that set `mae_r` and `mfe_r`.
+    pub bars_to_mae: Option<f64>,
+    pub bars_to_mfe: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +352,47 @@ impl MinuteBar {
     }
 }
 
+/// The tags in `value`, each given once. None, with a problem, when any is not a tag.
+pub fn tags(value: &Value, problems: &mut Vec<Problem>) -> Option<Vec<String>> {
+    let Some(list) = value.as_array().filter(|l| l.len() <= MAX_TAGS) else {
+        problems.push(
+            Problem::new(
+                "tags",
+                format!("tags must be a list of at most {MAX_TAGS} strings"),
+            )
+            .hint(TAG_HINT),
+        );
+        return None;
+    };
+    let before = problems.len();
+    let mut out: Vec<String> = Vec::new();
+    for (i, v) in list.iter().enumerate() {
+        let field = format!("tags[{i}]");
+        let message = match v.as_str() {
+            None => format!("{field} must be a string"),
+            Some(t) if t.is_empty() || t.len() > MAX_TAG => {
+                format!("{field} must have 1 to {MAX_TAG} characters")
+            }
+            Some(t)
+                if !t.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    || !t.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || TAG_PUNCTUATION.contains(c)
+                    }) =>
+            {
+                format!("{field} has a character a tag may not have: {t:?}")
+            }
+            Some(t) => {
+                if !out.iter().any(|o| o == t) {
+                    out.push(t.to_string());
+                }
+                continue;
+            }
+        };
+        problems.push(Problem::new(&field, message).hint(TAG_HINT));
+    }
+    (problems.len() == before).then_some(out)
+}
+
 /// A required, bounded string field.
 pub fn text(args: &Value, field: &str, max: usize, problems: &mut Vec<Problem>) -> Option<String> {
     match args.get(field) {
@@ -381,9 +463,18 @@ fn one_of<T: for<'de> Deserialize<'de>>(
 }
 
 /// Fields the server sets. Named so that an agent sending one learns why it is refused.
-const SERVER_FIELDS: [&str; 9] = [
+const SERVER_FIELDS: [&str; 18] = [
     "status",
     "result_r",
+    "mae_r",
+    "mfe_r",
+    "mae_at",
+    "mfe_at",
+    "closest_approach_r",
+    "bars_to_fill",
+    "bars_to_exit",
+    "bars_to_mae",
+    "bars_to_mfe",
     "fill",
     "exit",
     "costs",
@@ -742,9 +833,10 @@ pub struct Draft {
     pub thesis: String,
     /// `None` for a skip, which takes the default bracket.
     pub levels: Option<Levels>,
+    pub tags: Vec<String>,
 }
 
-pub const CREATE_FIELDS: [&str; 11] = [
+pub const CREATE_FIELDS: [&str; 12] = [
     "symbol",
     "interval",
     "direction",
@@ -755,6 +847,7 @@ pub const CREATE_FIELDS: [&str; 11] = [
     "invalidation",
     "targets",
     "expires_at",
+    "tags",
     "as_of",
 ];
 
@@ -777,6 +870,10 @@ impl Draft {
             Some(_) => one_of(args, "decision", "take or skip", problems),
         };
         let thesis = text(args, "thesis", MAX_THESIS, problems);
+        let tags = match args.get("tags") {
+            None | Some(Value::Null) => Some(Vec::new()),
+            Some(v) => tags(v, problems),
+        };
         let levels = match decision {
             Some(Decision::Skip) => {
                 for field in LEVEL_FIELDS {
@@ -802,6 +899,7 @@ impl Draft {
             decision: decision?,
             thesis: thesis?,
             levels,
+            tags: tags?,
         })
     }
 }
@@ -862,6 +960,12 @@ impl Record {
             pending: Vec::new(),
             revisions: 0,
             agent_revisions: 0,
+            tags: draft.tags,
+            mae_r: None,
+            mfe_r: None,
+            mae_at: None,
+            mfe_at: None,
+            closest_approach_r: None,
         };
         let created = record.log(now_ms, By::Agent, Kind::Created, None, Map::new());
         (record, created)
@@ -914,45 +1018,49 @@ impl Record {
 
     /// Why this setup's state forbids a revision, with new levels or without. When it
     /// does, that is the whole answer: what is wrong with levels that could not be
-    /// applied anyway is not worth a round trip.
-    pub fn revise_refusal(&self, levels: bool) -> Option<Problem> {
-        if !self.status.is_open() {
-            return Some(Problem::new(
-                "id",
-                "this setup is closed and cannot be revised",
-            ));
+    /// applied anyway is not worth a round trip. Tags alone may change on any setup,
+    /// closed or being cancelled too: they label it, they do not move it.
+    pub fn revise_refusal(&self, levels: bool, tags_only: bool) -> Option<Problem> {
+        let only_tags = "only its tags can be revised now, in a call that changes nothing else";
+        if !self.status.is_open() && !tags_only {
+            return Some(
+                Problem::new("id", "this setup is closed and cannot be revised").hint(only_tags),
+            );
         }
-        if self.cancel_pending() {
-            return Some(Problem::new("id", "this setup is being cancelled"));
+        if self.cancel_pending() && !tags_only {
+            return Some(Problem::new("id", "this setup is being cancelled").hint(only_tags));
         }
         if levels && self.decision == Decision::Skip {
             return Some(
                 Problem::new("decision", "a skip keeps the server's default bracket")
-                    .hint("only its thesis and drawings can be revised"),
+                    .hint("only its thesis, drawings and tags can be revised"),
             );
         }
         if levels && self.status == Status::Triggered {
             return Some(
                 Problem::new("status", "this setup is filled, so its levels are fixed")
-                    .hint("only its thesis and drawings can be revised now"),
+                    .hint("only its thesis, drawings and tags can be revised now"),
             );
         }
         None
     }
 
-    /// The agent revises its setup. The thesis and drawings change now. New levels
-    /// count from the first bar that opens at or after `now_ms`, and only while the
-    /// setup is not filled.
+    /// The agent revises its setup. The thesis, drawings and tags change now. New
+    /// levels count from the first bar that opens at or after `now_ms`, and only while
+    /// the setup is not filled.
     pub fn revise(
         &mut self,
         thesis: Option<String>,
         drawings: Option<Vec<Value>>,
+        tags: Option<Vec<String>>,
         levels: Option<Levels>,
         reason: String,
         now_ms: i64,
     ) -> Result<Revision, Vec<Problem>> {
         let mut problems = Vec::new();
-        match (self.revise_refusal(levels.is_some()), &levels) {
+        let tags_only =
+            tags.is_some() && thesis.is_none() && drawings.is_none() && levels.is_none();
+        match (self.revise_refusal(levels.is_some(), tags_only), &levels) {
             (Some(refusal), _) => problems.push(refusal),
             (None, Some(levels)) => {
                 check_levels(self.direction, levels, &self.costs, now_ms, &mut problems)
@@ -971,6 +1079,9 @@ impl Record {
                 json!(drawings),
             );
         }
+        if let Some(tags) = &tags {
+            changed(&mut changes, "tags", json!(self.tags), json!(tags));
+        }
         if let Some(levels) = &levels {
             level_changes(&mut changes, self.latest_levels(), levels);
         }
@@ -985,6 +1096,9 @@ impl Record {
         }
         if let Some(drawings) = drawings {
             self.drawings = drawings;
+        }
+        if let Some(tags) = tags {
+            self.tags = tags;
         }
         if let Some(levels) = levels.filter(|l| l != self.latest_levels()) {
             self.pending.push(Pending::Levels { at: now_ms, levels });
@@ -1024,6 +1138,55 @@ impl Record {
         let gross = self.direction.sign() * (exit - fill) / risk;
         let cost = (fill + exit) * self.costs.round_trip() / 2.0 / risk;
         ((gross - cost) * 10_000.0).round() / 10_000.0
+    }
+
+    /// Widen the excursions by a price the position went `against` and one it went
+    /// `with` in the bar that opened at `at`, in R from the fill, before costs. Only
+    /// once they are kept: a setup filled before they were has none, rather than ones
+    /// that miss its start.
+    fn excursion(&mut self, against: f64, with: f64, at: i64) {
+        let (Some(fill), Some(mae), Some(mfe)) = (self.fill, self.mae_r, self.mfe_r) else {
+            return;
+        };
+        let risk = (fill.price - self.levels.invalidation).abs();
+        if risk <= 0.0 {
+            return;
+        }
+        let r = |p: f64| {
+            (self.direction.sign() * (p - fill.price) / risk * 10_000.0).round() / 10_000.0
+        };
+        if r(against) < mae {
+            (self.mae_r, self.mae_at) = (Some(r(against)), Some(at));
+        }
+        if r(with) > mfe {
+            (self.mfe_r, self.mfe_at) = (Some(r(with)), Some(at));
+        }
+    }
+
+    /// Narrow the closest approach of a watching setup by this bar. Only when it was
+    /// kept from the first bar scored, so that it never misses a closer one before.
+    fn approach(&mut self, bar: &MinuteBar, reached: bool, first: bool) {
+        let entry = self.levels.entry;
+        let r = match reached {
+            true => 0.0,
+            false => {
+                let edge = if bar.low > entry.high {
+                    entry.high
+                } else {
+                    entry.low
+                };
+                let risk = (edge - self.levels.invalidation).abs();
+                if risk <= 0.0 {
+                    return;
+                }
+                let gap = (bar.low - entry.high).max(entry.low - bar.high);
+                (gap / risk * 10_000.0).round() / 10_000.0
+            }
+        };
+        self.closest_approach_r = match (first, self.closest_approach_r) {
+            (true, _) => Some(r),
+            (false, kept) => kept.map(|c| c.min(r)),
+        };
     }
 
     fn close(&mut self, status: Status, exit: Option<f64>, bar: &MinuteBar) -> Revision {
@@ -1072,7 +1235,13 @@ impl Record {
         {
             return out;
         }
+        let first = self.scored_through.is_none();
         self.scored_through = Some(bar.time);
+        // The prices of this bar that went against a position and with it.
+        let (against, with) = match self.direction {
+            Direction::Long => (bar.low, bar.high),
+            Direction::Short => (bar.high, bar.low),
+        };
 
         // What the agent sent before this bar opened.
         let due: Vec<Pending> = {
@@ -1082,10 +1251,14 @@ impl Record {
             self.pending = later;
             due
         };
+        // New levels in effect start the closest approach again: it is to the zone the
+        // setup has, not one it had.
+        let mut restart = false;
         for change in due {
             match change {
                 Pending::Levels { levels, .. } if self.status == Status::Watching => {
                     self.levels = levels;
+                    restart = true;
                 }
                 Pending::Levels { at, .. } => {
                     out.push(self.log(
@@ -1101,6 +1274,7 @@ impl Record {
                 }
                 Pending::Cancel { .. } => {
                     let exit = self.fill.map(|_| bar.open);
+                    self.excursion(bar.open, bar.open, bar.time);
                     out.push(self.close(Status::Cancelled, exit, bar));
                     return out;
                 }
@@ -1109,6 +1283,7 @@ impl Record {
 
         if bar.time >= self.levels.expires_at {
             let exit = self.fill.map(|_| bar.open);
+            self.excursion(bar.open, bar.open, bar.time);
             out.push(self.close(Status::Expired, exit, bar));
             return out;
         }
@@ -1131,6 +1306,7 @@ impl Record {
             let entry = self.levels.entry;
             let reached =
                 self.decision == Decision::Skip || (bar.low <= entry.high && bar.high >= entry.low);
+            self.approach(bar, reached, first || restart);
             if !reached {
                 if stop_touched {
                     out.push(self.close(Status::Invalidated, None, bar));
@@ -1147,6 +1323,8 @@ impl Record {
             };
             self.fill = Some(fill);
             self.status = Status::Triggered;
+            (self.mae_r, self.mfe_r) = (Some(0.0), Some(0.0));
+            (self.mae_at, self.mfe_at) = (Some(bar.time), Some(bar.time));
             let mut changes = Map::new();
             changed(
                 &mut changes,
@@ -1157,16 +1335,28 @@ impl Record {
             changes.insert("fill".into(), json!({ "from": null, "to": fill }));
             out.push(self.log(bar.time, By::Server, Kind::Status, None, changes));
             // The bar that filled it can stop it out, and cannot win it: a bar does not
-            // say in which order it traded.
+            // say in which order it traded. So it counts against the position only.
             if stop_touched {
+                self.excursion(stop, price, bar.time);
                 out.push(self.close(Status::Invalidated, Some(stop), bar));
+            } else {
+                self.excursion(against, price, bar.time);
             }
             return out;
         }
 
         if stop_touched {
-            // A gap through the level closes at the open, which is worse.
+            // A gap through the level closes at the open, which is worse. The stop counts
+            // first, so of this bar only its open went with the position.
             let exit = if stopped_at(bar.open) { bar.open } else { stop };
+            // Nothing past the first target counts for it either: the scorer reads the
+            // stop first, but a position is not further in profit than its target.
+            let with = match (self.direction, self.levels.targets.first()) {
+                (Direction::Long, Some(&t)) => bar.open.min(t),
+                (Direction::Short, Some(&t)) => bar.open.max(t),
+                (_, None) => bar.open,
+            };
+            self.excursion(exit, with, bar.time);
             out.push(self.close(Status::Invalidated, Some(exit), bar));
         } else if let Some(target) = self.levels.targets.first().copied() {
             let reached = match self.direction {
@@ -1174,7 +1364,18 @@ impl Record {
                 Direction::Short => bar.low <= target,
             };
             if reached {
+                // Nothing beyond the target counts: the position was out there. A bar
+                // that opens at or past it was out at the open, so its later low (or
+                // high, for a short) does not count either.
+                let opened_past = match self.direction {
+                    Direction::Long => bar.open >= target,
+                    Direction::Short => bar.open <= target,
+                };
+                let against = if opened_past { bar.open } else { against };
+                self.excursion(against, target, bar.time);
                 out.push(self.close(Status::Won, Some(target), bar));
+            } else {
+                self.excursion(against, with, bar.time);
             }
         }
         out
@@ -1235,13 +1436,41 @@ impl Record {
         }
     }
 
-    /// As a tool answers it: everything but the owner, the levels as fields of the setup.
+    /// How long it took, in bars of its interval. A month counts as 30 days, as
+    /// everywhere else here (`Interval::secs`).
+    pub fn durations(&self) -> Durations {
+        let (Some(fill), Some(secs)) = (self.fill, crate::data::interval_secs(&self.interval))
+        else {
+            return Durations::default();
+        };
+        let bars = |from: i64, to: i64| {
+            ((to - from) as f64 / (secs * 1000) as f64 * 100.0).round() / 100.0
+        };
+        let last = match (self.exit, self.status) {
+            (Some(exit), _) => Some(exit.bar_time),
+            (None, Status::Triggered) => self.scored_through,
+            // Closed with no exit: it expired while nobody scored it.
+            (None, _) => None,
+        };
+        Durations {
+            bars_to_fill: Some(bars(self.created_at, fill.bar_time)),
+            bars_to_exit: last.map(|t| bars(fill.bar_time, t)),
+            bars_to_mae: self.mae_at.map(|t| bars(fill.bar_time, t)),
+            bars_to_mfe: self.mfe_at.map(|t| bars(fill.bar_time, t)),
+        }
+    }
+
+    /// As a tool answers it: everything but the owner, the levels as fields of the
+    /// setup, and its durations.
     pub fn view(&self) -> Value {
         let mut v = serde_json::to_value(self).unwrap_or_default();
         if let Some(map) = v.as_object_mut() {
             map.remove("owner");
             if let Some(Value::Object(levels)) = map.remove("levels") {
                 map.extend(levels);
+            }
+            if let Ok(Value::Object(durations)) = serde_json::to_value(self.durations()) {
+                map.extend(durations);
             }
         }
         v

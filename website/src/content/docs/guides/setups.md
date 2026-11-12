@@ -63,13 +63,76 @@ for the agent counts:**
 | The entry zone and the target, while watching | Filled only; that bar cannot win |
 | The invalidation, opening beyond it or never reaching the zone | Invalidated, never filled, 0 R |
 
+## Excursions
+
+From the fill on, a setup also says how far the price went each way, for reviewing a trade
+after the fact. They are read with the same 1m bars and the same rule as the result:
+
+- `mae_r`: the furthest the price went **against** the position, in R from the fill. It is 0 or
+  less: `-0.5` means half the risk.
+- `mfe_r`: the furthest it went **for** the position, in R. It is 0 or more.
+- `mae_at` and `mfe_at`: the open time (ms) of the 1m bar that set each, the first one where two
+  went as far. They say whether the worst point came before or after the best one; they do not
+  say on their own whether a break-even stop would have been hit, since the price can come back
+  to the fill later without setting a new extreme.
+
+They are measured from the fill price with the bars' highs and lows, **before costs**, so a
+setup that won at a target 2 R away has `mfe_r` 2 while its `result_r` is a little less. Where a
+bar is ambiguous they follow the scorer: the bar that fills a setup counts against it but not for
+it, a bar that reaches the invalidation counts as out at the stop (its open is the most it went
+for the position), and nothing past the exit counts. So a setup stopped at its invalidation
+has `mae_r` -1, or less if the price gapped through.
+
+While a setup is filled they are the values so far. Before a fill they are null, and they stay
+null on a setup that is never filled. Setups filled before the server kept them have none.
+
+### Durations
+
+Durations are in **bars of the setup's own interval**, the one it was created with (`1h`, `4h`,
+or a custom one such as `45m`): the elapsed time over the interval's length, to two places. A
+month counts as 30 days. They are measured between the open times of the 1m bars involved, so
+they move in steps of one minute.
+
+- `bars_to_fill`: from creation to the bar that filled it.
+- `bars_to_exit`: from the fill to the exit. While filled, to the newest bar scored so far.
+- `bars_to_mae` and `bars_to_mfe`: from the fill to `mae_at` and `mfe_at`.
+
+All are null before a fill. `bars_to_exit` is also null on a setup that expired filled while
+nobody scored it, since it has no exit.
+
+### How close an unfilled setup came
+
+`closest_approach_r` is, while a setup is watching, the least distance between a bar's high or
+low and the entry zone, in R of the risk from the zone's edge nearest the price to the
+invalidation. `0.1` means the price came within a tenth of the planned risk. It is 0 once a bar
+reaches the zone, so on a setup that expired or was cancelled unfilled it says how near it came.
+It is to the entry zone in effect: when revised levels take effect, it starts again.
+It is null before the first bar is scored, and on setups that were already being scored before
+the server kept it.
+
+### Why a setup closed
+
+There is no separate exit reason: `status` says it. `won` is the first target, `invalidated` the
+invalidation, `expired` the expiry and `cancelled` your cancel.
+
+## Tags
+
+`tags` labels a setup so that you can group your track record: `strategy:retest-short`,
+`trigger:100eyes:abnormal-volatility`, `pattern:double-top-ee`. Up to 10, each 1 to 64
+characters of lowercase letters, digits and `: - _ . /`, starting with a letter or digit; a
+tag given twice is kept once. `list_setups` with `tags` returns only
+the setups that have all of them. Tags are not levels: `revise_setup` can change them after the
+fill, and even after a setup closed, for labels such as `review:r1` added in a review. On a
+closed setup, or one being cancelled, a revision may change the tags only. The change goes to
+the log like any other.
+
 ## Changing a setup
 
 Nothing is edited in place. `revise_setup` and `cancel_setup` need a reason, and each adds an
 entry to the setup's log with what it was and what it became. `get_setup` returns the whole log,
 the server's own status moves included.
 
-- The thesis and drawings change at once.
+- The thesis, drawings and tags change at once.
 - New levels, and a cancel, **count from the next 1m bar**. The bar forming now still meets the
   setup as it was, so a fill or a stop inside it stands. Levels not yet in effect are under
   `pending`.
@@ -88,8 +151,8 @@ cancelled.
 
 ## Limits
 
-Per owner: 20 open setups, 500 in total, open setups on 5 symbols, 50 revisions per setup, 10
-changes a minute, and 4 MiB for setups and their logs. Closed setups are kept; at a limit a new
+Per owner: 20 open setups, 500 in total, open setups on 5 symbols, 50 revisions per setup (tags
+alone on a closed setup do not count), 10 changes a minute, and 4 MiB for setups and their logs. Closed setups are kept; at a limit a new
 one is refused and nothing old is dropped. `list_setups` returns the limits.
 
 ## When the server was away

@@ -470,8 +470,9 @@ pub const SETUP_TOOLS: [&str; 5] = [
 /// always include them.
 pub fn setup_tools() -> Vec<Value> {
     use crate::setups::{
-        FEE_BPS_PER_SIDE, MAX_REASON, MAX_TARGETS, MAX_THESIS, MIN_RISK_IN_ROUND_TRIP_COSTS,
-        SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR, SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
+        FEE_BPS_PER_SIDE, MAX_REASON, MAX_TAG, MAX_TAGS, MAX_TARGETS, MAX_THESIS,
+        MIN_RISK_IN_ROUND_TRIP_COSTS, SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR,
+        SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
     };
     let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." });
     let time = "unix seconds, unix ms or an ISO 8601 time";
@@ -492,6 +493,8 @@ pub fn setup_tools() -> Vec<Value> {
         json!({ "type": "string", "maxLength": MAX_THESIS, "description": "Why, in plain text." });
     let reason = json!({ "type": "string", "maxLength": MAX_REASON, "description": "Why this change, in plain text. Kept in the setup's log." });
     let id = json!({ "type": "string", "description": "The setup's id." });
+    let tag = json!({ "type": "string", "minLength": 1, "maxLength": MAX_TAG, "pattern": "^[a-z0-9][a-z0-9:_./-]*$" });
+    let tags = json!({ "type": "array", "items": tag, "maxItems": MAX_TAGS, "description": format!("Your labels for the setup, to group and filter by, such as strategy:retest-short or trigger:100eyes:abnormal-volatility. At most {MAX_TAGS}, each 1 to {MAX_TAG} characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.") });
     let costs = FEE_BPS_PER_SIDE + SLIPPAGE_BPS_PER_SIDE;
     vec![
         json!({
@@ -510,6 +513,7 @@ pub fn setup_tools() -> Vec<Value> {
                     "invalidation": invalidation.clone(),
                     "targets": targets.clone(),
                     "expires_at": expires_at.clone(),
+                    "tags": tags.clone(),
                     "as_of": as_of.clone()
                 },
                 "required": ["symbol", "interval", "direction", "thesis"]
@@ -517,7 +521,7 @@ pub fn setup_tools() -> Vec<Value> {
         }),
         json!({
             "name": "revise_setup",
-            "description": "Revise one of your open setups, with a reason. Nothing is edited in place: the change is added to the setup's log with what it was and what it became. The thesis and drawings change at once. New levels (entry, invalidation, targets, expires_at) count from the first 1m bar that opens after this call, so the bar forming now still meets the setup as it was; a field left out keeps its value, and the levels are checked together as create_setup checks them. Once a setup is filled its levels are fixed, and a skip keeps its bracket: only thesis and drawings can change then. Returns the setup as get_setup does; levels not yet in effect are under pending.",
+            "description": "Revise one of your open setups, with a reason; a closed one, or one being cancelled, takes tags alone, for labels added in review. Nothing is edited in place: the change is added to the setup's log with what it was and what it became. The thesis, drawings and tags change at once; tags replaces the whole list, and [] clears it. New levels (entry, invalidation, targets, expires_at) count from the first 1m bar that opens after this call, so the bar forming now still meets the setup as it was; a field left out keeps its value, and the levels are checked together as create_setup checks them. Once a setup is filled its levels are fixed, and a skip keeps its bracket: only thesis, drawings and tags can change then. Returns the setup as get_setup does; levels not yet in effect are under pending.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -529,6 +533,7 @@ pub fn setup_tools() -> Vec<Value> {
                     "invalidation": invalidation,
                     "targets": targets,
                     "expires_at": expires_at,
+                    "tags": tags,
                     "as_of": as_of.clone()
                 },
                 "required": ["id", "reason"]
@@ -536,7 +541,7 @@ pub fn setup_tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_setup",
-            "description": "One of your setups with its whole log: symbol, interval, direction, decision, thesis, drawings, entry, invalidation, targets, expires_at, bracket (which rule set the levels: agent, or for a skip atr or floor), status, costs, fill and exit (price and the 1m bar), result_r once closed, gap (true when bars were missed and not scored), pending changes, and log, every entry with seq, at, by (agent or server), kind, reason and changes ({field: {from, to}}). A setup of another owner reads as one that does not exist.",
+            "description": "One of your setups with its whole log: symbol, interval, direction, decision, thesis, drawings, entry, invalidation, targets, expires_at, bracket (which rule set the levels: agent, or for a skip atr or floor), status, costs, fill and exit (price and the 1m bar), result_r once closed, mae_r and mfe_r (from the fill on, the furthest price went against you, 0 or less, and for you, 0 or more, in R before costs; the bar that fills a setup counts only against it, and nothing beyond the exit counts) with mae_at and mfe_at (the open time, ms, of the 1m bar that set each), all four null before a fill; bars_to_fill (creation to the fill), bars_to_exit (fill to exit, or to the newest scored bar while filled), bars_to_mae and bars_to_mfe (fill to mae_at and mfe_at), in bars of the setup's interval to two places, null before a fill; closest_approach_r (while watching, the least distance from a bar's high or low to the entry zone, in R of the risk from the zone's edge nearest the price to the invalidation, to the entry zone in effect: new levels start it again; 0 once filled); tags; gap (true when bars were missed and not scored), pending changes, and log, every entry with seq, at, by (agent or server), kind, reason and changes ({field: {from, to}}). A setup of another owner reads as one that does not exist.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": id.clone(), "as_of": as_of.clone() },
@@ -551,6 +556,7 @@ pub fn setup_tools() -> Vec<Value> {
                 "properties": {
                     "status": { "type": "string", "enum": ["open", "closed", "watching", "triggered", "won", "invalidated", "expired", "cancelled"], "description": "open: watching or triggered. closed: any other. Omit for all." },
                     "symbol": { "type": "string", "description": "Only this symbol's." },
+                    "tags": { "type": "array", "items": tag, "maxItems": MAX_TAGS, "description": "Only setups that have every one of these tags." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Most setups to return; total says how many matched." },
                     "as_of": as_of.clone()
                 }

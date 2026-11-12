@@ -792,7 +792,7 @@ impl Setups {
         self.admit_change(owner)?;
         let current = self.find(&self.lock(), args, owner)?;
         let mut problems = Vec::new();
-        let mut allowed = vec!["id", "reason", "thesis", "drawings", "as_of"];
+        let mut allowed = vec!["id", "reason", "thesis", "drawings", "tags", "as_of"];
         allowed.extend(LEVEL_FIELDS);
         setups::check_fields(args, &allowed, &mut problems);
         let reason = setups::reason(args, &mut problems);
@@ -800,10 +800,15 @@ impl Setups {
         // What the setup's state forbids is answered as that, and what was sent for it is
         // not judged: its problems would be about a change that cannot be made.
         let level_change = LEVEL_FIELDS.iter().any(|f| given(f));
-        let refusal = current.revise_refusal(level_change);
+        let tags_only = given("tags") && !given("thesis") && !given("drawings") && !level_change;
+        let refusal = current.revise_refusal(level_change, tags_only);
         let frozen = current.takes_no_change();
         let thesis = match given("thesis") && !frozen {
             true => setups::text(args, "thesis", MAX_THESIS, &mut problems),
+            false => None,
+        };
+        let tags = match given("tags") && (!frozen || tags_only) {
+            true => setups::tags(&args["tags"], &mut problems),
             false => None,
         };
         let levels = match level_change && refusal.is_none() {
@@ -835,14 +840,16 @@ impl Setups {
 
         let mut st = self.lock();
         let mut record = self.find(&st, args, owner)?;
-        if record.agent_revisions >= self.limits.agent_revisions_per_setup {
+        // Review tags on a closed setup do not count against its revisions: they come after.
+        let review_tags = tags_only && !record.status.is_open();
+        if record.agent_revisions >= self.limits.agent_revisions_per_setup && !review_tags {
             return Err(format!(
                 "Limit reached: at most {} revisions per setup",
                 self.limits.agent_revisions_per_setup
             ));
         }
         let entry = record
-            .revise(thesis, placed, levels, reason, now)
+            .revise(thesis, placed, tags, levels, reason, now)
             .map_err(|problems| setups::problems_text(&problems))?;
         self.finish(&mut st, record, entry)
     }
@@ -919,6 +926,13 @@ impl Setups {
                     .ok_or_else(|| field_problem("symbol", "symbol must be a symbol"))?,
             ),
         };
+        let tags = match args.get("tags").filter(|v| !v.is_null()) {
+            None => Vec::new(),
+            Some(v) => {
+                let mut problems = Vec::new();
+                setups::tags(v, &mut problems).ok_or_else(|| setups::problems_text(&problems))?
+            }
+        };
         let limit = match args.get("limit").filter(|v| !v.is_null()) {
             None => 50,
             Some(v) => v
@@ -934,6 +948,7 @@ impl Setups {
             .map(|h| &h.record)
             .filter(|r| r.owner == owner)
             .filter(|r| symbol.as_ref().is_none_or(|s| *s == r.symbol))
+            .filter(|r| tags.iter().all(|t| r.tags.contains(t)))
             .filter(|r| match status {
                 None => true,
                 Some(None) => r.status.is_open(),
