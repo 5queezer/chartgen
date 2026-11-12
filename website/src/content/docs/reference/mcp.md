@@ -1361,6 +1361,7 @@ its own, in this order:
     "fill": null, "exit": null, "result_r": null,
     "mae_r": null, "mfe_r": null, "mae_at": null, "mfe_at": null, "closest_approach_r": 0.42,
     "bars_to_fill": null, "bars_to_exit": null, "bars_to_mae": null, "bars_to_mfe": null,
+    "shadow_results": null,
     "tags": ["strategy:retest-short"], "gap": false,
     "thesis": "the setup's thesis, as you wrote it"
   }
@@ -1433,8 +1434,8 @@ setups; `can_create` in the list says so.
   `trigger:100eyes:abnormal-volatility`. A tag given twice is kept once. On `revise_setup` the
   list replaces the old one (`[]` clears it), and it can change after the fill too. A closed
   setup, or one being cancelled, takes a revision with `tags` alone.
-- `status`, `result_r`, the excursion and duration fields, `closest_approach_r`, `fill`, `exit`
-  and `costs` are set by the server. Sending one is an error.
+- `status`, `result_r`, the excursion and duration fields, `closest_approach_r`,
+  `shadow_results`, `fill`, `exit` and `costs` are set by the server. Sending one is an error.
 - `as_of`: [replay servers](/chartgen/guides/setups/#replay) only, where every call needs it.
   `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
 
@@ -1444,7 +1445,11 @@ which rule set its levels), `status` (`watching`, `triggered`, `won`,
 `{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off
 the operator's list), `mae_r`, `mfe_r`, `mae_at`, `mfe_at`, `bars_to_fill`,
 `bars_to_exit`, `bars_to_mae`, `bars_to_mfe` and `closest_approach_r` (see
-[excursions](/chartgen/guides/setups/#excursions)), `tags`, `scored_through`, `gap` (true if bars were missed and could
+[excursions](/chartgen/guides/setups/#excursions)), `shadow_results` (from the fill on, the
+setup scored with three fixed exit variants for comparison, `v1_half_t1_be`, `v2_be_at_1r` and
+`v3_time_stop`, each with `status`, `result_r`, `stop`, `exits`, `exited_at` and `time_stop_at`;
+null before the fill; see [shadow results](/chartgen/guides/setups/#shadow-results)), `tags`,
+`scored_through` (still moving after the close while a shadow result is open), `gap` (true if bars were missed and could
 not be read afterwards, so the result is incomplete), `pending`
 (changes that count from the next 1m bar), `revisions` and `agent_revisions`. `log` holds every
 entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `cancelled`,

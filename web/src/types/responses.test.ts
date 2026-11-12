@@ -192,6 +192,32 @@ describe("setups (ADR-0059), against the server's own answers", () => {
     expect(list.setups.some((s) => s.fill !== null && s.exit !== null)).toBe(true);
   });
 
+  it("parses shadow results (ADR-0066): null before a fill, kept apart from result_r", () => {
+    expect(SetupPayloadSchema.parse(answers.create_setup).shadow_results).toBeNull();
+    const list = SetupsPayloadSchema.parse(answers.list_setups);
+    for (const setup of list.setups) {
+      expect(setup.shadow_results === null).toBe(setup.fill === null);
+    }
+    // A setup out at T1 whose v1 runner was scored on after it closed.
+    const ran = list.setups.find(
+      (s) => s.status === "won" && s.shadow_results?.v1_half_t1_be.exits.length === 2,
+    );
+    expect(ran?.shadow_results?.v1_half_t1_be.result_r).not.toBe(ran?.result_r);
+    expect(ran?.shadow_results?.v2_be_at_1r.status).toBe("won");
+  });
+
+  it("refuses a shadow status the server never sends", () => {
+    const won = SetupsPayloadSchema.parse(answers.list_setups).setups.find(
+      (s) => s.shadow_results !== null,
+    );
+    const shadows = won?.shadow_results;
+    const bad = {
+      ...won,
+      shadow_results: { ...shadows, v2_be_at_1r: { ...shadows?.v2_be_at_1r, status: "lost" } },
+    };
+    expect(SetupPayloadSchema.omit({ log: true }).safeParse(bad).success).toBe(false);
+  });
+
   it("parses a server with setups off", () => {
     expect(SetupsPayloadSchema.parse({ enabled: false, setups: [] }).total).toBeUndefined();
   });
