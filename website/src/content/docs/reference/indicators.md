@@ -495,7 +495,7 @@ Candlestick pattern recognition: doji variants, hammer, hanging man, inverted ha
 
 ### `chart_patterns`
 
-Auto chart patterns on ZigZag pivots of the last 600 bars: head and shoulders, double and triple tops and bottoms, triangles, wedges, channels, flags, pennants, rectangles. Each with a status: forming, confirmed or failed
+Auto chart patterns on ZigZag pivots of the last 600 bars: head and shoulders, double and triple tops and bottoms, triangles, wedges, channels, flags, pennants, rectangles. Each with a status: forming, confirmed or failed, its bar times and its height. The newer half of the window holds; in the older half, patterns can come and go as the window slides
 
 **Aliases:** `auto_chart_patterns`
 

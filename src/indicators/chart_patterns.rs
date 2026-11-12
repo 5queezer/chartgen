@@ -230,6 +230,8 @@ pub struct Found {
     pub failed_why: Option<&'static str>,
     pub target: Option<f64>,
     pub invalidation: Option<f64>,
+    /// The measured move: the target lies this far past the broken line.
+    pub height: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -418,6 +420,7 @@ fn found(kind: Kind, p: &[Pivot], w: Watch, bars: &[Bar], depth: usize) -> Found
         failed_why: o.failed_why,
         target: o.target,
         invalidation: w.stop,
+        height: w.height,
     }
 }
 
@@ -827,9 +830,20 @@ fn tooltip(f: &Found) -> String {
     out
 }
 
-/// `f`'s outline and label. Indices are shifted by `base` into the caller's bars.
-pub(crate) fn shape(f: &Found, base: usize, last: usize) -> PatternShape {
+/// `f`'s outline and label. Indices are shifted by `base` into the caller's bars;
+/// times are read from `bars`, the ones `f` was detected on.
+pub(crate) fn shape(f: &Found, bars: &[Bar], base: usize, last: usize) -> PatternShape {
     let shift = |x: usize| (x + base) as i64;
+    let ms = |x: usize| Some(bars.get(x)?.date.parse::<i64>().ok()? * 1000);
+    let times = (|| {
+        Some(PatternTimes {
+            start: ms(f.start)?,
+            end: ms(f.end)?,
+            known: ms(f.known_at)?,
+            confirmed: f.confirmed_at.and_then(ms),
+            failed: f.failed_at.and_then(ms),
+        })
+    })();
     let mut strokes: Vec<Stroke> = f
         .points
         .windows(2)
@@ -878,6 +892,8 @@ pub(crate) fn shape(f: &Found, base: usize, last: usize) -> PatternShape {
         target: f.target,
         invalidation: f.invalidation,
         confirmed_x: f.confirmed_at.map(shift),
+        times,
+        height: Some(f.height),
     }
 }
 
@@ -943,7 +959,7 @@ impl ChartPatterns {
             if f.status == PatternStatus::Failed && !self.show_failed {
                 continue;
             }
-            patterns.push(shape(f, base, last_closed));
+            patterns.push(shape(f, window, base, last_closed));
         }
         let event = |key: &str, name: &str, x: Option<i64>| IndicatorEvent {
             key: key.into(),
@@ -975,7 +991,7 @@ impl Indicator for ChartPatterns {
     }
 
     fn description(&self) -> &str {
-        "Auto chart patterns on ZigZag pivots of the last 600 bars: head and shoulders, double and triple tops and bottoms, triangles, wedges, channels, flags, pennants, rectangles. Each with a status: forming, confirmed or failed"
+        "Auto chart patterns on ZigZag pivots of the last 600 bars: head and shoulders, double and triple tops and bottoms, triangles, wedges, channels, flags, pennants, rectangles. Each with a status: forming, confirmed or failed, its bar times and its height. The newer half of the window holds; in the older half, patterns can come and go as the window slides"
     }
 
     fn params(&self) -> Value {
@@ -1764,7 +1780,7 @@ mod tests {
     #[test]
     fn the_shape_has_an_outline_a_label_and_a_tooltip_with_its_status() {
         let f = only(&HS, Kind::HeadAndShoulders);
-        let s = shape(&f, 100, 60);
+        let s = shape(&f, &[], 100, 60);
         assert_eq!(s.key, "head_and_shoulders");
         assert_eq!(s.status, PatternStatus::Confirmed);
         // Four pivot legs and the dashed neckline.
@@ -1779,8 +1795,52 @@ mod tests {
             &[90.0, 110.0, 100.0, 120.0, 100.0, 110.0, 103.0],
             Kind::HeadAndShoulders,
         );
-        let t = shape(&forming, 0, 60).tooltip;
+        let t = shape(&forming, &[], 0, 60).tooltip;
         assert!(t.contains("can reshape or vanish"), "{t}");
+    }
+
+    #[test]
+    fn the_shape_carries_bar_times_and_the_height() {
+        // Hourly bars from unix second 1_000_000.
+        let ms = |x: usize| (1_000_000 + x as i64 * 3600) * 1000;
+        let shaped = |prices: &[f64]| {
+            let mut bars = path(&knots(10, prices));
+            for (i, b) in bars.iter_mut().enumerate() {
+                b.date = (ms(i) / 1000).to_string();
+            }
+            let f = detect(&bars, &settings(), "double_top").remove(0);
+            shape(&f, &bars, 0, bars.len() - 1)
+        };
+        // Tops on bars 20 and 40, known 3 bars later, under the neck on bar 47.
+        let s = shaped(&[90.0, 110.0, 100.0, 110.0, 95.0]);
+        assert_eq!(s.status, PatternStatus::Confirmed);
+        let times = PatternTimes {
+            start: ms(20),
+            end: ms(40),
+            known: ms(43),
+            confirmed: Some(ms(47)),
+            failed: None,
+        };
+        assert_eq!(s.times, Some(times));
+        // Neck 99.9, tops 110.1: the target is the neck minus the height.
+        let h = s.height.unwrap();
+        assert!((h - 10.2).abs() < 1e-9, "{h}");
+        assert!((s.target.unwrap() - (99.9 - h)).abs() < 1e-9);
+        // Over the peaks before it broke: failed, never confirmed.
+        let s = shaped(&[90.0, 110.0, 100.0, 110.0, 106.0, 120.0]);
+        assert_eq!(s.status, PatternStatus::Failed);
+        let t = s.times.unwrap();
+        assert_eq!((t.start, t.end, t.known), (ms(20), ms(40), ms(43)));
+        assert_eq!(t.confirmed, None);
+        assert_eq!(t.failed, Some(ms(55)));
+        // Confirmed, then back over the peaks before the target: both are kept.
+        let s = shaped(&[90.0, 110.0, 100.0, 110.0, 97.0, 120.0]);
+        assert_eq!(s.status, PatternStatus::Failed);
+        let t = s.times.unwrap();
+        assert_eq!((t.confirmed, t.failed), (Some(ms(48)), Some(ms(57))));
+        // Bars without times give none.
+        let f = only(&HS, Kind::HeadAndShoulders);
+        assert_eq!(shape(&f, &path(&knots(10, &HS)), 0, 60).times, None);
     }
 
     #[test]

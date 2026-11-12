@@ -80,6 +80,61 @@ describe("future (ADR-0033)", () => {
   });
 });
 
+describe("chart pattern times (ADR-0046)", () => {
+  // As the server's tests get them: a double top on hourly bars from unix second 1e6.
+  const ms = (bar: number) => (1_000_000 + bar * 3600) * 1000;
+  const common = {
+    key: "double_top",
+    name: "Double Top",
+    bias: "bearish",
+    tooltip: "Double Top: ...",
+    invalidation: 111.63,
+    start_time: ms(20),
+    end_time: ms(40),
+    known_time: ms(43),
+    height: 10.2,
+  };
+  const confirmed = { ...common, status: "confirmed", target: 89.7, confirmed_time: ms(47), failed_time: null };
+  const failed = { ...common, status: "failed", confirmed_time: null, failed_time: ms(45) };
+  const summaryOf = (patterns: unknown[]) => ({
+    symbol: null,
+    interval: "1h",
+    price: { bars: 0 },
+    indicators: { chart_patterns: { label: "Chart Patterns", is_overlay: true, patterns } },
+  });
+
+  it("parses them on series and summary patterns", () => {
+    const stroke = { x1: 20, t1: 1072000, y1: 110.1, x2: 30, t2: 1108000, y2: 99.9, dashed: false };
+    const label = { x: 30, t: 1108000, y: 110.1, above: true };
+    const s = SeriesPayloadSchema.parse({
+      ...series,
+      indicators: {
+        chart_patterns: {
+          label: "Chart Patterns",
+          is_overlay: true,
+          patterns: [
+            { ...confirmed, strokes: [stroke], label, confirmed_t: 1169200 },
+            { ...failed, strokes: [stroke], label },
+          ],
+        },
+      },
+    });
+    const [c, f] = s.indicators.chart_patterns?.patterns ?? [];
+    expect([c?.confirmed_time, c?.failed_time]).toEqual([ms(47), null]);
+    expect([f?.confirmed_time, f?.failed_time, f?.start_time]).toEqual([null, ms(45), ms(20)]);
+    const summary = SummaryPayloadSchema.parse(summaryOf([{ ...confirmed, confirmed_x: 47 }, failed]));
+    expect(summary.indicators.chart_patterns?.patterns?.[1]?.failed_time).toBe(ms(45));
+  });
+
+  it("leaves them out where a pattern has none, and refuses a time that is not one", () => {
+    const { start_time: _s, end_time: _e, known_time: _k, confirmed_time: _c, failed_time: _f, height: _h, ...old } =
+      failed;
+    const p = SummaryPayloadSchema.parse(summaryOf([old]));
+    expect(p.indicators.chart_patterns?.patterns?.[0]?.start_time).toBeUndefined();
+    expect(() => SummaryPayloadSchema.parse(summaryOf([{ ...failed, start_time: "2026-11-12" }]))).toThrow();
+  });
+});
+
 describe("list_indicators source tag", () => {
   it("tags user scripts and leaves built-ins untagged", () => {
     const p = ListIndicatorsPayloadSchema.parse({
