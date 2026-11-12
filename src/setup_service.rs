@@ -800,13 +800,14 @@ impl Setups {
         // What the setup's state forbids is answered as that, and what was sent for it is
         // not judged: its problems would be about a change that cannot be made.
         let level_change = LEVEL_FIELDS.iter().any(|f| given(f));
-        let refusal = current.revise_refusal(level_change);
+        let tags_only = given("tags") && !given("thesis") && !given("drawings") && !level_change;
+        let refusal = current.revise_refusal(level_change, tags_only);
         let frozen = current.takes_no_change();
         let thesis = match given("thesis") && !frozen {
             true => setups::text(args, "thesis", MAX_THESIS, &mut problems),
             false => None,
         };
-        let tags = match given("tags") && !frozen {
+        let tags = match given("tags") && (!frozen || tags_only) {
             true => setups::tags(&args["tags"], &mut problems),
             false => None,
         };

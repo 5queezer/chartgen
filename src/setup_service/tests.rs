@@ -1821,7 +1821,8 @@ async fn list_setups_keeps_those_with_every_tag_asked_for() {
     let filled = call(&s, "get_setup", json!({ "id": one["id"] }), "owner").unwrap();
     assert_eq!(filled["status"], "triggered");
     assert_eq!(filled["mfe_r"], 0.0);
-    assert_eq!(filled["bars_to_exit"], 0);
+    assert_eq!(filled["bars_to_exit"], 0.0);
+    assert_eq!(filled["closest_approach_r"], 0.0);
     let args = json!({ "id": one["id"], "reason": "reviewed", "tags": ["review:late-entry"] });
     let revised = call(&s, "revise_setup", args, "owner").unwrap();
     assert_eq!(revised["tags"], json!(["review:late-entry"]));
@@ -1834,6 +1835,22 @@ async fn list_setups_keeps_those_with_every_tag_asked_for() {
         errors(&call(&s, "revise_setup", bad, "owner").unwrap_err()),
         ["tags[0]"]
     );
+
+    // Closed, it takes tags alone.
+    s.on_bar(
+        &key(),
+        bar(t + MINUTE_MS, p * 0.976, p * 0.977, p * 0.9, p * 0.91),
+    );
+    let both = json!({ "id": one["id"], "reason": "r", "tags": ["review:r1"], "thesis": "x" });
+    assert_eq!(
+        errors(&call(&s, "revise_setup", both, "owner").unwrap_err()),
+        ["id"]
+    );
+    let args = json!({ "id": one["id"], "reason": "reviewed", "tags": ["review:r1"] });
+    let reviewed = call(&s, "revise_setup", args, "owner").unwrap();
+    assert_eq!(reviewed["status"], "invalidated");
+    assert_eq!(reviewed["tags"], json!(["review:r1"]));
+    assert_eq!(kinds(&reviewed).last(), Some(&"revised"));
 }
 
 /// A row stored before tags and excursions existed loads with none, and is listed.
@@ -1843,7 +1860,14 @@ async fn a_row_from_before_tags_and_excursions_loads() {
     let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
     let new = created(&s, "owner");
     let mut old: Value = serde_json::from_str(&store.setups().unwrap()[0].0).unwrap();
-    for field in ["tags", "mae_r", "mfe_r", "bars_to_exit"] {
+    for field in [
+        "tags",
+        "mae_r",
+        "mfe_r",
+        "mae_at",
+        "mfe_at",
+        "closest_approach_r",
+    ] {
         old.as_object_mut().unwrap().remove(field);
     }
     old["id"] = json!("old");
@@ -1866,6 +1890,7 @@ async fn a_row_from_before_tags_and_excursions_loads() {
     assert_eq!(got["tags"], json!([]));
     assert_eq!(got["mae_r"], Value::Null);
     assert_eq!(got["bars_to_exit"], Value::Null);
+    assert_eq!(got["closest_approach_r"], Value::Null);
     let list = call(&s, "list_setups", json!({}), "owner").unwrap();
     assert_eq!(list["total"], 2);
     assert_eq!(

@@ -2,7 +2,11 @@
   "cancel_setup": {
     "agent_revisions": 1,
     "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
     "bracket": "agent",
+    "closest_approach_r": 0.0506,
     "costs": {
       "fee_bps_per_side": 5.0,
       "slippage_bps_per_side": 2.0
@@ -40,7 +44,9 @@
         "seq": 2
       }
     ],
+    "mae_at": null,
     "mae_r": null,
+    "mfe_at": null,
     "mfe_r": null,
     "pending": [
       {
@@ -62,7 +68,11 @@
   "create_setup": {
     "agent_revisions": 0,
     "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
     "bracket": "agent",
+    "closest_approach_r": null,
     "costs": {
       "fee_bps_per_side": 5.0,
       "slippage_bps_per_side": 2.0
@@ -106,7 +116,9 @@
         "seq": 1
       }
     ],
+    "mae_at": null,
     "mae_r": null,
+    "mfe_at": null,
     "mfe_r": null,
     "pending": [],
     "result_r": null,
@@ -126,7 +138,11 @@
   "create_setup_skip": {
     "agent_revisions": 0,
     "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
     "bracket": "atr",
+    "closest_approach_r": null,
     "costs": {
       "fee_bps_per_side": 5.0,
       "slippage_bps_per_side": 2.0
@@ -156,7 +172,9 @@
         "seq": 1
       }
     ],
+    "mae_at": null,
     "mae_r": null,
+    "mfe_at": null,
     "mfe_r": null,
     "pending": [],
     "result_r": null,
@@ -173,7 +191,11 @@
   "get_setup": {
     "agent_revisions": 1,
     "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
     "bracket": "agent",
+    "closest_approach_r": 0.0667,
     "costs": {
       "fee_bps_per_side": 5.0,
       "slippage_bps_per_side": 2.0
@@ -239,7 +261,9 @@
         "seq": 2
       }
     ],
+    "mae_at": null,
     "mae_r": null,
+    "mfe_at": null,
     "mfe_r": null,
     "pending": [],
     "result_r": null,
@@ -271,7 +295,11 @@
       {
         "agent_revisions": 1,
         "bars_to_exit": null,
+        "bars_to_fill": null,
+        "bars_to_mae": null,
+        "bars_to_mfe": null,
         "bracket": "agent",
+        "closest_approach_r": 0.0506,
         "costs": {
           "fee_bps_per_side": 5.0,
           "slippage_bps_per_side": 2.0
@@ -291,7 +319,9 @@
         "id": "setup-000003",
         "interval": "1h",
         "invalidation": 3024.1925,
+        "mae_at": null,
         "mae_r": null,
+        "mfe_at": null,
         "mfe_r": null,
         "pending": [],
         "result_r": 0.0,
@@ -307,8 +337,12 @@
       },
       {
         "agent_revisions": 0,
-        "bars_to_exit": 37,
+        "bars_to_exit": 2.47,
+        "bars_to_fill": 0.0,
+        "bars_to_mae": 0.47,
+        "bars_to_mfe": 2.47,
         "bracket": "atr",
+        "closest_approach_r": 0.0,
         "costs": {
           "fee_bps_per_side": 5.0,
           "slippage_bps_per_side": 2.0
@@ -334,7 +368,9 @@
         "id": "setup-000002",
         "interval": "15m",
         "invalidation": 3090.5726199926835,
+        "mae_at": 1767262020000,
         "mae_r": -0.317,
+        "mfe_at": 1767263820000,
         "mfe_r": 2.0,
         "pending": [],
         "result_r": 1.7659,
@@ -350,8 +386,12 @@
       },
       {
         "agent_revisions": 1,
-        "bars_to_exit": 12,
+        "bars_to_exit": 0.8,
+        "bars_to_fill": 16.2,
+        "bars_to_mae": 0.8,
+        "bars_to_mfe": 0.07,
         "bracket": "agent",
+        "closest_approach_r": 0.0,
         "costs": {
           "fee_bps_per_side": 5.0,
           "slippage_bps_per_side": 2.0
@@ -391,7 +431,9 @@
         "id": "setup-000001",
         "interval": "15m",
         "invalidation": 59654.103299999995,
+        "mae_at": 1767276900000,
         "mae_r": -1.0,
+        "mfe_at": 1767276240000,
         "mfe_r": 0.0275,
         "pending": [],
         "result_r": -1.1547,
@@ -413,7 +455,11 @@
   "revise_setup": {
     "agent_revisions": 1,
     "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
     "bracket": "agent",
+    "closest_approach_r": 0.0667,
     "costs": {
       "fee_bps_per_side": 5.0,
       "slippage_bps_per_side": 2.0
@@ -479,7 +525,9 @@
         "seq": 2
       }
     ],
+    "mae_at": null,
     "mae_r": null,
+    "mfe_at": null,
     "mfe_r": null,
     "pending": [
       {

@@ -3360,6 +3360,21 @@ async fn a_wake_up_reaches_the_agents_receiver_signed_with_the_setup_before_the_
     assert_eq!(parsed["setup"]["status"], "watching");
     assert!(parsed["setup"]["levels"]["invalidation"].is_f64());
     assert!(parsed["setup"].get("drawings").is_none() && parsed["setup"].get("owner").is_none());
+    // The review fields, as get_setup has them: null while watching unfilled.
+    assert_eq!(parsed["setup"]["tags"], json!([]));
+    for field in [
+        "mae_r",
+        "mfe_r",
+        "mae_at",
+        "mfe_at",
+        "closest_approach_r",
+        "bars_to_fill",
+        "bars_to_exit",
+        "bars_to_mae",
+        "bars_to_mfe",
+    ] {
+        assert!(parsed["setup"].get(field).is_some(), "{field}");
+    }
     assert_eq!(
         raw.to_lowercase()
             .split("webhook-id: ")

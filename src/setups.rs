@@ -207,10 +207,31 @@ pub struct Record {
     pub mae_r: Option<f64>,
     #[serde(default)]
     pub mfe_r: Option<f64>,
-    /// Scored 1m bars from the fill bar to the exit bar: 0 when one bar fills and closes
-    /// it. While the setup is filled, those so far.
+    /// Open time of the 1m bar that set `mae_r`, and of the one that set `mfe_r`: the
+    /// first, where two bars went as far.
     #[serde(default)]
-    pub bars_to_exit: Option<u32>,
+    pub mae_at: Option<i64>,
+    #[serde(default)]
+    pub mfe_at: Option<i64>,
+    /// While watching: the least distance from a bar's high or low to the entry zone, in
+    /// R of the risk from the zone's edge nearest the price to the invalidation. 0 once
+    /// filled. None when the setup's first bars were not scored here, as on a setup
+    /// stored before the server kept it.
+    #[serde(default)]
+    pub closest_approach_r: Option<f64>,
+}
+
+/// How long a setup took, in bars of its own interval, from times the record keeps:
+/// elapsed ms over the interval's ms, to two places.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct Durations {
+    /// Creation to the fill bar.
+    pub bars_to_fill: Option<f64>,
+    /// Fill bar to the exit bar; while filled, to the newest bar scored.
+    pub bars_to_exit: Option<f64>,
+    /// Fill bar to the bars that set `mae_r` and `mfe_r`.
+    pub bars_to_mae: Option<f64>,
+    pub bars_to_mfe: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,12 +463,18 @@ fn one_of<T: for<'de> Deserialize<'de>>(
 }
 
 /// Fields the server sets. Named so that an agent sending one learns why it is refused.
-const SERVER_FIELDS: [&str; 12] = [
+const SERVER_FIELDS: [&str; 18] = [
     "status",
     "result_r",
     "mae_r",
     "mfe_r",
+    "mae_at",
+    "mfe_at",
+    "closest_approach_r",
+    "bars_to_fill",
     "bars_to_exit",
+    "bars_to_mae",
+    "bars_to_mfe",
     "fill",
     "exit",
     "costs",
@@ -936,7 +963,9 @@ impl Record {
             tags: draft.tags,
             mae_r: None,
             mfe_r: None,
-            bars_to_exit: None,
+            mae_at: None,
+            mfe_at: None,
+            closest_approach_r: None,
         };
         let created = record.log(now_ms, By::Agent, Kind::Created, None, Map::new());
         (record, created)
@@ -989,16 +1018,17 @@ impl Record {
 
     /// Why this setup's state forbids a revision, with new levels or without. When it
     /// does, that is the whole answer: what is wrong with levels that could not be
-    /// applied anyway is not worth a round trip.
-    pub fn revise_refusal(&self, levels: bool) -> Option<Problem> {
-        if !self.status.is_open() {
-            return Some(Problem::new(
-                "id",
-                "this setup is closed and cannot be revised",
-            ));
+    /// applied anyway is not worth a round trip. Tags alone may change on any setup,
+    /// closed or being cancelled too: they label it, they do not move it.
+    pub fn revise_refusal(&self, levels: bool, tags_only: bool) -> Option<Problem> {
+        let only_tags = "only its tags can be revised now, in a call that changes nothing else";
+        if !self.status.is_open() && !tags_only {
+            return Some(
+                Problem::new("id", "this setup is closed and cannot be revised").hint(only_tags),
+            );
         }
-        if self.cancel_pending() {
-            return Some(Problem::new("id", "this setup is being cancelled"));
+        if self.cancel_pending() && !tags_only {
+            return Some(Problem::new("id", "this setup is being cancelled").hint(only_tags));
         }
         if levels && self.decision == Decision::Skip {
             return Some(
@@ -1028,7 +1058,9 @@ impl Record {
         now_ms: i64,
     ) -> Result<Revision, Vec<Problem>> {
         let mut problems = Vec::new();
-        match (self.revise_refusal(levels.is_some()), &levels) {
+        let tags_only =
+            tags.is_some() && thesis.is_none() && drawings.is_none() && levels.is_none();
+        match (self.revise_refusal(levels.is_some(), tags_only), &levels) {
             (Some(refusal), _) => problems.push(refusal),
             (None, Some(levels)) => {
                 check_levels(self.direction, levels, &self.costs, now_ms, &mut problems)
@@ -1109,9 +1141,10 @@ impl Record {
     }
 
     /// Widen the excursions by a price the position went `against` and one it went
-    /// `with`, in R from the fill, before costs. Only once they are kept: a setup filled
-    /// before they were has none, rather than ones that miss its start.
-    fn excursion(&mut self, against: f64, with: f64) {
+    /// `with` in the bar that opened at `at`, in R from the fill, before costs. Only
+    /// once they are kept: a setup filled before they were has none, rather than ones
+    /// that miss its start.
+    fn excursion(&mut self, against: f64, with: f64, at: i64) {
         let (Some(fill), Some(mae), Some(mfe)) = (self.fill, self.mae_r, self.mfe_r) else {
             return;
         };
@@ -1122,8 +1155,38 @@ impl Record {
         let r = |p: f64| {
             (self.direction.sign() * (p - fill.price) / risk * 10_000.0).round() / 10_000.0
         };
-        self.mae_r = Some(mae.min(r(against)));
-        self.mfe_r = Some(mfe.max(r(with)));
+        if r(against) < mae {
+            (self.mae_r, self.mae_at) = (Some(r(against)), Some(at));
+        }
+        if r(with) > mfe {
+            (self.mfe_r, self.mfe_at) = (Some(r(with)), Some(at));
+        }
+    }
+
+    /// Narrow the closest approach of a watching setup by this bar. Only when it was
+    /// kept from the first bar scored, so that it never misses a closer one before.
+    fn approach(&mut self, bar: &MinuteBar, reached: bool, first: bool) {
+        let entry = self.levels.entry;
+        let r = match reached {
+            true => 0.0,
+            false => {
+                let edge = if bar.low > entry.high {
+                    entry.high
+                } else {
+                    entry.low
+                };
+                let risk = (edge - self.levels.invalidation).abs();
+                if risk <= 0.0 {
+                    return;
+                }
+                let gap = (bar.low - entry.high).max(entry.low - bar.high);
+                (gap / risk * 10_000.0).round() / 10_000.0
+            }
+        };
+        self.closest_approach_r = match (first, self.closest_approach_r) {
+            (true, _) => Some(r),
+            (false, kept) => kept.map(|c| c.min(r)),
+        };
     }
 
     fn close(&mut self, status: Status, exit: Option<f64>, bar: &MinuteBar) -> Revision {
@@ -1172,12 +1235,8 @@ impl Record {
         {
             return out;
         }
+        let first = self.scored_through.is_none();
         self.scored_through = Some(bar.time);
-        if self.status == Status::Triggered {
-            if let Some(n) = &mut self.bars_to_exit {
-                *n += 1;
-            }
-        }
         // The prices of this bar that went against a position and with it.
         let (against, with) = match self.direction {
             Direction::Long => (bar.low, bar.high),
@@ -1211,7 +1270,7 @@ impl Record {
                 }
                 Pending::Cancel { .. } => {
                     let exit = self.fill.map(|_| bar.open);
-                    self.excursion(bar.open, bar.open);
+                    self.excursion(bar.open, bar.open, bar.time);
                     out.push(self.close(Status::Cancelled, exit, bar));
                     return out;
                 }
@@ -1220,7 +1279,7 @@ impl Record {
 
         if bar.time >= self.levels.expires_at {
             let exit = self.fill.map(|_| bar.open);
-            self.excursion(bar.open, bar.open);
+            self.excursion(bar.open, bar.open, bar.time);
             out.push(self.close(Status::Expired, exit, bar));
             return out;
         }
@@ -1243,6 +1302,7 @@ impl Record {
             let entry = self.levels.entry;
             let reached =
                 self.decision == Decision::Skip || (bar.low <= entry.high && bar.high >= entry.low);
+            self.approach(bar, reached, first);
             if !reached {
                 if stop_touched {
                     out.push(self.close(Status::Invalidated, None, bar));
@@ -1259,7 +1319,8 @@ impl Record {
             };
             self.fill = Some(fill);
             self.status = Status::Triggered;
-            (self.mae_r, self.mfe_r, self.bars_to_exit) = (Some(0.0), Some(0.0), Some(0));
+            (self.mae_r, self.mfe_r) = (Some(0.0), Some(0.0));
+            (self.mae_at, self.mfe_at) = (Some(bar.time), Some(bar.time));
             let mut changes = Map::new();
             changed(
                 &mut changes,
@@ -1272,10 +1333,10 @@ impl Record {
             // The bar that filled it can stop it out, and cannot win it: a bar does not
             // say in which order it traded. So it counts against the position only.
             if stop_touched {
-                self.excursion(stop, price);
+                self.excursion(stop, price, bar.time);
                 out.push(self.close(Status::Invalidated, Some(stop), bar));
             } else {
-                self.excursion(against, price);
+                self.excursion(against, price, bar.time);
             }
             return out;
         }
@@ -1284,7 +1345,7 @@ impl Record {
             // A gap through the level closes at the open, which is worse. The stop counts
             // first, so of this bar only its open went with the position.
             let exit = if stopped_at(bar.open) { bar.open } else { stop };
-            self.excursion(exit, bar.open);
+            self.excursion(exit, bar.open, bar.time);
             out.push(self.close(Status::Invalidated, Some(exit), bar));
         } else if let Some(target) = self.levels.targets.first().copied() {
             let reached = match self.direction {
@@ -1293,10 +1354,10 @@ impl Record {
             };
             if reached {
                 // Nothing beyond the target counts: the position was out there.
-                self.excursion(against, target);
+                self.excursion(against, target, bar.time);
                 out.push(self.close(Status::Won, Some(target), bar));
             } else {
-                self.excursion(against, with);
+                self.excursion(against, with, bar.time);
             }
         }
         out
@@ -1357,13 +1418,41 @@ impl Record {
         }
     }
 
-    /// As a tool answers it: everything but the owner, the levels as fields of the setup.
+    /// How long it took, in bars of its interval. A month counts as 30 days, as
+    /// everywhere else here (`Interval::secs`).
+    pub fn durations(&self) -> Durations {
+        let (Some(fill), Some(secs)) = (self.fill, crate::data::interval_secs(&self.interval))
+        else {
+            return Durations::default();
+        };
+        let bars = |from: i64, to: i64| {
+            ((to - from) as f64 / (secs * 1000) as f64 * 100.0).round() / 100.0
+        };
+        let last = match (self.exit, self.status) {
+            (Some(exit), _) => Some(exit.bar_time),
+            (None, Status::Triggered) => self.scored_through,
+            // Closed with no exit: it expired while nobody scored it.
+            (None, _) => None,
+        };
+        Durations {
+            bars_to_fill: Some(bars(self.created_at, fill.bar_time)),
+            bars_to_exit: last.map(|t| bars(fill.bar_time, t)),
+            bars_to_mae: self.mae_at.map(|t| bars(fill.bar_time, t)),
+            bars_to_mfe: self.mfe_at.map(|t| bars(fill.bar_time, t)),
+        }
+    }
+
+    /// As a tool answers it: everything but the owner, the levels as fields of the
+    /// setup, and its durations.
     pub fn view(&self) -> Value {
         let mut v = serde_json::to_value(self).unwrap_or_default();
         if let Some(map) = v.as_object_mut() {
             map.remove("owner");
             if let Some(Value::Object(levels)) = map.remove("levels") {
                 map.extend(levels);
+            }
+            if let Ok(Value::Object(durations)) = serde_json::to_value(self.durations()) {
+                map.extend(durations);
             }
         }
         v

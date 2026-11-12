@@ -926,6 +926,12 @@ fn a_message_shows_numbers_as_a_person_would_write_them() {
     );
 }
 
+/// The excursions with the bars that set them, in minutes from T0.
+fn extremes(r: &Record) -> (Option<f64>, Option<i64>, Option<f64>, Option<i64>) {
+    let minute = |t: Option<i64>| t.map(|t| (t - T0) / MIN);
+    (r.mae_r, minute(r.mae_at), r.mfe_r, minute(r.mfe_at))
+}
+
 #[test]
 fn excursions_of_a_long_are_read_from_the_fill_to_the_exit() {
     let mut r = create(long_args());
@@ -934,64 +940,80 @@ fn excursions_of_a_long_are_read_from_the_fill_to_the_exit() {
         &[
             bar(0, 103.0, 103.5, 102.0, 102.5),
             // Filled at 101, risk 3. Its high is not counted: the fill bar cannot win.
-            bar(1, 102.5, 102.6, 100.8, 101.2),
+            bar(30, 102.5, 102.6, 100.8, 101.2),
         ],
     );
     assert_eq!(r.status, Status::Triggered);
+    assert_eq!(extremes(&r), (Some(-0.0667), Some(30), Some(0.0), Some(30)));
+    r.apply_bar(&bar(90, 101.2, 103.0, 99.5, 102.9));
+    assert_eq!(extremes(&r), (Some(-0.5), Some(90), Some(0.6667), Some(90)));
+    // Filled, the durations so far, in bars of its 1h interval.
     assert_eq!(
-        (r.mae_r, r.mfe_r, r.bars_to_exit),
-        (Some(-0.0667), Some(0.0), Some(0))
+        r.durations(),
+        Durations {
+            bars_to_fill: Some(0.5),
+            bars_to_exit: Some(1.0),
+            bars_to_mae: Some(1.0),
+            bars_to_mfe: Some(1.0),
+        }
     );
-    walk(
-        &mut r,
-        &[
-            bar(2, 101.2, 103.0, 99.5, 102.9),
-            // Won at 104: what traded beyond it is not counted.
-            bar(3, 102.9, 104.6, 102.8, 104.0),
-        ],
-    );
+    // Won at 104: what traded beyond it is not counted.
+    r.apply_bar(&bar(150, 102.9, 104.6, 102.8, 104.0));
     assert_eq!(r.status, Status::Won);
+    assert_eq!(extremes(&r), (Some(-0.5), Some(90), Some(1.0), Some(150)));
     assert_eq!(
-        (r.mae_r, r.mfe_r, r.bars_to_exit),
-        (Some(-0.5), Some(1.0), Some(2))
+        r.durations(),
+        Durations {
+            bars_to_fill: Some(0.5),
+            bars_to_exit: Some(2.0),
+            bars_to_mae: Some(1.0),
+            bars_to_mfe: Some(2.0),
+        }
     );
     // Before costs, unlike the result.
     assert!(r.result_r.unwrap() < 1.0);
+    let view = r.view();
+    assert_eq!(view["bars_to_exit"], 2.0);
+    assert_eq!(view["mfe_at"], T0 + 150 * MIN);
 
     // Filled and stopped in one bar: out at the stop, whatever the wick did.
     let mut stopped = create(long_args());
     stopped.apply_bar(&bar(0, 102.0, 102.1, 97.5, 97.8));
     assert_eq!(
-        (stopped.mae_r, stopped.mfe_r, stopped.bars_to_exit),
-        (Some(-1.0), Some(0.0), Some(0))
+        extremes(&stopped),
+        (Some(-1.0), Some(0), Some(0.0), Some(0))
     );
+    assert_eq!(stopped.durations().bars_to_exit, Some(0.0));
 }
 
 #[test]
-fn excursions_of_a_short_count_highs_against_it_and_stop_at_the_exit() {
+fn excursions_of_a_short_say_which_extreme_came_first() {
     let mut r = create(short_args());
     walk(
         &mut r,
         &[
             // Filled at 100, risk 3.
             bar(0, 99.0, 100.4, 98.9, 100.2),
-            bar(1, 100.2, 100.5, 98.0, 98.4),
+            bar(60, 100.2, 100.5, 98.0, 98.4),
         ],
     );
     assert_eq!(
-        (r.mae_r, r.mfe_r, r.bars_to_exit),
-        (Some(-0.1667), Some(0.6667), Some(1))
+        extremes(&r),
+        (Some(-0.1667), Some(60), Some(0.6667), Some(60))
     );
     // Stopped at 103: the stop counts first, so of this bar its open went with the
     // position, not its low.
-    r.apply_bar(&bar(2, 98.4, 103.5, 97.0, 103.2));
+    r.apply_bar(&bar(240, 98.4, 103.5, 97.0, 103.2));
     assert_eq!(r.status, Status::Invalidated);
     assert_eq!(
-        (r.mae_r, r.mfe_r, r.bars_to_exit),
-        (Some(-1.0), Some(0.6667), Some(2))
+        extremes(&r),
+        (Some(-1.0), Some(240), Some(0.6667), Some(60))
     );
+    let d = r.durations();
+    assert_eq!((d.bars_to_mfe, d.bars_to_mae), (Some(1.0), Some(4.0)));
+    assert_eq!((d.bars_to_fill, d.bars_to_exit), (Some(0.0), Some(4.0)));
 
-    // A cancel closes at the next bar's open and counts that bar.
+    // A cancel closes at the next bar's open: that open counts, the rest of the bar not.
     let mut cancelled = create(short_args());
     cancelled.apply_bar(&bar(0, 99.0, 100.4, 98.9, 100.2));
     cancelled.cancel("done".into(), T0 + MIN + 1).unwrap();
@@ -1004,41 +1026,139 @@ fn excursions_of_a_short_count_highs_against_it_and_stop_at_the_exit() {
     );
     assert_eq!(cancelled.status, Status::Cancelled);
     assert_eq!(
-        (cancelled.mae_r, cancelled.mfe_r, cancelled.bars_to_exit),
-        (Some(-0.1333), Some(0.3), Some(2))
+        extremes(&cancelled),
+        (Some(-0.1333), Some(0), Some(0.3), Some(2))
     );
 }
 
 #[test]
-fn excursions_wait_for_the_fill() {
+fn durations_are_in_bars_of_the_setups_own_interval() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
+    r.apply_bar(&bar(120, 100.6, 100.9, 100.2, 100.6));
+    for (interval, bars) in [
+        ("1h", 2.0),
+        ("4h", 0.5),
+        ("7m", 17.14),
+        ("45m", 2.67),
+        ("1m", 120.0),
+        ("2D", 0.04),
+    ] {
+        r.interval = interval.into();
+        assert_eq!(r.durations().bars_to_exit, Some(bars), "{interval}");
+    }
+    r.interval = "nonsense".into();
+    assert_eq!(r.durations(), Durations::default());
+}
+
+#[test]
+fn excursions_and_durations_wait_for_the_fill() {
     let mut r = create(long_args());
     walk(&mut r, &[bar(0, 103.0, 110.0, 102.0, 102.5)]);
     assert_eq!(r.status, Status::Watching);
-    assert_eq!((r.mae_r, r.mfe_r, r.bars_to_exit), (None, None, None));
+    assert_eq!(extremes(&r), (None, None, None, None));
+    assert_eq!(r.durations(), Durations::default());
     let view = r.view();
-    assert_eq!(view["mae_r"], Value::Null);
-    assert_eq!(view["bars_to_exit"], Value::Null);
+    for field in [
+        "mae_r",
+        "mfe_at",
+        "bars_to_fill",
+        "bars_to_exit",
+        "bars_to_mae",
+    ] {
+        assert_eq!(view[field], Value::Null, "{field}");
+    }
     // Closed without a fill, it has none either.
     r.apply_bar(&bar(1, 97.0, 97.5, 96.5, 97.2));
     assert_eq!(r.status, Status::Invalidated);
-    assert_eq!((r.mae_r, r.mfe_r, r.bars_to_exit), (None, None, None));
+    assert_eq!(extremes(&r), (None, None, None, None));
+    assert_eq!(r.durations(), Durations::default());
+}
+
+#[test]
+fn closest_approach_says_how_near_an_unfilled_setup_came() {
+    // Above the zone of a long: from its high edge, 101, risk 3 to 98.
+    let mut r = create(long_args());
+    walk(
+        &mut r,
+        &[
+            bar(0, 103.0, 103.5, 102.0, 102.5),
+            bar(1, 102.5, 102.6, 101.6, 102.0),
+            bar(2, 102.0, 104.0, 101.9, 103.5),
+        ],
+    );
+    assert_eq!(r.closest_approach_r, Some(0.2));
+    r.cancel("not coming".into(), T0 + 2 * MIN + 1).unwrap();
+    r.apply_bar(&bar(3, 103.5, 103.6, 100.5, 101.0));
+    assert_eq!(r.status, Status::Cancelled);
+    assert_eq!(
+        r.closest_approach_r,
+        Some(0.2),
+        "the cancel bar is not scored"
+    );
+
+    // Below the zone of a long, a breakout: from its low edge, 100, risk 2.
+    let mut below = create(long_args());
+    below.apply_bar(&bar(0, 99.0, 99.5, 98.5, 99.2));
+    assert_eq!(below.closest_approach_r, Some(0.25));
+    // Below the zone of a short: from its low edge, 100, risk 3 to 103.
+    let mut short = create(short_args());
+    short.apply_bar(&bar(0, 98.0, 99.0, 97.5, 98.5));
+    assert_eq!(short.closest_approach_r, Some(0.3333));
+    // Filled, it is 0.
+    short.apply_bar(&bar(1, 98.5, 100.2, 98.4, 100.1));
+    assert_eq!(short.status, Status::Triggered);
+    assert_eq!(short.closest_approach_r, Some(0.0));
+
+    // Expired unfilled, it still says how near it came.
+    let mut expired = create(long_args());
+    walk(
+        &mut expired,
+        &[
+            bar(0, 103.0, 103.5, 101.3, 102.5),
+            bar(1440, 103.0, 103.5, 101.0, 102.5),
+        ],
+    );
+    assert_eq!(expired.status, Status::Expired);
+    assert_eq!(expired.closest_approach_r, Some(0.1));
 }
 
 #[test]
 fn a_record_written_before_tags_and_excursions_loads_without_them() {
     let mut r = create(long_args());
-    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
-    let mut old = serde_json::to_value(&r).unwrap();
-    for field in ["tags", "mae_r", "mfe_r", "bars_to_exit"] {
-        old.as_object_mut().unwrap().remove(field);
+    r.apply_bar(&bar(0, 103.0, 103.5, 102.0, 102.5));
+    let mut watching = serde_json::to_value(&r).unwrap();
+    r.apply_bar(&bar(1, 100.5, 100.9, 100.2, 100.6));
+    let mut filled = serde_json::to_value(&r).unwrap();
+    let new = [
+        "tags",
+        "mae_r",
+        "mfe_r",
+        "mae_at",
+        "mfe_at",
+        "closest_approach_r",
+    ];
+    for old in [&mut watching, &mut filled] {
+        for field in new {
+            old.as_object_mut().unwrap().remove(field);
+        }
     }
-    let mut old: Record = serde_json::from_value(old).unwrap();
-    assert_eq!(old.tags, Vec::<String>::new());
-    assert_eq!((old.mae_r, old.mfe_r, old.bars_to_exit), (None, None, None));
+    let mut watching: Record = serde_json::from_value(watching).unwrap();
+    assert_eq!(watching.tags, Vec::<String>::new());
+    // Its first bars were scored before the approach was kept: none, rather than one
+    // that may miss a closer bar.
+    watching.apply_bar(&bar(1, 102.5, 102.6, 101.6, 102.0));
+    assert_eq!(watching.closest_approach_r, None);
+
+    let mut filled: Record = serde_json::from_value(filled).unwrap();
+    assert_eq!(extremes(&filled), (None, None, None, None));
     // Filled before they were kept: none, rather than ones that miss its start.
-    old.apply_bar(&bar(1, 100.6, 103.0, 99.0, 102.0));
-    assert_eq!(old.status, Status::Triggered);
-    assert_eq!((old.mae_r, old.mfe_r, old.bars_to_exit), (None, None, None));
+    filled.apply_bar(&bar(2, 100.6, 103.0, 99.0, 102.0));
+    assert_eq!(filled.status, Status::Triggered);
+    assert_eq!(extremes(&filled), (None, None, None, None));
+    // The durations come from times every record keeps.
+    assert_eq!(filled.durations().bars_to_fill, Some(0.02));
+    assert_eq!(filled.durations().bars_to_mae, None);
 }
 
 #[test]
@@ -1106,5 +1226,50 @@ fn tags_can_be_revised_after_the_fill_and_are_logged() {
     let same = Some(r.tags.clone());
     assert!(r
         .revise(None, None, same, None, "again".into(), T0 + MIN)
+        .is_err());
+}
+
+#[test]
+fn a_closed_setup_takes_tags_alone() {
+    let mut r = create(with(long_args(), "tags", json!(["a"])));
+    r.apply_bar(&bar(0, 100.5, 100.9, 100.2, 100.6));
+    r.apply_bar(&bar(1, 100.6, 104.5, 100.5, 104.2));
+    assert_eq!(r.status, Status::Won);
+    let review = || Some(vec!["a".to_string(), "review:r1".to_string()]);
+    // With anything else, the whole call is refused, and the hint says what may change.
+    for (thesis, drawings) in [(Some("later".to_string()), None), (None, Some(vec![]))] {
+        let refused = r
+            .revise(thesis, drawings, review(), None, "r".into(), T0 + 2 * MIN)
+            .unwrap_err();
+        assert_eq!(fields(&refused), ["id"]);
+        assert!(refused[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("only its tags"));
+    }
+    let levels = Some(r.levels.clone());
+    assert!(r
+        .revise(None, None, review(), levels, "r".into(), T0 + 2 * MIN)
+        .is_err());
+    assert_eq!(r.tags, ["a"]);
+    let revision = r
+        .revise(None, None, review(), None, "reviewed".into(), T0 + 2 * MIN)
+        .unwrap();
+    assert_eq!(r.tags, ["a", "review:r1"]);
+    assert_eq!(
+        revision.changes["tags"],
+        json!({ "from": ["a"], "to": ["a", "review:r1"] })
+    );
+    assert_eq!(r.status, Status::Won, "nothing else moves");
+
+    // Being cancelled, the same.
+    let mut cancelling = create(long_args());
+    cancelling.cancel("done".into(), T0 + 1).unwrap();
+    assert!(cancelling
+        .revise(None, None, review(), None, "r".into(), T0 + 2)
+        .is_ok());
+    assert!(cancelling
+        .revise(Some("x".into()), None, None, None, "r".into(), T0 + 3)
         .is_err());
 }
