@@ -840,7 +840,9 @@ impl Setups {
 
         let mut st = self.lock();
         let mut record = self.find(&st, args, owner)?;
-        if record.agent_revisions >= self.limits.agent_revisions_per_setup {
+        // Review tags on a closed setup do not count against its revisions: they come after.
+        let review_tags = tags_only && !record.status.is_open();
+        if record.agent_revisions >= self.limits.agent_revisions_per_setup && !review_tags {
             return Err(format!(
                 "Limit reached: at most {} revisions per setup",
                 self.limits.agent_revisions_per_setup

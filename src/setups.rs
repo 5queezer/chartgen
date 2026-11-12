@@ -1251,10 +1251,14 @@ impl Record {
             self.pending = later;
             due
         };
+        // New levels in effect start the closest approach again: it is to the zone the
+        // setup has, not one it had.
+        let mut restart = false;
         for change in due {
             match change {
                 Pending::Levels { levels, .. } if self.status == Status::Watching => {
                     self.levels = levels;
+                    restart = true;
                 }
                 Pending::Levels { at, .. } => {
                     out.push(self.log(
@@ -1302,7 +1306,7 @@ impl Record {
             let entry = self.levels.entry;
             let reached =
                 self.decision == Decision::Skip || (bar.low <= entry.high && bar.high >= entry.low);
-            self.approach(bar, reached, first);
+            self.approach(bar, reached, first || restart);
             if !reached {
                 if stop_touched {
                     out.push(self.close(Status::Invalidated, None, bar));
@@ -1345,7 +1349,14 @@ impl Record {
             // A gap through the level closes at the open, which is worse. The stop counts
             // first, so of this bar only its open went with the position.
             let exit = if stopped_at(bar.open) { bar.open } else { stop };
-            self.excursion(exit, bar.open, bar.time);
+            // Nothing past the first target counts for it either: the scorer reads the
+            // stop first, but a position is not further in profit than its target.
+            let with = match (self.direction, self.levels.targets.first()) {
+                (Direction::Long, Some(&t)) => bar.open.min(t),
+                (Direction::Short, Some(&t)) => bar.open.max(t),
+                (_, None) => bar.open,
+            };
+            self.excursion(exit, with, bar.time);
             out.push(self.close(Status::Invalidated, Some(exit), bar));
         } else if let Some(target) = self.levels.targets.first().copied() {
             let reached = match self.direction {

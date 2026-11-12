@@ -1137,6 +1137,36 @@ fn closest_approach_says_how_near_an_unfilled_setup_came() {
     );
     assert_eq!(expired.status, Status::Expired);
     assert_eq!(expired.closest_approach_r, Some(0.1));
+
+    // New levels in effect start it again: it is to the zone the setup has.
+    let mut moved = create(long_args());
+    moved.apply_bar(&bar(0, 102.0, 102.0, 101.25, 101.5));
+    assert_eq!(moved.closest_approach_r, Some(0.0833));
+    let mut lower = moved.levels.clone();
+    (lower.entry.low, lower.entry.high, lower.invalidation) = (95.0, 96.0, 93.0);
+    moved
+        .revise(None, None, None, Some(lower), "lower".into(), T0 + 90_000)
+        .unwrap();
+    walk(
+        &mut moved,
+        &[
+            bar(2, 102.0, 102.5, 101.25, 102.0),
+            bar(3, 102.0, 102.5, 101.25, 102.0),
+        ],
+    );
+    assert_eq!(moved.closest_approach_r, Some(1.75));
+}
+
+#[test]
+fn a_stop_bar_that_opens_past_the_target_counts_no_more_than_the_target() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 100.5, 100.8, 100.2, 100.6));
+    assert_eq!(r.status, Status::Triggered);
+    r.apply_bar(&bar(1, 105.0, 105.0, 97.5, 98.0));
+    assert_eq!(r.status, Status::Invalidated);
+    // Filled at 100.5, risk 2.5: the target 104 is 1.4 R, the 105 open 1.8 R.
+    assert_eq!(r.mfe_r, Some(1.4));
+    assert_eq!(r.mae_r, Some(-1.0));
 }
 
 #[test]

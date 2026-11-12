@@ -106,6 +106,7 @@ nobody scored it, since it has no exit.
 low and the entry zone, in R of the risk from the zone's edge nearest the price to the
 invalidation. `0.1` means the price came within a tenth of the planned risk. It is 0 once a bar
 reaches the zone, so on a setup that expired or was cancelled unfilled it says how near it came.
+It is to the entry zone in effect: when revised levels take effect, it starts again.
 It is null before the first bar is scored, and on setups that were already being scored before
 the server kept it.
 
@@ -150,8 +151,8 @@ cancelled.
 
 ## Limits
 
-Per owner: 20 open setups, 500 in total, open setups on 5 symbols, 50 revisions per setup, 10
-changes a minute, and 4 MiB for setups and their logs. Closed setups are kept; at a limit a new
+Per owner: 20 open setups, 500 in total, open setups on 5 symbols, 50 revisions per setup (tags
+alone on a closed setup do not count), 10 changes a minute, and 4 MiB for setups and their logs. Closed setups are kept; at a limit a new
 one is refused and nothing old is dropped. `list_setups` returns the limits.
 
 ## When the server was away

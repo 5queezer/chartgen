@@ -1853,6 +1853,31 @@ async fn list_setups_keeps_those_with_every_tag_asked_for() {
     assert_eq!(kinds(&reviewed).last(), Some(&"revised"));
 }
 
+/// Review tags on a closed setup do not count against its revisions.
+#[tokio::test]
+async fn review_tags_fit_a_closed_setup_out_of_revisions() {
+    let limits = Limits {
+        agent_revisions_per_setup: 1,
+        ..Limits::default()
+    };
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
+    let one = call(&s, "create_setup", long(), "owner").unwrap();
+    let thesis = json!({ "id": one["id"], "reason": "r", "thesis": "changed" });
+    call(&s, "revise_setup", thesis.clone(), "owner").unwrap();
+    let full = call(&s, "revise_setup", thesis, "owner").unwrap_err();
+    assert!(full.contains("at most 1 revisions per setup"), "{full}");
+    let (t, p) = (first_bar(&one), mid(&one));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    s.on_bar(
+        &key(),
+        bar(t + MINUTE_MS, p * 0.976, p * 0.977, p * 0.9, p * 0.91),
+    );
+    let args = json!({ "id": one["id"], "reason": "reviewed", "tags": ["review:r1"] });
+    let reviewed = call(&s, "revise_setup", args, "owner").unwrap();
+    assert_eq!(reviewed["status"], "invalidated");
+    assert_eq!(reviewed["tags"], json!(["review:r1"]));
+}
+
 /// A row stored before tags and excursions existed loads with none, and is listed.
 #[tokio::test]
 async fn a_row_from_before_tags_and_excursions_loads() {
