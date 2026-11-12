@@ -171,13 +171,13 @@ impl Indicator for AutoFib {
         if let Some(v) = p.get("reverse").and_then(|v| v.as_bool()) {
             self.reverse = v;
         }
-        for i in 0..SLOTS {
+        for (i, level) in self.levels.iter_mut().enumerate().take(SLOTS) {
             let key = format!("level{}", i + 1);
             match p.get(&key) {
-                Some(Value::Null) => self.levels[i] = None,
+                Some(Value::Null) => *level = None,
                 Some(v) => {
                     if let Some(r) = v.as_f64() {
-                        self.levels[i] = Some(r);
+                        *level = Some(r);
                     }
                 }
                 None => {}

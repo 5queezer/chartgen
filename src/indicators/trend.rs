@@ -250,9 +250,9 @@ impl Indicator for MaRibbon {
         if let Some(s) = get_str(p, "source", SOURCES) {
             self.source = s;
         }
-        for i in 0..4 {
+        for (i, length) in self.lengths.iter_mut().enumerate() {
             if let Some(v) = get_usize(p, &format!("length{}", i + 1)) {
-                self.lengths[i] = v;
+                *length = v;
             }
         }
     }
