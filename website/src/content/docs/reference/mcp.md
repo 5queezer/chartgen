@@ -1163,9 +1163,11 @@ letters (`A`-`Z`, `a`-`z`, then around again), block indices, and volume, spread
 
 ### Server alerts (`CHARTGEN_SERVER_ALERTS=1`)
 
-Price alerts that run on the server with no browser open, and can call a webhook
+Alerts that run on the server with no browser open, and can call a webhook
 ([guide](/chartgen/guides/web/#alerts-on-the-server),
-[ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). These tools are listed only
+[ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). They watch the price, or an
+[indicator's line at bar closes](#indicator-alerts-on-the-server)
+([ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/)). These tools are listed only
 when the server runs with `CHARTGEN_SERVER_ALERTS=1` and answer only on the HTTP
 transport: an alert belongs to the OAuth client of the bearer token, or with
 [sign-in](/chartgen/reference/oauth/#sign-in) to its user, and another client or user
@@ -1178,15 +1180,15 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `level`, `trigger`; optional `interval` (default `1m`), `evaluate_on`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
 | `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
 | `subscribe_push` | `endpoint`, `p256dh`, `auth` | `{devices}`: registers this browser's push subscription |
 | `unsubscribe_push` | `endpoint` | `{removed, devices}` |
 
-- `symbol`: a Binance symbol. A stock is refused. Drawing and indicator alerts cannot
-  run here.
+- `symbol`: a Binance symbol. A stock is refused. Drawing alerts cannot run here;
+  [indicator alerts](#indicator-alerts-on-the-server) can, at bar closes.
 - `condition`: `crossing`, `crossing_up`, `crossing_down`, `greater`, `less`. A crossing
   needs a previous reading, so the first price after creating, resuming, editing or a
   server restart never fires one. `greater` and `less` can fire on it.
@@ -1201,7 +1203,8 @@ what your client may do.
   re-arms it. A new `message` or webhook leaves its state alone, so a spent alert stays spent.
   `active: false` pauses, `active: true` resumes re-armed. `webhook_url: ""` removes the webhook,
   and a new URL drops the signing secret unless `sign: true` is sent with it. `sign: false` stops
-  signing. Symbol, interval and `evaluate_on` cannot change.
+  signing. Symbol, interval and `evaluate_on` cannot change, nor can an indicator alert's
+  `indicator`, `params`, `line` and `compare`.
 
 An alert in a list:
 
@@ -1232,6 +1235,8 @@ An alert in a list:
 Times are unix milliseconds. `webhook` shows the host only, never the URL or the secret.
 An alert that [wakes your agent](#waking-your-agent) also has `"notify_agent": true`, and
 `"setup_id"` if it is about a setup; other alerts have neither field.
+An [indicator alert](#indicator-alerts-on-the-server) also has `"indicator"`, and its `level` is
+`null` when it compares the close with the line.
 `feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
@@ -1241,6 +1246,53 @@ watched and 2 per client, 10 creates or updates per client per minute, 6 fires p
 per minute, 30 webhooks per client and 120 in total per minute. A delivery over those waits its
 turn, up to 50 per client and for up to an hour, with the client that waited longest going first;
 past that the fire still counts and `last_error` says the webhook was skipped.
+
+#### Indicator alerts on the server
+
+An alert can watch an indicator's line instead of the price
+([ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/)). At each close of its
+interval the server computes the indicator over that symbol's bars, as a chart of it would,
+and compares:
+
+- with `compare: "level"` (the default), **the line with `level`**: RSI 14 under 25 on 4h,
+- with `compare: "close"`, **the bar's close with the line**, and no `level`: the 1d close
+  crossing EMA 50.
+
+```json
+{ "symbol": "BTCUSDT", "interval": "4h", "evaluate_on": "close",
+  "indicator": "rsi", "params": { "length": 14 },
+  "condition": "crossing_down", "level": 25, "trigger": "every", "notify_agent": true }
+
+{ "symbol": "ETHUSDT", "interval": "1d", "evaluate_on": "close",
+  "indicator": "ma", "params": { "type": "ema", "length": 50 }, "compare": "close",
+  "condition": "crossing_up", "trigger": "once" }
+```
+
+- `indicator`: one of `rsi`, `ma`, `macd`, `stoch`, `cci`, `mfi`, `williams_r`, `roc`, `atr`,
+  `adx`. An EMA or SMA of a length is `ma` with `type` and `length` (`ema` is the fixed
+  8/21/50/200 stack). Your own scripts and indicators that fetch other data (funding, open
+  interest) are refused.
+- `params`: as [`list_indicators`](#list_indicators) gives them. The indicator must settle within
+  the 1000 bars the server keeps: EMA 200 and RSI up to about 120 do. `offset` is refused.
+- `line`: the line's legend label, any case, e.g. `Signal` of `macd` or `%D` of `stoch`. Default:
+  the first line.
+- `evaluate_on` must be `close`, and `interval` 1h or longer.
+- `level`: any number, negative too. Absent with `compare: "close"`; sending one there is refused.
+- **A crossing compares two closes**: the line, or the close and the line, at the bar that
+  closed and at the bar before it, both from the bars. So unlike a price alert, the first close
+  after creating it, or after a restart, can fire a crossing. A close is read once: one the
+  alert fired on does not fire again after a restart.
+- When the alert is created, or after a restart, the server reads the symbol's last 1000 bars
+  once, through the same Binance budget as a chart; `feed` is `waiting` until it has them. If
+  a close goes missing (a reconnect, a lag) it reads them again and then reads that close.
+- The alert in a list has `"indicator": {"name", "params", "line", "compare", "value"}`, where
+  `value` is the line at the last close read, or `null` before the first.
+- `update_server_alert` changes its `condition`, `level` and `trigger` like a price alert's.
+
+The [webhook payload](#webhook-payload) and the [wake-up](#waking-your-agent) carry the same
+`"indicator"` object, with `value` at the close that fired. `level` there is the level the
+alert compares with, or with `compare: "close"` the line's value that the close crossed. A
+price alert's payload has no `indicator` and is unchanged.
 
 A spent alert is deleted 7 days after it fired. An alert is deleted once its owner has had no
 token for 30 days, unless the operator listed that client.

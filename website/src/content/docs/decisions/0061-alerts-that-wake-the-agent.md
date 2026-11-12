@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-11
+**Amended by:** [ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) (an indicator alert's wake-up carries the indicator; `level` is the one stored with the fire)
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (deliveries also carry the
 Standard Webhooks headers; one receiver inside, which only the operator can name; wake-ups have a
 queue, a pace and slots of their own)
