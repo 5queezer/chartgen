@@ -57,6 +57,7 @@
     "result_r": null,
     "revisions": 2,
     "scored_through": 1767268800000,
+    "shadow_results": null,
     "status": "watching",
     "symbol": "ETHUSDT",
     "tags": [],
@@ -124,6 +125,7 @@
     "result_r": null,
     "revisions": 1,
     "scored_through": null,
+    "shadow_results": null,
     "status": "watching",
     "symbol": "BTCUSDT",
     "tags": [
@@ -180,6 +182,7 @@
     "result_r": null,
     "revisions": 1,
     "scored_through": null,
+    "shadow_results": null,
     "status": "watching",
     "symbol": "ETHUSDT",
     "tags": [],
@@ -269,6 +272,7 @@
     "result_r": null,
     "revisions": 2,
     "scored_through": 1767268740000,
+    "shadow_results": null,
     "status": "watching",
     "symbol": "BTCUSDT",
     "tags": [
@@ -327,6 +331,7 @@
         "result_r": 0.0,
         "revisions": 3,
         "scored_through": 1767268860000,
+        "shadow_results": null,
         "status": "cancelled",
         "symbol": "ETHUSDT",
         "tags": [],
@@ -375,7 +380,56 @@
         "pending": [],
         "result_r": 1.7659,
         "revisions": 3,
-        "scored_through": 1767263820000,
+        "scored_through": 1767283200000,
+        "shadow_results": {
+          "v1_half_t1_be": {
+            "exited_at": 1767283200000,
+            "exits": [
+              {
+                "bar_time": 1767263820000,
+                "fraction": 0.5,
+                "price": 3035.7847600146333
+              },
+              {
+                "bar_time": 1767283200000,
+                "fraction": 0.5,
+                "price": 2981.23
+              }
+            ],
+            "result_r": 3.2606,
+            "status": "expired",
+            "stop": 3068.0117747576696,
+            "time_stop_at": null
+          },
+          "v2_be_at_1r": {
+            "exited_at": 1767263820000,
+            "exits": [
+              {
+                "bar_time": 1767263820000,
+                "fraction": 1.0,
+                "price": 3035.7847600146333
+              }
+            ],
+            "result_r": 1.7659,
+            "status": "won",
+            "stop": 3068.0117747576696,
+            "time_stop_at": null
+          },
+          "v3_time_stop": {
+            "exited_at": 1767263820000,
+            "exits": [
+              {
+                "bar_time": 1767263820000,
+                "fraction": 1.0,
+                "price": 3035.7847600146333
+              }
+            ],
+            "result_r": 1.7659,
+            "status": "won",
+            "stop": 3090.5726199926835,
+            "time_stop_at": 1767273300000
+          }
+        },
         "status": "won",
         "symbol": "ETHUSDT",
         "tags": [],
@@ -439,6 +493,50 @@
         "result_r": -1.1547,
         "revisions": 4,
         "scored_through": 1767276900000,
+        "shadow_results": {
+          "v1_half_t1_be": {
+            "exited_at": 1767276900000,
+            "exits": [
+              {
+                "bar_time": 1767276900000,
+                "fraction": 1.0,
+                "price": 59654.103299999995
+              }
+            ],
+            "result_r": -1.1547,
+            "status": "stopped",
+            "stop": 59654.103299999995,
+            "time_stop_at": null
+          },
+          "v2_be_at_1r": {
+            "exited_at": 1767276900000,
+            "exits": [
+              {
+                "bar_time": 1767276900000,
+                "fraction": 1.0,
+                "price": 59654.103299999995
+              }
+            ],
+            "result_r": -1.1547,
+            "status": "stopped",
+            "stop": 59654.103299999995,
+            "time_stop_at": null
+          },
+          "v3_time_stop": {
+            "exited_at": 1767276900000,
+            "exits": [
+              {
+                "bar_time": 1767276900000,
+                "fraction": 1.0,
+                "price": 59654.103299999995
+              }
+            ],
+            "result_r": -1.1547,
+            "status": "stopped",
+            "stop": 59654.103299999995,
+            "time_stop_at": 1767287700000
+          }
+        },
         "status": "invalidated",
         "symbol": "BTCUSDT",
         "tags": [
@@ -549,6 +647,7 @@
     "result_r": null,
     "revisions": 2,
     "scored_through": 1767261600000,
+    "shadow_results": null,
     "status": "watching",
     "symbol": "BTCUSDT",
     "tags": [

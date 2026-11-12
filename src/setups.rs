@@ -35,6 +35,17 @@ const TAG_HINT: &str = "lowercase letters, digits and : - _ . /, starting with a
 
 const MINUTE_MS: i64 = 60_000;
 
+/// The shadow exit variants (ADR-0066). v1 closes this share at the first target.
+pub const SHADOW_PARTIAL_AT_T1: f64 = 0.5;
+/// v2 moves its stop to break-even once price has gone this far, in R from the fill.
+pub const SHADOW_BE_AT_R: f64 = 1.0;
+/// v3 judges the close of this many bars of the setup's interval after the fill bar:
+/// the first for intervals shorter than 4h, the second from 4h on.
+pub const SHADOW_TIME_STOP_BARS: (u32, u32) = (12, 6);
+const SHADOW_TIME_STOP_LONG_FROM_SECS: i64 = 4 * 3600;
+/// v3 exits at that close when it is below this R from the fill.
+pub const SHADOW_TIME_STOP_KEEP_R: f64 = 0.5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -219,6 +230,104 @@ pub struct Record {
     /// stored before the server kept it.
     #[serde(default)]
     pub closest_approach_r: Option<f64>,
+    /// The fixed exit variants scored on the same 1m bars from the fill on (ADR-0066).
+    /// None before the fill, and on a setup filled before the server kept them.
+    #[serde(default)]
+    pub shadow_results: Option<Shadows>,
+}
+
+/// How a shadow variant ended, or that it has not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadowStatus {
+    Open,
+    /// Out at its last target: T2 for v1, T1 for v2 and v3.
+    Won,
+    /// Out at the setup's invalidation.
+    Stopped,
+    /// Out at a stop moved to break-even after costs.
+    Breakeven,
+    /// Out at the close the time stop judged.
+    TimedOut,
+    Expired,
+    Cancelled,
+}
+
+/// A part of a shadow position closed: its price, its share of the position and the
+/// 1m bar it happened in (its open time, ms).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShadowExit {
+    pub price: f64,
+    pub fraction: f64,
+    pub bar_time: i64,
+}
+
+/// One shadow variant's position, from the canonical fill on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Shadow {
+    pub status: ShadowStatus,
+    /// The parts' R, each net of its own costs and weighted by its share. Null while
+    /// open, and when it expired while nobody scored it.
+    pub result_r: Option<f64>,
+    /// The stop in force from the next bar on.
+    pub stop: f64,
+    pub exits: Vec<ShadowExit>,
+    /// Open time of the 1m bar of the last exit.
+    pub exited_at: Option<i64>,
+    /// v3: the close time (ms) of the bar its time stop judges. Null once judged, and
+    /// for the other variants.
+    pub time_stop_at: Option<i64>,
+}
+
+/// The shadow variants of a filled setup, by id (ADR-0066).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Shadows {
+    /// Half out at T1, the rest to T2 with its stop at break-even after costs.
+    pub v1_half_t1_be: Shadow,
+    /// All out at T1, with the stop at break-even after costs from +1R on.
+    pub v2_be_at_1r: Shadow,
+    /// The canonical setup with a time stop.
+    pub v3_time_stop: Shadow,
+}
+
+#[derive(Clone, Copy)]
+enum Variant {
+    HalfAtT1,
+    BeAt1R,
+    TimeStop,
+}
+
+impl Shadow {
+    fn open(stop: f64, time_stop_at: Option<i64>) -> Shadow {
+        Shadow {
+            status: ShadowStatus::Open,
+            result_r: None,
+            stop,
+            exits: Vec::new(),
+            exited_at: None,
+            time_stop_at,
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.status == ShadowStatus::Open
+    }
+}
+
+impl Shadows {
+    pub fn any_open(&self) -> bool {
+        [&self.v1_half_t1_be, &self.v2_be_at_1r, &self.v3_time_stop]
+            .iter()
+            .any(|s| s.is_open())
+    }
+
+    fn each_mut(&mut self) -> [(Variant, &mut Shadow); 3] {
+        [
+            (Variant::HalfAtT1, &mut self.v1_half_t1_be),
+            (Variant::BeAt1R, &mut self.v2_be_at_1r),
+            (Variant::TimeStop, &mut self.v3_time_stop),
+        ]
+    }
 }
 
 /// How long a setup took, in bars of its own interval, from times the record keeps:
@@ -463,9 +572,10 @@ fn one_of<T: for<'de> Deserialize<'de>>(
 }
 
 /// Fields the server sets. Named so that an agent sending one learns why it is refused.
-const SERVER_FIELDS: [&str; 18] = [
+const SERVER_FIELDS: [&str; 19] = [
     "status",
     "result_r",
+    "shadow_results",
     "mae_r",
     "mfe_r",
     "mae_at",
@@ -966,6 +1076,7 @@ impl Record {
             mae_at: None,
             mfe_at: None,
             closest_approach_r: None,
+            shadow_results: None,
         };
         let created = record.log(now_ms, By::Agent, Kind::Created, None, Map::new());
         (record, created)
@@ -1189,6 +1300,155 @@ impl Record {
         };
     }
 
+    /// Whether bars still move this setup: it is open, or one of its shadows is
+    /// (ADR-0066). Only an open setup counts toward the limits on open setups.
+    pub fn is_scoring(&self) -> bool {
+        self.status.is_open() || self.shadow_results.as_ref().is_some_and(Shadows::any_open)
+    }
+
+    /// The price at which a position filled at `fill` comes out even after the assumed
+    /// costs of both sides: an exit there scores 0 R.
+    fn break_even(&self, fill: f64) -> f64 {
+        let half = self.direction.sign() * self.costs.round_trip() / 2.0;
+        fill * (1.0 + half) / (1.0 - half)
+    }
+
+    /// The close time (ms) of the Nth bar of the setup's interval after the bar holding
+    /// the fill, on the grid every chart here uses.
+    fn time_stop_at(&self, fill_time: i64) -> Option<i64> {
+        let iv = crate::interval::Interval::parse(&self.interval).ok()?;
+        let secs = crate::data::interval_secs(&self.interval)?;
+        let n = match secs < SHADOW_TIME_STOP_LONG_FROM_SECS {
+            true => SHADOW_TIME_STOP_BARS.0,
+            false => SHADOW_TIME_STOP_BARS.1,
+        };
+        let mut t = iv.grid_start(fill_time.div_euclid(1000));
+        for _ in 0..=n {
+            t = iv.grid_end(t);
+        }
+        Some(t * 1000)
+    }
+
+    /// Close what is left of a shadow at `price` in the bar at `at`, and score it. With
+    /// no price, nothing was read: it closes with no result.
+    fn settle(&self, s: &mut Shadow, status: ShadowStatus, price: Option<f64>, at: i64) {
+        let Some(fill) = self.fill else {
+            return;
+        };
+        s.status = status;
+        let Some(price) = price else {
+            return;
+        };
+        let left = 1.0 - s.exits.iter().map(|e| e.fraction).sum::<f64>();
+        s.exits.push(ShadowExit {
+            price,
+            fraction: left,
+            bar_time: at,
+        });
+        let r: f64 = s
+            .exits
+            .iter()
+            .map(|e| e.fraction * self.score(fill.price, e.price))
+            .sum();
+        // + 0.0 makes a -0 from rounding a break-even exit read as 0.
+        s.result_r = Some((r * 10_000.0).round() / 10_000.0 + 0.0);
+        s.exited_at = Some(at);
+    }
+
+    /// Close every open shadow the same way: at a cancel, an expiry, or the fill bar's
+    /// stop.
+    fn end_shadows(&mut self, status: ShadowStatus, price: Option<f64>, at: i64) {
+        let Some(mut shadows) = self.shadow_results.take() else {
+            return;
+        };
+        for (_, s) in shadows.each_mut() {
+            if s.is_open() {
+                self.settle(s, status, price, at);
+            }
+        }
+        self.shadow_results = Some(shadows);
+    }
+
+    /// Move the open shadows by a bar after the fill bar. Each reads it as the canonical
+    /// setup does: past the expiry out at the open; else its stop first, a gap through
+    /// it at the open; then its targets at their price. A stop it moves counts from the
+    /// next bar.
+    fn shadow_bar(&mut self, bar: &MinuteBar) {
+        if bar.time >= self.levels.expires_at {
+            self.end_shadows(ShadowStatus::Expired, Some(bar.open), bar.time);
+            return;
+        }
+        let (Some(mut shadows), Some(fill)) = (self.shadow_results.take(), self.fill) else {
+            return;
+        };
+        let sign = self.direction.sign();
+        let (against, with) = match self.direction {
+            Direction::Long => (bar.low, bar.high),
+            Direction::Short => (bar.high, bar.low),
+        };
+        let risk = (fill.price - self.levels.invalidation).abs();
+        let r = |p: f64| sign * (p - fill.price) / risk;
+        let reached = |target: f64| sign * (with - target) >= 0.0;
+        let t1 = self.levels.targets[0];
+        let t2 = self.levels.targets.get(1).copied();
+        let be = self.break_even(fill.price);
+        for (variant, s) in shadows.each_mut() {
+            if !s.is_open() {
+                continue;
+            }
+            if sign * (against - s.stop) <= 0.0 {
+                let exit = match sign * (bar.open - s.stop) <= 0.0 {
+                    true => bar.open,
+                    false => s.stop,
+                };
+                let status = match s.stop == self.levels.invalidation {
+                    true => ShadowStatus::Stopped,
+                    false => ShadowStatus::Breakeven,
+                };
+                self.settle(s, status, Some(exit), bar.time);
+                continue;
+            }
+            match variant {
+                Variant::HalfAtT1 => {
+                    if s.exits.is_empty() && reached(t1) {
+                        s.exits.push(ShadowExit {
+                            price: t1,
+                            fraction: SHADOW_PARTIAL_AT_T1,
+                            bar_time: bar.time,
+                        });
+                        s.stop = be;
+                    }
+                    // T2 may come in the bar that took T1: price passed T1 to reach it.
+                    if !s.exits.is_empty() && t2.is_some_and(reached) {
+                        self.settle(s, ShadowStatus::Won, t2, bar.time);
+                    }
+                }
+                Variant::BeAt1R => {
+                    if reached(t1) {
+                        self.settle(s, ShadowStatus::Won, Some(t1), bar.time);
+                    } else if s.stop == self.levels.invalidation && r(with) >= SHADOW_BE_AT_R {
+                        s.stop = be;
+                    }
+                }
+                Variant::TimeStop => {
+                    if reached(t1) {
+                        self.settle(s, ShadowStatus::Won, Some(t1), bar.time);
+                    } else if let Some(at) = s.time_stop_at {
+                        // The 1m bar that closes the judged bar, or the first after it
+                        // when that one was not seen.
+                        if bar.time + MINUTE_MS >= at {
+                            s.time_stop_at = None;
+                            if r(bar.close) < SHADOW_TIME_STOP_KEEP_R {
+                                self.settle(s, ShadowStatus::TimedOut, Some(bar.close), bar.time);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.shadow_results = Some(shadows);
+    }
+
     fn close(&mut self, status: Status, exit: Option<f64>, bar: &MinuteBar) -> Revision {
         let from = self.status;
         self.status = status;
@@ -1229,7 +1489,7 @@ impl Record {
     /// changes nothing: the feed replays bars after a reconnect.
     pub fn apply_bar(&mut self, bar: &MinuteBar) -> Vec<Revision> {
         let mut out = Vec::new();
-        if !self.status.is_open()
+        if !self.is_scoring()
             || bar.time < self.created_at
             || self.scored_through.is_some_and(|t| bar.time <= t)
         {
@@ -1237,6 +1497,11 @@ impl Record {
         }
         let first = self.scored_through.is_none();
         self.scored_through = Some(bar.time);
+        // Closed with a shadow still open: only the shadows move (ADR-0066).
+        if !self.status.is_open() {
+            self.shadow_bar(bar);
+            return out;
+        }
         // The prices of this bar that went against a position and with it.
         let (against, with) = match self.direction {
             Direction::Long => (bar.low, bar.high),
@@ -1275,6 +1540,7 @@ impl Record {
                 Pending::Cancel { .. } => {
                     let exit = self.fill.map(|_| bar.open);
                     self.excursion(bar.open, bar.open, bar.time);
+                    self.end_shadows(ShadowStatus::Cancelled, exit, bar.time);
                     out.push(self.close(Status::Cancelled, exit, bar));
                     return out;
                 }
@@ -1284,6 +1550,7 @@ impl Record {
         if bar.time >= self.levels.expires_at {
             let exit = self.fill.map(|_| bar.open);
             self.excursion(bar.open, bar.open, bar.time);
+            self.end_shadows(ShadowStatus::Expired, exit, bar.time);
             out.push(self.close(Status::Expired, exit, bar));
             return out;
         }
@@ -1325,6 +1592,12 @@ impl Record {
             self.status = Status::Triggered;
             (self.mae_r, self.mfe_r) = (Some(0.0), Some(0.0));
             (self.mae_at, self.mfe_at) = (Some(bar.time), Some(bar.time));
+            let stop = self.levels.invalidation;
+            self.shadow_results = Some(Shadows {
+                v1_half_t1_be: Shadow::open(stop, None),
+                v2_be_at_1r: Shadow::open(stop, None),
+                v3_time_stop: Shadow::open(stop, self.time_stop_at(bar.time)),
+            });
             let mut changes = Map::new();
             changed(
                 &mut changes,
@@ -1338,6 +1611,7 @@ impl Record {
             // say in which order it traded. So it counts against the position only.
             if stop_touched {
                 self.excursion(stop, price, bar.time);
+                self.end_shadows(ShadowStatus::Stopped, Some(stop), bar.time);
                 out.push(self.close(Status::Invalidated, Some(stop), bar));
             } else {
                 self.excursion(against, price, bar.time);
@@ -1345,6 +1619,7 @@ impl Record {
             return out;
         }
 
+        self.shadow_bar(bar);
         if stop_touched {
             // A gap through the level closes at the open, which is worse. The stop counts
             // first, so of this bar only its open went with the position.
@@ -1387,7 +1662,11 @@ impl Record {
         let mut changes = Map::new();
         changes.insert("not_scored".into(), json!({ "from": from_ms, "to": to_ms }));
         self.scored_through = Some(self.scored_through.unwrap_or(0).max(to_ms - MINUTE_MS));
-        self.gap = true;
+        // After the close only shadows were being scored: the result covers its bars,
+        // and the log says which the shadows missed.
+        if self.status.is_open() {
+            self.gap = true;
+        }
         self.log(
             now_ms,
             By::Server,
@@ -1401,12 +1680,18 @@ impl Record {
     /// list, so it got no bars. An expiry is a time, so it still expires. Never filled,
     /// it scores 0 like any unfilled setup. Filled, it has no exit: no bar was read, and
     /// a price is not invented, so it closes with no result. Either way the stretch that
-    /// was not scored is in the log and `gap` is set.
+    /// was not scored is in the log and `gap` is set. Closed with a shadow still open,
+    /// only the shadows end so; the setup's own result and `gap` stay as they were.
     pub fn expire_unscored(&mut self, now_ms: i64) -> Vec<Revision> {
-        if !self.status.is_open() || now_ms < self.levels.expires_at {
+        if !self.is_scoring() || now_ms < self.levels.expires_at {
             return Vec::new();
         }
         let gap = self.note_gap(self.next_bar_time(), now_ms, now_ms);
+        // Its open shadows end the same way, with no exit and no result.
+        self.end_shadows(ShadowStatus::Expired, None, now_ms);
+        if !self.status.is_open() {
+            return vec![gap];
+        }
         let from = self.status;
         self.status = Status::Expired;
         self.result_r = self.fill.is_none().then_some(0.0);

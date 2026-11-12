@@ -1319,3 +1319,385 @@ fn a_closed_setup_takes_tags_alone() {
         .revise(Some("x".into()), None, None, None, "r".into(), T0 + 3)
         .is_err());
 }
+
+// Shadow exit variants (ADR-0066). A long in at 101 and wrong at 98 risks 3: +1R is
+// 104, +0.5R 102.5, T1 105 and T2 107. Its short twin mirrors every price about 100.5,
+// so that one walk of bars tests both: in at 100, wrong at 103, T1 96 and T2 94.
+
+fn shadow_setup(direction: Direction, targets: &[f64], interval: &str, days: i64) -> Record {
+    let args = match direction {
+        Direction::Long => long_args(),
+        Direction::Short => short_args(),
+    };
+    let targets: Vec<f64> = targets.iter().map(|t| px(direction, *t)).collect();
+    let args = with(args, "targets", json!(targets));
+    let args = with(args, "interval", json!(interval));
+    create(with(args, "expires_at", json!(T0 + days * 86_400_000)))
+}
+
+/// A long's price, or its short twin's.
+fn px(direction: Direction, p: f64) -> f64 {
+    match direction {
+        Direction::Long => p,
+        Direction::Short => 201.0 - p,
+    }
+}
+
+/// A bar of the long's walk, or its short twin's.
+fn twin(direction: Direction, b: MinuteBar) -> MinuteBar {
+    match direction {
+        Direction::Long => b,
+        Direction::Short => MinuteBar {
+            time: b.time,
+            open: 201.0 - b.open,
+            high: 201.0 - b.low,
+            low: 201.0 - b.high,
+            close: 201.0 - b.close,
+        },
+    }
+}
+
+/// Filled at 101 (100 for the short) by a bar coming down into the zone, then `bars`.
+fn shadow_walk(r: &mut Record, bars: &[MinuteBar]) {
+    let d = r.direction;
+    r.apply_bar(&twin(d, bar(0, 102.0, 102.1, 100.8, 101.2)));
+    assert_eq!(r.fill.unwrap().price, px(d, 101.0));
+    shadow_walk_on(r, bars);
+}
+
+/// More bars after the fill bar.
+fn shadow_walk_on(r: &mut Record, bars: &[MinuteBar]) {
+    let d = r.direction;
+    for b in bars {
+        r.apply_bar(&twin(d, *b));
+    }
+}
+
+fn shadows(r: &Record) -> &Shadows {
+    r.shadow_results
+        .as_ref()
+        .expect("filled, so scored with its shadows")
+}
+
+fn all(r: &Record) -> [&Shadow; 3] {
+    let s = shadows(r);
+    [&s.v1_half_t1_be, &s.v2_be_at_1r, &s.v3_time_stop]
+}
+
+fn rounded(r: f64) -> Option<f64> {
+    Some((r * 10_000.0).round() / 10_000.0)
+}
+
+const BOTH: [Direction; 2] = [Direction::Long, Direction::Short];
+
+#[test]
+fn v1_takes_half_at_t1_and_the_rest_at_t2_after_the_setup_closed() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        shadow_walk(&mut r, &[bar(1, 101.2, 105.2, 102.0, 105.0)]);
+        // The setup itself is out at T1; v1's other half runs on, its stop at
+        // break-even after costs.
+        assert_eq!(r.status, Status::Won);
+        let v1 = &shadows(&r).v1_half_t1_be;
+        assert_eq!(v1.status, ShadowStatus::Open);
+        assert_eq!(v1.result_r, None);
+        let half = ShadowExit {
+            price: px(d, 105.0),
+            fraction: 0.5,
+            bar_time: T0 + MIN,
+        };
+        assert_eq!(v1.exits, [half]);
+        let fill = r.fill.unwrap().price;
+        assert_eq!(v1.stop, r.break_even(fill));
+        assert_eq!(r.score(fill, v1.stop), 0.0, "{d:?}: even after costs");
+        assert!(r.is_scoring());
+
+        shadow_walk_on(&mut r, &[bar(2, 105.0, 107.5, 104.0, 107.0)]);
+        let v1 = &shadows(&r).v1_half_t1_be;
+        assert_eq!(v1.status, ShadowStatus::Won);
+        assert_eq!(v1.exits[1].price, px(d, 107.0));
+        assert_eq!(v1.exited_at, Some(T0 + 2 * MIN));
+        let expected = 0.5 * r.score(fill, px(d, 105.0)) + 0.5 * r.score(fill, px(d, 107.0));
+        assert_eq!(v1.result_r, rounded(expected));
+        // The canonical result is not touched by its shadows.
+        assert_eq!(r.result_r, Some(r.score(fill, px(d, 105.0))));
+        assert_eq!(r.exit.unwrap().bar_time, T0 + MIN);
+        assert!(!r.is_scoring());
+        // v2 and v3 took all at T1 with the setup.
+        for s in &all(&r)[1..] {
+            assert_eq!(s.status, ShadowStatus::Won);
+            assert_eq!(s.result_r, r.result_r);
+        }
+    }
+}
+
+#[test]
+fn v1s_runner_is_stopped_at_break_even_from_the_bar_after_t1() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        // Back below break-even in the bar that took T1: the moved stop is not in force
+        // yet.
+        shadow_walk(&mut r, &[bar(1, 101.2, 105.2, 100.5, 101.5)]);
+        assert_eq!(shadows(&r).v1_half_t1_be.status, ShadowStatus::Open);
+        shadow_walk_on(&mut r, &[bar(2, 101.5, 101.6, 101.0, 101.2)]);
+        let v1 = &shadows(&r).v1_half_t1_be;
+        let fill = r.fill.unwrap().price;
+        assert_eq!(v1.status, ShadowStatus::Breakeven);
+        assert_eq!(v1.exits[1].price, r.break_even(fill));
+        assert_eq!(v1.exits[1].fraction, 0.5);
+        assert_eq!(v1.result_r, rounded(0.5 * r.score(fill, px(d, 105.0))));
+    }
+}
+
+#[test]
+fn v1_with_one_target_runs_the_rest_to_its_stop_or_the_expiry() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0], "1h", 1);
+        shadow_walk(
+            &mut r,
+            &[
+                bar(1, 101.2, 105.2, 102.0, 105.0),
+                bar(600, 108.0, 109.0, 107.0, 108.5),
+                bar(1440, 110.0, 111.0, 101.0, 102.0),
+            ],
+        );
+        let v1 = &shadows(&r).v1_half_t1_be;
+        assert_eq!(v1.status, ShadowStatus::Expired);
+        // Out at the open of the first bar past the expiry, as the setup would be.
+        assert_eq!(v1.exits[1].price, px(d, 110.0));
+        assert_eq!(v1.exited_at, Some(T0 + 1440 * MIN));
+        let fill = r.fill.unwrap().price;
+        let expected = 0.5 * r.score(fill, px(d, 105.0)) + 0.5 * r.score(fill, px(d, 110.0));
+        assert_eq!(v1.result_r, rounded(expected));
+        assert!(!r.is_scoring());
+        let through = r.scored_through;
+        assert!(r
+            .apply_bar(&bar(1441, 100.0, 100.0, 100.0, 100.0))
+            .is_empty());
+        assert_eq!(r.scored_through, through, "nothing is left to score");
+    }
+}
+
+#[test]
+fn v2_moves_its_stop_at_1r_and_is_stopped_at_break_even() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        // +1R reached, and back below break-even in the same bar: in force from the next.
+        shadow_walk(&mut r, &[bar(1, 101.2, 104.1, 101.0, 103.8)]);
+        let v2 = &shadows(&r).v2_be_at_1r;
+        assert_eq!(v2.status, ShadowStatus::Open);
+        assert_eq!(v2.stop, r.break_even(r.fill.unwrap().price));
+        // v1 keeps the setup's stop until T1.
+        assert_eq!(shadows(&r).v1_half_t1_be.stop, px(d, 98.0));
+        shadow_walk_on(&mut r, &[bar(2, 103.8, 103.9, 101.0, 101.2)]);
+        let v2 = &shadows(&r).v2_be_at_1r;
+        assert_eq!(v2.status, ShadowStatus::Breakeven);
+        assert_eq!(v2.result_r, Some(0.0));
+        assert_eq!(v2.exited_at, Some(T0 + 2 * MIN));
+        // The setup and the other variants are still in.
+        assert_eq!(r.status, Status::Triggered);
+        assert_eq!(shadows(&r).v1_half_t1_be.status, ShadowStatus::Open);
+        assert_eq!(shadows(&r).v3_time_stop.status, ShadowStatus::Open);
+    }
+}
+
+#[test]
+fn v2_wins_at_t1_after_moving_its_stop() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        shadow_walk(
+            &mut r,
+            &[
+                bar(1, 101.2, 104.1, 102.0, 103.8),
+                bar(2, 103.8, 105.2, 102.0, 105.0),
+            ],
+        );
+        let v2 = &shadows(&r).v2_be_at_1r;
+        assert_eq!(v2.status, ShadowStatus::Won);
+        assert_eq!(v2.exits.len(), 1);
+        assert_eq!(v2.exits[0].price, px(d, 105.0));
+        assert_eq!(v2.result_r, r.result_r);
+    }
+}
+
+/// The open time (ms) of the 1m bar that closes the `n`th bar of `hours` after the one
+/// holding T0, on bars counted from the epoch.
+fn time_stop_bar(hours: i64, n: i64) -> i64 {
+    let secs = hours * 3600;
+    let start = (T0 / 1000).div_euclid(secs) * secs;
+    (start + (n + 1) * secs) * 1000 - MIN
+}
+
+#[test]
+fn v3_times_out_at_the_close_of_the_12th_hour_bar_below_half_an_r() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0], "1h", 1);
+        let judged = time_stop_bar(1, 12);
+        let minute = (judged - T0) / MIN;
+        shadow_walk(&mut r, &[bar(minute - 1, 101.5, 102.0, 101.0, 101.5)]);
+        let v3 = &shadows(&r).v3_time_stop;
+        assert_eq!(v3.status, ShadowStatus::Open);
+        assert_eq!(v3.time_stop_at, Some(judged + MIN));
+        shadow_walk_on(&mut r, &[bar(minute, 101.5, 102.4, 101.2, 102.0)]);
+        let v3 = &shadows(&r).v3_time_stop;
+        assert_eq!(v3.status, ShadowStatus::TimedOut);
+        assert_eq!(v3.exits[0].price, px(d, 102.0));
+        assert_eq!(v3.exited_at, Some(judged));
+        assert_eq!(v3.time_stop_at, None);
+        let fill = r.fill.unwrap().price;
+        assert_eq!(v3.result_r, Some(r.score(fill, px(d, 102.0))));
+        assert_eq!(r.status, Status::Triggered);
+    }
+}
+
+#[test]
+fn v3_on_4h_judges_the_6th_bar() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0], "4h", 3);
+        let judged = time_stop_bar(4, 6);
+        let minute = (judged - T0) / MIN;
+        shadow_walk(&mut r, &[bar(minute - 1, 101.5, 102.0, 101.0, 101.5)]);
+        assert_eq!(shadows(&r).v3_time_stop.status, ShadowStatus::Open);
+        shadow_walk_on(&mut r, &[bar(minute, 101.5, 102.0, 100.0, 100.5)]);
+        let v3 = &shadows(&r).v3_time_stop;
+        assert_eq!(v3.status, ShadowStatus::TimedOut);
+        assert_eq!(v3.exits[0].price, px(d, 100.5));
+        assert_eq!(v3.exited_at, Some(judged));
+    }
+}
+
+#[test]
+fn v3_keeps_a_position_at_half_an_r_or_more_and_judges_it_once() {
+    for d in BOTH {
+        let mut r = shadow_setup(d, &[105.0], "1h", 1);
+        let minute = (time_stop_bar(1, 12) - T0) / MIN;
+        // 102.5 is +0.5R exactly: kept.
+        shadow_walk(&mut r, &[bar(minute, 102.0, 102.8, 101.8, 102.5)]);
+        let v3 = &shadows(&r).v3_time_stop;
+        assert_eq!(v3.status, ShadowStatus::Open);
+        assert_eq!(v3.time_stop_at, None, "judged");
+        // Later closes below +0.5R do not time it out: it is the canonical setup now.
+        shadow_walk_on(
+            &mut r,
+            &[
+                bar(minute + 60, 102.0, 102.1, 101.0, 101.2),
+                bar(minute + 61, 101.2, 105.5, 101.0, 105.2),
+            ],
+        );
+        let v3 = &shadows(&r).v3_time_stop;
+        assert_eq!(v3.status, ShadowStatus::Won);
+        assert_eq!(v3.result_r, r.result_r);
+    }
+}
+
+#[test]
+fn the_fill_bar_can_stop_the_shadows_but_cannot_move_or_win_them() {
+    for d in BOTH {
+        // Past T1 and +1R in the fill bar: none of it counts.
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        r.apply_bar(&twin(d, bar(0, 102.0, 105.5, 100.8, 105.2)));
+        assert_eq!(r.status, Status::Triggered);
+        for s in all(&r) {
+            assert_eq!(s.status, ShadowStatus::Open);
+            assert_eq!(s.stop, px(d, 98.0));
+            assert!(s.exits.is_empty());
+        }
+
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        r.apply_bar(&twin(d, bar(0, 102.0, 102.1, 97.5, 97.8)));
+        assert_eq!(r.status, Status::Invalidated);
+        for s in all(&r) {
+            assert_eq!(s.status, ShadowStatus::Stopped);
+            assert_eq!(s.exits[0].price, px(d, 98.0));
+            assert_eq!(s.result_r, r.result_r);
+        }
+    }
+}
+
+#[test]
+fn a_stop_and_a_target_in_one_bar_and_a_gap_are_read_as_the_setup_reads_them() {
+    for d in BOTH {
+        // Stop and T1 in one bar: the stop, for every variant.
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        shadow_walk(&mut r, &[bar(1, 101.2, 105.5, 97.9, 104.0)]);
+        for s in all(&r) {
+            assert_eq!(s.status, ShadowStatus::Stopped);
+            assert_eq!(s.result_r, r.result_r);
+        }
+
+        // A gap through the setup's stop: out at the open.
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        shadow_walk(&mut r, &[bar(1, 96.0, 96.5, 95.0, 96.2)]);
+        assert_eq!(r.exit.unwrap().price, px(d, 96.0));
+        for s in all(&r) {
+            assert_eq!(s.exits[0].price, px(d, 96.0));
+            assert_eq!(s.result_r, r.result_r);
+        }
+
+        // A gap through v1's break-even stop: out at the open, which is worse.
+        let mut r = shadow_setup(d, &[105.0, 107.0], "1h", 1);
+        shadow_walk(
+            &mut r,
+            &[
+                bar(1, 101.2, 105.2, 102.0, 105.0),
+                bar(2, 100.0, 100.5, 99.5, 100.2),
+            ],
+        );
+        let v1 = &shadows(&r).v1_half_t1_be;
+        assert_eq!(v1.status, ShadowStatus::Breakeven);
+        assert_eq!(v1.exits[1].price, px(d, 100.0));
+        assert!(r.score(r.fill.unwrap().price, px(d, 100.0)) < 0.0);
+    }
+}
+
+#[test]
+fn a_cancel_closes_the_shadows_at_the_open_as_it_does_the_setup() {
+    let mut r = shadow_setup(Direction::Long, &[105.0, 107.0], "1h", 1);
+    shadow_walk(&mut r, &[bar(1, 101.2, 104.1, 102.0, 103.8)]);
+    r.cancel("done".into(), T0 + MIN + 1).unwrap();
+    shadow_walk_on(&mut r, &[bar(2, 103.5, 103.6, 101.0, 101.2)]);
+    assert_eq!(r.status, Status::Cancelled);
+    for s in all(&r) {
+        assert_eq!(s.status, ShadowStatus::Cancelled);
+        assert_eq!(s.exits[0].price, 103.5);
+        assert_eq!(s.result_r, r.result_r);
+    }
+}
+
+#[test]
+fn an_open_shadow_that_runs_out_unscored_ends_with_no_result() {
+    let mut r = shadow_setup(Direction::Long, &[105.0], "1h", 1);
+    shadow_walk(&mut r, &[bar(1, 101.2, 105.2, 102.0, 105.0)]);
+    let result = r.result_r;
+    let log = r.expire_unscored(T0 + 2 * 86_400_000);
+    assert_eq!(log.iter().map(|e| e.kind).collect::<Vec<_>>(), [Kind::Gap]);
+    let v1 = &shadows(&r).v1_half_t1_be;
+    assert_eq!(v1.status, ShadowStatus::Expired);
+    assert_eq!((v1.result_r, v1.exits.len()), (None, 1));
+    // The setup itself was scored to its end: its result and gap are as they were.
+    assert_eq!((r.status, r.result_r, r.gap), (Status::Won, result, false));
+    assert!(!r.is_scoring());
+}
+
+#[test]
+fn a_record_filled_before_shadows_loads_and_gets_none() {
+    let mut r = shadow_setup(Direction::Long, &[105.0, 107.0], "1h", 1);
+    let mut watching = serde_json::to_value(&r).unwrap();
+    shadow_walk(&mut r, &[]);
+    let mut filled = serde_json::to_value(&r).unwrap();
+    assert!(filled["shadow_results"].is_object());
+    for old in [&mut watching, &mut filled] {
+        old.as_object_mut().unwrap().remove("shadow_results");
+    }
+    let mut filled: Record = serde_json::from_value(filled).unwrap();
+    assert_eq!(filled.shadow_results, None);
+    shadow_walk_on(&mut filled, &[bar(1, 101.2, 105.2, 102.0, 105.0)]);
+    assert_eq!(filled.status, Status::Won);
+    assert_eq!(filled.shadow_results, None);
+    assert!(!filled.is_scoring());
+    assert_eq!(filled.view()["shadow_results"], Value::Null);
+    // Stored while watching, it is filled here and gets them.
+    let mut watching: Record = serde_json::from_value(watching).unwrap();
+    shadow_walk(&mut watching, &[]);
+    assert!(watching.shadow_results.is_some());
+}
