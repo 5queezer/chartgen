@@ -195,7 +195,7 @@
     "bars_to_mae": null,
     "bars_to_mfe": null,
     "bracket": "agent",
-    "closest_approach_r": 0.0667,
+    "closest_approach_r": 0.1431,
     "costs": {
       "fee_bps_per_side": 5.0,
       "slippage_bps_per_side": 2.0
