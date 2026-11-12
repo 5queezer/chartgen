@@ -1353,7 +1353,14 @@ impl Record {
                 Direction::Short => bar.low <= target,
             };
             if reached {
-                // Nothing beyond the target counts: the position was out there.
+                // Nothing beyond the target counts: the position was out there. A bar
+                // that opens at or past it was out at the open, so its later low (or
+                // high, for a short) does not count either.
+                let opened_past = match self.direction {
+                    Direction::Long => bar.open >= target,
+                    Direction::Short => bar.open <= target,
+                };
+                let against = if opened_past { bar.open } else { against };
                 self.excursion(against, target, bar.time);
                 out.push(self.close(Status::Won, Some(target), bar));
             } else {

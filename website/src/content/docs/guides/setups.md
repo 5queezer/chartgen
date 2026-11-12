@@ -72,8 +72,9 @@ after the fact. They are read with the same 1m bars and the same rule as the res
   less: `-0.5` means half the risk.
 - `mfe_r`: the furthest it went **for** the position, in R. It is 0 or more.
 - `mae_at` and `mfe_at`: the open time (ms) of the 1m bar that set each, the first one where two
-  went as far. Comparing `mae_at` with when the first target would have been reached tells
-  whether a break-even stop would have been hit.
+  went as far. They say whether the worst point came before or after the best one; they do not
+  say on their own whether a break-even stop would have been hit, since the price can come back
+  to the fill later without setting a new extreme.
 
 They are measured from the fill price with the bars' highs and lows, **before costs**, so a
 setup that won at a target 2 R away has `mfe_r` 2 while its `result_r` is a little less. Where a

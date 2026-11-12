@@ -984,6 +984,22 @@ fn excursions_of_a_long_are_read_from_the_fill_to_the_exit() {
         (Some(-1.0), Some(0), Some(0.0), Some(0))
     );
     assert_eq!(stopped.durations().bars_to_exit, Some(0.0));
+
+    // A bar that opens past the target was out at the open: its later low does not count.
+    let mut gapped = create(long_args());
+    walk(
+        &mut gapped,
+        &[
+            bar(0, 103.0, 103.5, 102.0, 102.5),
+            bar(30, 102.5, 102.6, 100.8, 101.2),
+        ],
+    );
+    gapped.apply_bar(&bar(90, 105.0, 105.5, 99.5, 100.0));
+    assert_eq!(gapped.status, Status::Won);
+    assert_eq!(
+        extremes(&gapped),
+        (Some(-0.0667), Some(30), Some(1.0), Some(90))
+    );
 }
 
 #[test]
