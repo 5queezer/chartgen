@@ -85,7 +85,7 @@ export async function expectChartRendered(page: Page): Promise<void> {
 
   // Wait for the status line to settle into "loaded" so downstream
   // assertions (pane header text, indicator data) see a stable DOM.
-  await expect(page.locator("text=loaded").first()).toBeVisible({
+  await expect(page.getByTestId("status-text")).toHaveText("loaded", {
     timeout: 20_000,
   });
 

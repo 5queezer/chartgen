@@ -1965,8 +1965,8 @@ fn session_ranges(
     let mut out = Vec::new();
     let mut cur_bucket: Option<i64> = None;
     let mut start = 0;
-    for i in 0..n {
-        let ts = match data.bars[i].date.parse::<i64>() {
+    for (i, bar) in data.bars.iter().enumerate().take(n) {
+        let ts = match bar.date.parse::<i64>() {
             Ok(v) => v,
             Err(_) => return vec![(0, n)],
         };
@@ -2410,11 +2410,10 @@ impl Indicator for HvnLvn {
             let mut is_min = true;
             let mut nbr_max = 0.0_f64;
             let mut nbr_min = f64::INFINITY;
-            for j in lo..=hi {
+            for (j, &nv) in prof.volume_bins.iter().enumerate().take(hi + 1).skip(lo) {
                 if j == i {
                     continue;
                 }
-                let nv = prof.volume_bins[j];
                 if nv >= v {
                     is_max = false;
                 }

@@ -573,8 +573,7 @@ fn test_naked_poc_excludes_filled_levels() {
         let poc = line.y[start];
         // nPOC lines begin at the bar right after the source session closes,
         // so `start` is the first post-session bar.
-        for i in start..data.bars.len() {
-            let b = &data.bars[i];
+        for (i, b) in data.bars.iter().enumerate().skip(start) {
             assert!(
                 !(b.low <= poc && poc <= b.high),
                 "naked POC {} was actually filled at bar {}",

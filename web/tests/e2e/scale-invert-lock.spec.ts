@@ -8,6 +8,7 @@ type Hook = {
   chart: () => {
     convertFromPixel: (p: { y: number }[], o: { paneId: string }) => { value: number }[];
     getSize: (id: string, w: string) => { height: number } | null;
+    getDom: (id: string, w: string) => HTMLElement | null;
     getBarSpace: () => number;
     setBarSpace: (n: number) => void;
     getVisibleRange: () => { realFrom: number; to: number };
@@ -117,6 +118,343 @@ test.describe("lock ratio on a new timeframe", () => {
       .toBe("5m");
     await page.waitForTimeout(300);
     await expect.poll(() => allVisibleInRange(page)).toBe(true);
+  });
+});
+
+test.describe("price-axis drag scaling", () => {
+  test.use({
+    hasTouch: true,
+    isMobile: true,
+    viewport: { width: 390, height: 844 },
+    push: false,
+  });
+
+  test("a vertical touch drag scales the price axis without panning the chart", async ({
+    bootedApp: page,
+  }) => {
+    const before = await span(page);
+    const visibleBefore = await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      return c.getVisibleRange();
+    });
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    for (let step = 1; step <= 5; step++) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x, y: y + step * 8 }],
+      });
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    await expect.poll(() => span(page)).toBeGreaterThan(before * 1.05);
+    const visibleAfter = await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      return c.getVisibleRange();
+    });
+    expect(visibleAfter).toEqual(visibleBefore);
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("touch jitter below the drag threshold preserves auto and lock", async ({ bootedApp: page }) => {
+    await lockViaMenu(page);
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: y + 1 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => storage(page, "lockRatio")).toBe("true");
+  });
+
+  test("a touch drag keeps scaling after crossing the right axis edge", async ({ bootedApp: page }) => {
+    const before = await span(page);
+    const rect = await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      const { left, top, height } = c.getDom("candle_pane", "yAxis")!.getBoundingClientRect();
+      return { left, top, height };
+    });
+    const x = rect.left + 10;
+    const y = rect.top + rect.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: x - 25, y: y + 40 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    await expect.poll(() => span(page)).toBeGreaterThan(before * 1.05);
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("a touch drag keeps scaling after crossing the top axis edge", async ({ bootedApp: page }) => {
+    const before = await span(page);
+    const rect = await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      const { left, top, height } = c.getDom("candle_pane", "yAxis")!.getBoundingClientRect();
+      return { left, top, height };
+    });
+    const x = rect.left + 10;
+    const y = rect.top + rect.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: rect.top - 25 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    await expect.poll(() => span(page)).toBeLessThan(before * 0.95);
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("a second finger cancels axis scaling without releasing auto or lock", async ({ bootedApp: page }) => {
+    await lockViaMenu(page);
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      const axis = c.getDom("candle_pane", "yAxis")!;
+      const w = window as unknown as { axisReleases: number };
+      w.axisReleases = 0;
+      axis.addEventListener("mouseup", () => w.axisReleases++);
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y, id: 0 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        { x, y, id: 0 },
+        { x, y: y + 20, id: 1 },
+      ],
+    });
+    await expect.poll(() => page.evaluate(() => (window as unknown as { axisReleases: number }).axisReleases)).toBe(1);
+
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        { x, y: y + 40, id: 0 },
+        { x, y: y + 60, id: 1 },
+      ],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => storage(page, "lockRatio")).toBe("true");
+  });
+
+  test("touch move releases auto and lock even after pointer scaling stops", async ({ bootedApp: page }) => {
+    await lockViaMenu(page);
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      c.getDom("candle_pane", "yAxis")!.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, buttons: 0 }),
+      );
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: y + 40 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => storage(page, "lockRatio")).toBe("false");
+  });
+
+  test("double-tap after a touch drag restores automatic price scaling", async ({ bootedApp: page }) => {
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    // Native double-tap can synthesize dblclick; this test isolates tap tracking.
+    await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      c.getDom("candle_pane", "yAxis")!.addEventListener(
+        "dblclick",
+        (event) => event.stopImmediatePropagation(),
+        { capture: true },
+      );
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: y + 40 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+
+    for (let tap = 0; tap < 2; tap++) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y }],
+      });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    }
+
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(() => allVisibleInRange(page)).toBe(true);
+  });
+
+  test("a tap before a drag does not make the next tap restore auto", async ({ bootedApp: page }) => {
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    const tap = async () => {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y }],
+      });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    };
+    await tap();
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: y + 40 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await tap();
+
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("active axis touch release ends scaling while another touch remains", async ({
+    bootedApp: page,
+  }) => {
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y, id: 0 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        { x, y, id: 0 },
+        { x, y, id: 1 },
+        { x: box.x + box.width / 2, y: y + 20, id: 2 },
+      ],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [{ x, y, id: 0 }],
+    });
+    const before = await span(page);
+
+    await page.mouse.move(x, y + 40);
+    await page.waitForTimeout(200);
+
+    // The live sample candle can move the auto-fitted span slightly; real scaling changes it by orders of magnitude more.
+    expect(Math.abs((await span(page)) - before)).toBeLessThan(0.001);
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("touch cancel clears a pending tap before the next tap", async ({ bootedApp: page }) => {
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await scaleButton(page, "auto").click();
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+    // Native tap/cancel/tap can synthesize dblclick; this test isolates lastTap.
+    await page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+      c.getDom("candle_pane", "yAxis")!.addEventListener(
+        "dblclick",
+        (event) => event.stopImmediatePropagation(),
+        { capture: true },
+      );
+    });
+    const tap = async () => {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y }],
+      });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    };
+    await tap();
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+    await tap();
+
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("touch cancel ends scaling before a mouse move without a pressed button", async ({
+    bootedApp: page,
+  }) => {
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+    const before = await span(page);
+
+    await page.mouse.move(x, y + 40);
+    await page.waitForTimeout(200);
+
+    // The live sample candle can move the auto-fitted span slightly; real scaling changes it by orders of magnitude more.
+    expect(Math.abs((await span(page)) - before)).toBeLessThan(0.001);
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "true");
   });
 });
 
