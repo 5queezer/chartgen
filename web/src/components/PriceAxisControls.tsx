@@ -302,7 +302,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     // The left button: a right press opens the axis menu and scales nothing.
     const onDown = (e: PointerEvent) => (pressed = e.button === 0);
     const onMove = (e: PointerEvent) => {
-      if (!pressed) return;
+      if (!pressed || (touchId !== null && !touchMoved)) return;
       // No button down: the release happened away from the window, unseen.
       if (e.buttons === 0) {
         pressed = false;
@@ -323,10 +323,37 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     let touchStart = { x: 0, y: 0 };
     let touchMoved = false;
     let lastTap: { time: number; x: number; y: number } | null = null;
+    const dispatchMouse = (type: string, at: Touch) => {
+      const { left, right, top, bottom } = axisDom.getBoundingClientRect();
+      const mouseEvent = new MouseEvent(type, {
+        bubbles: true,
+        button: 0,
+        buttons: type === "mouseup" ? 0 : 1,
+        clientX: Math.min(Math.max(at.clientX, left + 1), right - 1),
+        clientY: Math.min(Math.max(at.clientY, top + 1), bottom - 1),
+      });
+      // Opt out of klinecharts' 500ms suppression of compatibility mouse
+      // events after a touch; this deliberate event starts its scale state.
+      Object.defineProperty(mouseEvent, "sourceCapabilities", {
+        value: { firesTouchEvents: false },
+      });
+      axisDom.dispatchEvent(mouseEvent);
+    };
     const onTouch = (e: TouchEvent) => {
       let at: Touch | undefined;
       if (e.type === "touchstart") {
-        if (touchId !== null || e.touches.length !== 1) return;
+        if (touchId !== null) {
+          if (e.touches.length > 1) {
+            at = Array.from(e.touches).find((touch) => touch.identifier === touchId);
+            if (at) dispatchMouse("mouseup", at);
+            touchId = null;
+            touchMoved = false;
+            pressed = false;
+            lastTap = null;
+          }
+          return;
+        }
+        if (e.touches.length !== 1) return;
         at = e.touches[0];
         if (!at) return;
         touchId = at.identifier;
@@ -349,6 +376,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
         }
       }
       e.preventDefault();
+      if (e.type === "touchmove" && !touchMoved) return;
       if (e.type === "touchmove") {
         batch(() => {
           if (lockRatio()) setLockRatio(false);
@@ -357,20 +385,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
       }
       const ending = e.type === "touchend" || e.type === "touchcancel";
       const type = e.type === "touchstart" ? "mousedown" : e.type === "touchmove" ? "mousemove" : "mouseup";
-      const { left, right } = axisDom.getBoundingClientRect();
-      const mouseEvent = new MouseEvent(type, {
-        bubbles: true,
-        button: 0,
-        buttons: type === "mouseup" ? 0 : 1,
-        clientX: Math.min(Math.max(at.clientX, left + 1), right - 1),
-        clientY: at.clientY,
-      });
-      // Opt out of klinecharts' 500ms suppression of compatibility mouse
-      // events after a touch; this deliberate event starts its scale state.
-      Object.defineProperty(mouseEvent, "sourceCapabilities", {
-        value: { firesTouchEvents: false },
-      });
-      axisDom.dispatchEvent(mouseEvent);
+      dispatchMouse(type, at);
       if (e.type === "touchcancel") lastTap = null;
       if (e.type === "touchend" && !touchMoved) {
         const now = Date.now();
