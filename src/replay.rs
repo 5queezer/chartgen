@@ -51,6 +51,21 @@ pub fn as_of(given: Option<&serde_json::Value>) -> Result<i64, String> {
     chartgen::drawings::parse_time(given, i64::MAX / 2).map_err(|e| format!("as_of: {e}"))
 }
 
+/// Whether `ip` reaches this host or its tailnet only: loopback, or Tailscale's
+/// 100.64.0.0/10 or fd7a:115c:a1e0::/48. Anyone who reaches a replay can move its clock
+/// (ADR-0068).
+pub fn private_address(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback() || (a == 100 && b & 0xc0 == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]
+        }
+    }
+}
+
 /// The directory of fixtures, when the server is to replay.
 pub fn fixtures_dir() -> Option<String> {
     std::env::var("CHARTGEN_REPLAY_FIXTURES")
@@ -415,6 +430,26 @@ mod tests {
         let (same, _) = r.bars("BTCUSDT", "1m", 3, as_of, Some(i64::MAX)).unwrap();
         let closes = |bars: &[Bar]| bars.iter().map(|b| b.close).collect::<Vec<_>>();
         assert_eq!(closes(&same), closes(&page));
+    }
+
+    #[test]
+    fn only_loopback_and_tailscale_addresses_are_private() {
+        for (ip, private) in [
+            ("127.0.0.1", true),
+            ("::1", true),
+            ("100.64.0.1", true),
+            ("100.101.102.103", true),
+            ("100.127.255.255", true),
+            ("fd7a:115c:a1e0::1", true),
+            ("0.0.0.0", false),
+            ("::", false),
+            ("100.63.255.255", false),
+            ("100.128.0.1", false),
+            ("192.168.1.10", false),
+            ("fd7a:115c:a1e1::1", false),
+        ] {
+            assert_eq!(private_address(ip.parse().unwrap()), private, "{ip}");
+        }
     }
 
     #[test]
