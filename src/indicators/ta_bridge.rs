@@ -391,6 +391,11 @@ impl Indicator for Cci {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        // The first value reads `period` bars.
+        self.period
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV: (hlc3 - ta.sma(hlc3, n)) / (0.015 * ta.dev(hlc3, n)).
         let src = source_series(data, "hlc3");
@@ -455,6 +460,11 @@ impl Indicator for Roc {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        // The first value reads the close `period` bars back.
+        self.period
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV: 100 * (close - close[n]) / close[n].
         let vals = roc(&data.closes(), self.period);
@@ -506,6 +516,11 @@ impl Indicator for Mfi {
         if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
             self.period = v as usize;
         }
+    }
+
+    fn warmup_bars(&self) -> usize {
+        // The first value reads `period` bars.
+        self.period
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -589,6 +604,11 @@ impl Indicator for Stochastic {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        // %K reads `period` bars, its smoothing and %D one more window each.
+        self.period + self.k_smooth + self.d_smooth - 2
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV: %K = ta.sma(ta.stoch(close, high, low, period), k_smooth).
         // %D is an SMA of %K with d_smooth period.
@@ -665,6 +685,11 @@ impl Indicator for WilliamsR {
         if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
             self.period = v as usize;
         }
+    }
+
+    fn warmup_bars(&self) -> usize {
+        // The first value reads `period` bars.
+        self.period
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
