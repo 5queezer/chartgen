@@ -132,6 +132,17 @@ export const SeriesStrokeSchema = z.object({
   dashed: z.boolean(),
 });
 
+// A chart pattern's bar open times in ms (`null` until it confirms or fails) and its
+// height, the measured move's. Absent on other patterns and on bars without times.
+const PatternTimesShape = {
+  start_time: z.number().int().optional(),
+  end_time: z.number().int().optional(),
+  known_time: z.number().int().optional(),
+  confirmed_time: z.number().int().nullable().optional(),
+  failed_time: z.number().int().nullable().optional(),
+  height: z.number().optional(),
+};
+
 // A chart pattern. The newest response holds all of them, whatever bars it covers:
 // an index before its first bar is negative, and `t` still names the bar.
 export const SeriesPatternSchema = z.object({
@@ -151,6 +162,7 @@ export const SeriesPatternSchema = z.object({
   target: z.number().optional(),
   invalidation: z.number().optional(),
   confirmed_t: z.number().nullable().optional(),
+  ...PatternTimesShape,
 });
 
 // `lines[line]` is flat at `y` from bar `x` on. The newest response's levels
@@ -357,6 +369,7 @@ export const SummaryPatternSchema = z.object({
   target: z.number().optional(),
   invalidation: z.number().optional(),
   confirmed_x: z.number().int().optional(),
+  ...PatternTimesShape,
 });
 
 export const SummaryIndicatorSchema = z.object({

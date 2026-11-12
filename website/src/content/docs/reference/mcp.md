@@ -252,6 +252,10 @@ the last bar instead, `null` when they have none there: only the active one
 has a value. In `format=series` those lines carry `"breaks": true`, which the
 web legend uses the same way.
 
+`chart_patterns` adds `patterns`: `key`, `name`, `bias`, `status`, `tooltip`, optional
+`target`, `invalidation` and `confirmed_x` (a bar index), and the
+[times and height](#chart-pattern-times-and-height) of each.
+
 ##### Price-based styles
 
 `renko`, `kagi`, `point_figure`, `line_break` and `range` are built on the server from the
@@ -457,7 +461,8 @@ Three additional channels round out the payload so the full set of
 - **`patterns`** — detected shapes (`chart_patterns`, the swing of `auto_fib`):
   `key`, `name`, `bias`, `status` (`forming`, `confirmed` or `failed`), `strokes`
   (two-point segments as in `divlines`), `label`, `tooltip`, and optional `target`,
-  `invalidation` and `confirmed_t`.
+  `invalidation` and `confirmed_t`. A `chart_patterns` one also carries its
+  [times and height](#chart-pattern-times-and-height).
 - **`levels`** — `lines[line]` is flat at `y` from bar `x` on (`auto_fib`).
 - **`events`** — what an alert can wait for: `key`, `name` and `t`, the bar time of
   the newest occurrence on a closed bar, or `null`.
@@ -475,6 +480,40 @@ can fall back to an older bar or to `null` and return. To tell a new detection, 
 newer than any you saw and no older than the newest bar of your previous response.
 `format=summary` and `png` take no warmup, so `chart_patterns` and `auto_fib` read only the
 `bars` you ask for: ask for 600 to match the web chart.
+
+##### Chart pattern times and height
+
+Each `chart_patterns` pattern, in `format=series` and in `format=summary` (so also
+`get_indicators`), says when it happened, as bar open times in **ms** since epoch (unlike
+`t`, which is in seconds):
+
+| Field | Meaning |
+|---|---|
+| `start_time`, `end_time` | First and last bar of the pattern before any breakout: its first and last pivot. |
+| `known_time` | First bar with its last pivot known, `depth` bars after it. Only closes from here on can confirm or fail it. |
+| `confirmed_time` | The bar whose close broke its line, or `null`. |
+| `failed_time` | The bar that failed it, or `null`. A pattern that failed after a confirmation has both. |
+| `height` | Its height in price, as the measured move uses it: `target` is the broken line's value on the confirming bar, plus or minus `height`. For a triangle, wedge, channel or rectangle, the distance between its lines at its first pivot; for a flag or pennant, the pole; for a head and shoulders, the head over the neckline; for a double or triple top or bottom, the extreme past the neck. |
+
+`target` and `invalidation` are there as before. A series without bar times (the demo
+series) has no time fields. A descending triangle that failed, abridged:
+
+```json
+{
+  "key": "descending_triangle", "name": "Descending Triangle", "bias": "bearish", "status": "failed",
+  "start_time": 1762200000000, "end_time": 1762632000000, "known_time": 1762704000000,
+  "confirmed_time": null, "failed_time": 1762790400000,
+  "height": 142.6
+}
+```
+
+Key a pattern by `(key, start_time)` to follow it across calls, attach drawings to it, or
+score it later. Patterns are re-detected on each call from the last `lookback` (600) closed
+bars, and that window's start moves its first swings: **in the newer half of the window a
+confirmed pattern stays, but in the older half patterns can appear and disappear as the
+window slides** ([ADR-0046](/chartgen/decisions/0046-pattern-detection/)). So a pattern
+missing from a later response is not proof that it failed; only `failed_time` says that.
+To score the detector, record each pattern while it is in the newer half.
 
 An indicator that plots past the last bar also carries a **`future`**
 block ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/)).

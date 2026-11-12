@@ -180,6 +180,23 @@ pub struct PatternShape {
     pub invalidation: Option<f64>,
     /// Bar whose close confirmed the pattern.
     pub confirmed_x: Option<i64>,
+    /// When it formed and resolved, as bar open times; `None` without bar times.
+    pub times: Option<PatternTimes>,
+    /// Height in price: the measured move's distance past the broken line.
+    pub height: Option<f64>,
+}
+
+/// A pattern's bars as open times in ms since epoch, which stay put while the
+/// window slides and its indices do not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PatternTimes {
+    /// First and last bar of the pattern before any breakout.
+    pub start: i64,
+    pub end: i64,
+    /// First bar with its last pivot known.
+    pub known: i64,
+    pub confirmed: Option<i64>,
+    pub failed: Option<i64>,
 }
 
 /// A flat level (`lines[line]`) from bar `x` to the last bar. The whole level

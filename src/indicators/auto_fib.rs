@@ -275,6 +275,8 @@ fn swing_shape(s: &Swing, base: usize) -> PatternShape {
         target: None,
         invalidation: None,
         confirmed_x: None,
+        times: None,
+        height: None,
     }
 }
 

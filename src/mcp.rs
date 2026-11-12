@@ -2159,6 +2159,22 @@ fn panel_result_to_series_json(
     out
 }
 
+// A chart pattern's times in ms (null where it has not confirmed or failed) and
+// its height, for agents to key a pattern by `(key, start_time)` across calls and
+// to score it later. Absent where the pattern or its bars have none.
+fn add_pattern_times(j: &mut Value, p: &chartgen::indicator::PatternShape) {
+    if let Some(t) = p.times {
+        j["start_time"] = json!(t.start);
+        j["end_time"] = json!(t.end);
+        j["known_time"] = json!(t.known);
+        j["confirmed_time"] = json!(t.confirmed);
+        j["failed_time"] = json!(t.failed);
+    }
+    if let Some(h) = p.height {
+        j["height"] = json!(h);
+    }
+}
+
 // Pattern channels of a series indicator (ADR-0046), from the untrimmed result:
 // `pr`'s indices are bars of `data`, of which the response starts at `offset`.
 // `labels` belong to their bar and are cut like signals. `patterns`, `levels`
@@ -2247,6 +2263,7 @@ fn add_marks_to_series_json(
             if let Some(x) = p.confirmed_x {
                 j["confirmed_t"] = t_of(x);
             }
+            add_pattern_times(&mut j, p);
             j
         })
         .collect();
@@ -2443,6 +2460,7 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
                 if let Some(x) = p.confirmed_x {
                     j["confirmed_x"] = json!(x);
                 }
+                add_pattern_times(&mut j, p);
                 j
             })
             .collect();
@@ -4227,6 +4245,28 @@ mod tests {
         assert_eq!(f["strokes"][0]["t1"], t["strokes"][0]["t1"]);
         assert_eq!(f["strokes"][0]["t1"], json!(1_000_000 + fx * 3600));
         assert_eq!(f["confirmed_t"], t["confirmed_t"]);
+        // Its times in ms, the same on the tail, so `(key, start_time)` names it.
+        let ms = |x: i64| json!((1_000_000 + x * 3600) * 1000);
+        assert_eq!(f["start_time"], ms(20));
+        assert_eq!(f["end_time"], ms(40));
+        assert_eq!(f["known_time"], ms(43));
+        let confirmed = f["confirmed_t"].as_i64().unwrap() * 1000;
+        assert_eq!(f["confirmed_time"], json!(confirmed));
+        assert_eq!(f.get("failed_time"), Some(&Value::Null));
+        // Tops at 110.1 over a neck at 99.9: the target is the neck minus that.
+        let h = f["height"].as_f64().unwrap();
+        assert!((h - 10.2).abs() < 1e-9, "{h}");
+        assert!((f["target"].as_f64().unwrap() - (99.9 - h)).abs() < 1e-9);
+        for k in [
+            "start_time",
+            "end_time",
+            "known_time",
+            "confirmed_time",
+            "failed_time",
+            "height",
+        ] {
+            assert_eq!(f[k], t[k], "{k}");
+        }
         // Events carry the bar's time, and only bearish happened.
         let bear = &tail["events"][1];
         assert_eq!(bear["key"], "bearish");
@@ -4271,6 +4311,35 @@ mod tests {
             .unwrap();
         let j = panel_result_to_json(&ind.compute(&data));
         assert_eq!(j["patterns"][0]["status"], "confirmed");
+        assert_eq!(
+            j["patterns"][0]["start_time"],
+            json!((1_000_000 + 20 * 3600) * 1000)
+        );
+        assert!(j["patterns"][0]["confirmed_time"].is_i64());
+        assert_eq!(j["patterns"][0]["failed_time"], Value::Null);
+        assert!(j["patterns"][0]["height"].is_f64());
+        // Back over the tops before it broke: failed, never confirmed, with when.
+        let mut failed = double_top_data(44);
+        for x in 44..60 {
+            let c = 110.0 + (x - 43) as f64;
+            failed.bars.push(chartgen::data::Bar {
+                open: c,
+                high: c + 0.1,
+                low: c - 0.1,
+                close: c,
+                volume: 1.0,
+                date: (1_000_000 + x * 3600).to_string(),
+            });
+        }
+        let j = panel_result_to_json(&ind.compute(&failed));
+        let p = &j["patterns"][0];
+        assert_eq!(
+            (&p["key"], &p["status"]),
+            (&json!("double_top"), &json!("failed"))
+        );
+        assert_eq!(p["start_time"], json!((1_000_000 + 20 * 3600) * 1000));
+        assert_eq!(p["confirmed_time"], Value::Null);
+        assert_eq!(p["failed_time"], json!((1_000_000 + 45 * 3600) * 1000));
         assert!(j["patterns"][0]["tooltip"]
             .as_str()
             .unwrap()
@@ -6750,6 +6819,8 @@ mod tests {
             target: None,
             invalidation: None,
             confirmed_x: Some(28),
+            times: None,
+            height: None,
         };
         let pr = PanelResult {
             patterns: vec![pattern],
