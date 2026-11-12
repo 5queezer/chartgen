@@ -21,8 +21,9 @@ chartgen replay-fixtures --symbols BTCUSDT,ETHUSDT \
 | `--symbols` | Binance spot symbols, comma-separated. |
 | `--from` | First day of the window, UTC (`YYYY-MM-DD`). |
 | `--to` | Last day, UTC, included. It must have ended: a fixture holds closed bars only. |
-| `--out` | Directory for one `<SYMBOL>.json` per symbol. Created if missing. |
-| `--shift-days` | Move every timestamp by this many days (negative moves back). Default `0`. |
+| `--out` | Directory for one `<SYMBOL>.json` per symbol. Created if missing. Use one directory per window. |
+| `--shift-days` | Move every timestamp by this many days (negative moves back), a multiple of 7. Default `0`. |
+| `--shift-any` | Allow a `--shift-days` that is not a multiple of 7. See the caveats below. |
 
 It prints a line per symbol: bars, minutes missing, gaps over 5 minutes, size and time, then
 each gap in real time (the first 20).
@@ -35,20 +36,34 @@ each gap in real time (the first 20).
   through the same gate as the server. That is at most a fifth of the IP's weight a minute, so a
   live server on the same address keeps working. Run it where the replay will run (your PC), not
   on the live server.
+- **Rate limits.** When Binance answers 429 or 418, or the gate holds requests back because this
+  minute's weight is used up, the same page is read again after the wait: `Retry-After`, or the
+  rest of the minute. That happens at most 5 times per page, and never after a wait longer than
+  5 minutes. If it still fails, the run stops and says `wait N s before running again`. Do wait:
+  requests that keep coming during a limit get the IP banned, and the live server shares it.
 - **Interrupted runs.** Each file records the window it was built for and is written whole or
   not at all. Run the same command again: symbols already written are kept with no request, and
-  the rest are read. A file of another window is not overwritten; choose another `--out` or
-  remove it.
+  the rest are read.
+- **One window per directory.** A replay server loads every `*.json` in its directory as one run.
+  So a run refuses an `--out` that holds a `*.json` of another window, or one that records no
+  window (a hand-made fixture). Write each window to a fresh directory.
 - **Gaps.** A minute Binance has no kline for (an outage, or no trade on a small symbol) stays
   missing. The replay builds each longer bar from the minutes it has, and a bar with no minute at
   all is not there, as on Binance. If the window's first minutes are missing, the first bar of
   each longer interval is left out.
 - **Shift.** `--shift-days` hides the real dates from the agent. Prices still show the market
-  regime. A multiple of 7 keeps weekends on weekends and weekly bars the same; any shift changes
-  the monthly bars.
+  regime. It must be a multiple of 7, which keeps weekends on weekends and the weekly bars (which
+  open on Monday) as they were. Any shift still changes:
+  - **monthly bars**, which hold other days once the dates move;
+  - **`2D`, `3D` and other multi-day bars**, whose grid is counted from a fixed day, unless the
+    shift is also a multiple of their length.
+- **`--shift-any`** allows any number of days. Then the agent also sees each day under another
+  weekday: the quiet of a weekend shows up on, say, a Wednesday, and a weekly bar mixes the end
+  of one real week with the start of the next. Use it only when the weekday does not matter to
+  what you test.
 
-Every `*.json` in the directory is loaded, so keep one window per directory. Record a hash of
-the files with each run (`sha256sum fixtures/2026-q3/*.json`), so the run can be checked later.
+Record a hash of the files with each run (`sha256sum fixtures/2026-q3/*.json`), so the run can be
+checked later.
 
 ## Run a private replay server
 
@@ -56,12 +71,24 @@ the files with each run (`sha256sum fixtures/2026-q3/*.json`), so the run can be
 A replay server refuses sign-in, and with sign-in off anyone who can reach it can register a
 client and get a token without a person. Anyone can then move its one clock to the end of the
 window, which spoils the run. Never route it through Cloudflare or any public proxy.
-`chartgen --serve` listens on every interface and has no option to bind one address, so keep it
-private with where it runs: a container whose port is published on the Tailscale address only,
-or a container on an internal network.
+`chartgen --serve` listens on every interface unless `CHARTGEN_BIND` names one address. A replay
+server prints the address it is bound to, and warns when that is neither loopback nor a
+Tailscale address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). In a container the warning is
+expected: there the published port decides who can reach it.
 :::
 
-**On your PC, over Tailscale.** The published image is arm64 only, so build it on x86
+**On your PC, as a bare binary.** Bind it to the Tailscale address:
+
+```bash
+CHARTGEN_BIND=$(tailscale ip -4) \
+CHARTGEN_REPLAY_FIXTURES=fixtures/2026-q3 \
+CHARTGEN_BASE_URL="http://$(tailscale ip -4):9316" \
+chartgen --serve --port 9316
+```
+
+`CHARTGEN_BIND=127.0.0.1` is enough when the agent runs on the same machine.
+
+**On your PC, in a container.** The published image is arm64 only, so build it on x86
 (`docker build -t chartgen .` in the repository), then publish the port on the Tailscale
 address alone:
 
@@ -86,11 +113,20 @@ docker run -d --name chartgen-replay --network chartgen-replay \
   -e CHARTGEN_REPLAY_FIXTURES=/fixtures \
   -e CHARTGEN_BASE_URL=http://chartgen-replay:9315 \
   ghcr.io/5queezer/chartgen:master
-docker network connect chartgen-replay <agent container>
 ```
 
-A bare `chartgen --serve` with `CHARTGEN_REPLAY_FIXTURES` set is reachable from your LAN unless
-a firewall admits the port on the Tailscale interface only.
+Put that network in the agent's own compose definition rather than running
+`docker network connect` by hand: a hand-made connection is lost when the agent is redeployed
+(Coolify recreates its containers).
+
+```yaml
+services:
+  agent:
+    networks: [default, chartgen-replay]
+networks:
+  chartgen-replay:
+    external: true
+```
 
 The agent connects as a [headless client](/chartgen/reference/oauth/#connecting-a-headless-agent).
 With sign-in off it needs no person: it registers, follows `/authorize` and exchanges the code.

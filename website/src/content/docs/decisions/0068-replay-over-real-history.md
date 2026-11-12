@@ -73,12 +73,18 @@ symbol. `Replay::fixture_bars` validates them on load as it does today.
   bars only. A run may write at most **460 symbol-days** (5 symbols over a 92-day quarter, about
   66 MB in the replay's memory, see Sizes); a larger one is refused before any request.
 - It pauses 100 ms before each request: at most 1200 of the 6000 weight a minute Binance allows
-  the IP, so a live server on the same address keeps the rest. The gate's refusal, a 429 or any
-  other failed read stops the run.
+  the IP, so a live server on the same address keeps the rest.
+- A 429, a 418 or the gate's refusal reads the same page again after the gate's wait
+  (`Retry-After`, or the rest of the minute), at most 5 times, and never after a wait over 5
+  minutes. Then the run stops and says how many seconds to wait before running again: a rerun at
+  once would meet the same limit, and requests that keep coming get the home IP banned (418),
+  which the live server shares. Any other failed read stops the run at once.
 - Each file is written through a `.part` file and records its window (`from`, `to`,
   `shift_days`), which the replay ignores. A rerun keeps a symbol whose file has the same window
-  and reads only the others, so an interrupted run costs at most one symbol's requests again. A
-  file of another window is not overwritten: it may be a run someone means to audit.
+  and reads only the others, so an interrupted run costs at most one symbol's requests again.
+- One window per directory: a replay loads every `*.json` of its directory as one run, so the
+  builder refuses an `--out` holding a `*.json` of another window, or of none recorded, before
+  any request. It may be a run someone means to audit.
 - Cost: 90 days of one symbol is 129,600 bars, so 130 requests at weight 2: well under a minute's
   budget.
 - It runs where the replay runs (the PC by default), not on the live server, so the live gate
@@ -97,8 +103,10 @@ symbol. `Replay::fixture_bars` validates them on load as it does today.
   its first bar of each longer interval is dropped too.
 - **Optional time shift.** `--shift-days N` moves every timestamp by N days, so the agent cannot
   recognise the dates. Fixtures may already be dated in the future (ADR-0059). Prices still betray
-  the regime (see Consequences). A shift that is not a multiple of 7 moves weekends onto weekdays
-  and changes the weekly bars; any shift changes the monthly ones.
+  the regime (see Consequences). The shift must be a multiple of 7, or weekends would land on
+  weekdays and every weekly bar would hold other days; `--shift-any` allows it anyway. Any shift
+  changes the monthly bars, and multi-day bars (`2D`, `3D`) unless it is a multiple of their
+  length too.
 
 **Instance.** The unchanged replay server, started with `CHARTGEN_REPLAY_FIXTURES=<dir>`:
 - **Sizes.** In memory a 1m `Bar` is about 100 bytes (five f64 plus a String date). 90 days × 5
@@ -115,10 +123,11 @@ symbol. `Replay::fixture_bars` validates them on load as it does today.
   - Anyone who can reach it can register and move the one clock to the end of the window, which
     spoils the run. So it is never routed through Cloudflare, and is reachable on the Tailscale
     address (PC) or an internal Docker network (radxa) only.
-  - `--serve` listens on every interface (`0.0.0.0`) and has no option to bind one address. So
-    the privacy comes from where the process runs: a container whose port is published on the
-    Tailscale address only, or one on an internal network with no published port. A bare process
-    on the PC is reachable from the LAN unless a firewall stops it.
+  - `--serve` listens on every interface (`0.0.0.0`) unless `CHARTGEN_BIND` names one address.
+    A bare process on the PC sets it to the Tailscale address. In a container it stays unset,
+    and the privacy comes from the port being published on the Tailscale address only, or from
+    an internal network with no published port. A replay server prints its address at start and
+    warns when it is neither loopback nor in Tailscale's ranges.
   - Hermes's MCP client can do the OAuth flow headlessly, since no person is needed.
 - **Performance.** `Replay::bars` scans every 1m bar from the window start on each call (O(window)).
   At 90 days that is ~130k bars per chart call, a few ms. A start bound from `limit` × interval can
@@ -229,9 +238,10 @@ bound in `Replay::bars` for year-long windows.
 
 - The builder's output loads with `Replay::load` and passes the existing replay tests unchanged.
 - A new test builds a fixture from REST pages in Binance's format (no network) and checks the bar
-  count, order, gap report and time shift, that a rerun reads nothing and that a file of another
-  window is not overwritten (`src/replay_fixtures.rs`). Another pins how `Replay::bars` builds
-  buckets across a gap of hours (`src/replay.rs`).
+  count, order, gap report and time shift, that a rerun reads nothing, that a directory holding
+  another window is refused, and that a 429 reads the same page again while a long ban ends the
+  run (`src/replay_fixtures.rs`). Another pins how `Replay::bars` builds buckets across a gap of
+  hours (`src/replay.rs`).
 - On the harness's side, not chartgen's:
   - A run of a fixed harness script against a fixed fixture twice gives byte-identical tool
     answers (the agent's choices may differ; the server's answers to the same calls do not).

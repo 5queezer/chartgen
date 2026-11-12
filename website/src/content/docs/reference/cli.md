@@ -35,11 +35,13 @@ chartgen replay-fixtures --symbols BTCUSDT,ETHUSDT \
 | `--from` | date `YYYY-MM-DD` | First day of the window, UTC. Required. |
 | `--to` | date `YYYY-MM-DD` | Last day, UTC, included; it must have ended. Required. |
 | `--out` | path | Directory for one `<SYMBOL>.json` per symbol. Required. |
-| `--shift-days` | integer | Move every timestamp by this many days. Default `0`. |
+| `--shift-days` | integer | Move every timestamp by this many days, a multiple of 7. Default `0`. |
+| `--shift-any` | flag | Allow a `--shift-days` that is not a multiple of 7 (weekdays and weekly bars change). |
 
 A run writes at most 460 symbol-days (5 symbols over 92 days), the memory a replay server can
-spare. A rerun keeps the symbols already written for the same window. It exits with status 1
-on any error.
+spare. A rerun keeps the symbols already written for the same window; an `--out` holding
+another window is refused. Rate limits are waited out and the page read again, up to 5 times.
+It exits with status 1 on any error.
 
 ## Operating modes
 
