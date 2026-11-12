@@ -689,6 +689,18 @@ impl ChartHub {
     }
 
     #[cfg(feature = "scripting")]
+    /// The newest `count` bars of `symbol` at `timeframe`, read as a chart seeds its
+    /// window (server indicator alerts, ADR-0067). Blocking; one fetch.
+    pub fn seed_bars(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        count: usize,
+    ) -> Result<Vec<Bar>, String> {
+        self.source.seed(symbol, timeframe, count).map(|d| d.bars)
+    }
+
+    #[cfg(feature = "scripting")]
     /// Listen to a feed without a chart (server alerts, ADR-0042): it shares the
     /// WebSocket with every chart of that symbol and interval, and closes after
     /// the linger once the lease and all charts are gone.
@@ -933,7 +945,7 @@ fn skips_a_bar(window: &[Bar], bar: &Bar, grid: &Interval) -> bool {
 /// it updates, or append a newer one and drop the oldest beyond `cap`.
 /// Bars older than the newest that match none of ours are ignored. True if
 /// the window changed.
-fn upsert_bar(window: &mut Vec<Bar>, bar: Bar, cap: usize) -> bool {
+pub(crate) fn upsert_bar(window: &mut Vec<Bar>, bar: Bar, cap: usize) -> bool {
     let ts = |b: &Bar| b.date.parse::<i64>().ok();
     let Some(t) = ts(&bar) else {
         return false;

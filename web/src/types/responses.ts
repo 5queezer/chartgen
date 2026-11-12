@@ -619,7 +619,8 @@ export const ServerAlertSchema = z.object({
   interval: z.string(),
   evaluate_on: z.enum(["live", "close"]),
   condition: z.enum(["crossing", "crossing_up", "crossing_down", "greater", "less"]),
-  level: z.number(),
+  /** Null only on an indicator alert that compares the close with the line (ADR-0067). */
+  level: z.number().nullable(),
   trigger: z.enum(["once", "every"]),
   message: z.string().nullable(),
   active: z.boolean(),
@@ -657,6 +658,19 @@ export const ServerAlertSchema = z.object({
   notify_agent: z.boolean().optional(),
   /** Present only on an alert that is about one of the owner's setups. */
   setup_id: z.string().optional(),
+  /**
+   * Present only on an alert on an indicator's line at bar closes (ADR-0067). `value` is
+   * the line at the last close it read, null until it has read one.
+   */
+  indicator: z
+    .object({
+      name: z.string(),
+      params: z.record(z.string(), z.unknown()),
+      line: z.string(),
+      compare: z.enum(["level", "close"]),
+      value: z.number().nullable(),
+    })
+    .optional(),
 });
 export type ServerAlert = z.infer<typeof ServerAlertSchema>;
 

@@ -51,6 +51,14 @@ describe("serverAlertStatus", () => {
 describe("texts", () => {
   it("names the alert and strips the transport's prefix from errors", () => {
     expect(serverAlertText({ ...alert, message: "hi" })).toBe("BTCUSDT crossing 100.00 — hi");
+    const rsi = { name: "rsi", params: { length: 14 }, line: "RSI", compare: "level" as const, value: 31.2 };
+    expect(serverAlertText({ ...alert, condition: "less", level: 25, indicator: rsi })).toBe(
+      "BTCUSDT RSI less than 25",
+    );
+    const ema = { ...rsi, name: "ma", line: "EMA 50", compare: "close" as const };
+    expect(serverAlertText({ ...alert, condition: "crossing_up", level: null, indicator: ema })).toBe(
+      "BTCUSDT close crossing up EMA 50",
+    );
     expect(serverAlertError(new Error("MCP tool error: webhook URL must use https"))).toBe(
       "webhook URL must use https",
     );
@@ -66,6 +74,22 @@ describe("the wire shape", () => {
       ServerAlertChangePayloadSchema.parse({ ...alert, webhook_secret: "s" }).webhook_secret,
     ).toBe("s");
     expect(ServerAlertsPayloadSchema.safeParse({ enabled: true }).success).toBe(false);
+    // An indicator alert, as `ServerAlerts::view` shows one that compares the close.
+    const onEma = {
+      ...alert,
+      evaluate_on: "close",
+      level: null,
+      indicator: { name: "ma", params: { type: "ema", length: 50 }, line: "EMA 50", compare: "close", value: null },
+    };
+    expect(ServerAlertsPayloadSchema.parse({ enabled: true, alerts: [onEma] }).alerts[0]?.indicator?.line).toBe(
+      "EMA 50",
+    );
+    expect(
+      ServerAlertsPayloadSchema.safeParse({
+        enabled: true,
+        alerts: [{ ...onEma, indicator: { ...onEma.indicator, compare: "above" } }],
+      }).success,
+    ).toBe(false);
     expect(
       ServerAlertsPayloadSchema.safeParse({
         enabled: true,
