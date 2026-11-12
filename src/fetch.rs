@@ -1106,12 +1106,29 @@ pub(crate) fn fetch_binance_minutes(
         .collect())
 }
 
-/// Put a pretend exchange behind `binance()` on this thread: `answer(url)` is the status
-/// and body of each request.
+/// How long the spot gate will refuse requests, when it does: after a 429 or 418, or
+/// with this minute's weight used up.
+pub(crate) fn binance_wait() -> Option<Duration> {
+    binance().gate.wait()
+}
+
+/// Put a pretend exchange behind `binance()` on this thread: `answer(url)` is the status,
+/// `Retry-After` and body of each request. Returns the ms by which to move the gate's
+/// monotonic clock on, so that a test need not sleep through a cooldown.
 #[cfg(test)]
-pub(crate) fn pretend_binance(answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) {
+pub(crate) fn pretend_binance(
+    answer: impl Fn(&str) -> (u16, Option<&'static str>, String) + Send + Sync + 'static,
+) -> Arc<std::sync::atomic::AtomicU64> {
+    let ahead = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let gate_ahead = ahead.clone();
     let client = Box::leak(Box::new(BinanceClient {
-        gate: Box::leak(Box::new(Gate::new(6_000))),
+        gate: Box::leak(Box::new(Gate::with_clocks(
+            6_000,
+            Box::new(|| now_ms() / 1000),
+            Box::new(move || {
+                Instant::now() + Duration::from_millis(gate_ahead.load(Ordering::SeqCst))
+            }),
+        ))),
         walks: Walks::default(),
         klines: KlineCache::default(),
         pages: PageCache::default(),
@@ -1120,16 +1137,17 @@ pub(crate) fn pretend_binance(answer: impl Fn(&str) -> (u16, String) + Send + Sy
             wall_ms: now_ms(),
         }),
         send: Box::new(move |url| {
-            let (status, body) = answer(url);
+            let (status, retry_after, body) = answer(url);
             Ok(BinanceResponse {
                 status,
-                retry_after: None,
+                retry_after: retry_after.map(str::to_string),
                 used_weight: None,
                 body,
             })
         }),
     }));
     TEST_CLIENT.set(Some(client));
+    ahead
 }
 
 fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Kline>, String> {

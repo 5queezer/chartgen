@@ -96,6 +96,19 @@ impl Gate {
         Ok(Sent(now.div_euclid(60)))
     }
 
+    /// How long until `admit` lets a request start, when it would refuse one now.
+    pub fn wait(&self) -> Option<Duration> {
+        let now = (self.wall)();
+        let st = self.lock();
+        let cooldown = st
+            .cooldown
+            .map(|(until, _)| until.saturating_duration_since((self.mono)()))
+            .filter(|left| !left.is_zero());
+        let weight = (st.minute == now.div_euclid(60) && st.used >= self.threshold)
+            .then(|| Duration::from_secs((60 - now.rem_euclid(60)) as u64));
+        cooldown.max(weight)
+    }
+
     /// Record the response to `sent`: its status, and its `Retry-After` and
     /// `x-mbx-used-weight-1m` headers. A reading from a request that left in an
     /// earlier minute describes that minute, so it does not count against this one.
@@ -328,6 +341,23 @@ mod tests {
         g.observe(sent, 429, Some("1"), None);
         advance(100);
         assert!(g.admit().unwrap_err().contains("HTTP 418"));
+    }
+
+    #[test]
+    fn wait_says_how_long_admit_will_refuse() {
+        let (g, advance) = gate(630);
+        assert_eq!(g.wait(), None);
+        let sent = g.admit().unwrap();
+        g.observe(sent, 429, Some("90"), None);
+        assert_eq!(g.wait(), Some(Duration::from_secs(90)));
+        advance(90);
+        assert_eq!(g.wait(), None);
+        // Past the weight threshold, until the minute ends.
+        let (g, _) = gate(630);
+        let sent = g.admit().unwrap();
+        g.observe(sent, 200, None, Some("4800"));
+        assert!(g.admit().is_err());
+        assert_eq!(g.wait(), Some(Duration::from_secs(30)));
     }
 
     #[test]
