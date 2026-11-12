@@ -11,6 +11,10 @@ The HTTP transport implements **MCP Streamable HTTP, spec
 See [ADR-0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) for
 the migration rationale.
 
+**Time units.** `t` and fields ending in `_t` are unix seconds (chart coordinates).
+Fields ending in `_time` or `_at` are unix milliseconds. The one exception is server
+alerts' `bar_time`, which is in seconds and stays so for webhook compatibility.
+
 ## Transports
 
 ### Claude Desktop (stdio)
