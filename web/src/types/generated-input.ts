@@ -74,7 +74,7 @@ export interface CreateServerAlertInput {
    */
   notify_agent?: boolean;
   /**
-   * The indicator's params, as list_indicators lists them, e.g. {length: 14}. Its history must fit in 1000 bars (EMA 200 does); offset is not taken.
+   * The indicator's params, as list_indicators lists them, e.g. {length: 14}. A name it does not take is refused; the alert keeps every param with its default filled in. Its history must fit in 999 bars (EMA 200 does); stoch, cci, mfi, williams_r and roc take at most 200 per param; offset is not taken.
    */
   params?: {
     [k: string]: unknown;

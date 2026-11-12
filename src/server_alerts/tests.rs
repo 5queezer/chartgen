@@ -3980,6 +3980,42 @@ async fn a_missing_close_reads_the_bars_again_and_then_that_close() {
     assert_eq!(fired, Some(t + 2 * HOUR));
 }
 
+/// A feed that keeps dropping closes reads the bars at most once a minute.
+#[tokio::test(flavor = "multi_thread")]
+async fn bars_are_read_again_at_most_once_a_minute() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "sma", "length": 5 }, "compare": "close",
+        "condition": "crossing_up", "trigger": "every",
+    });
+    let (a, fake, _) = with_history("sma-reread", bars, args).await;
+    let k = key("1h");
+    let reads = || fake.seeds.load(Ordering::SeqCst);
+    let seeded = |a: &Arc<ServerAlerts>| a.lock().watches[&key("1h")].bars.is_some();
+    let first = reads();
+    // A gap: read again.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 100.0)));
+    until("a read after the gap", || {
+        reads() == first + 1 && seeded(&a)
+    })
+    .await;
+    // A lag right after: the bars go, and wait out the pause.
+    a.lost_events(&k);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(reads(), first + 1);
+    assert!(!seeded(&a));
+    // The upkeep once the pause is over.
+    a.lock().watches.get_mut(&k).unwrap().last_reread =
+        Some(Instant::now() - REREAD_PAUSE - Duration::from_secs(1));
+    a.sweep(&mut a.lock(), now_ms());
+    until("a read after the pause", || {
+        reads() == first + 2 && seeded(&a)
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_indicator_alert_does_not_fire_twice_on_a_close_across_a_restart() {
     let (store, path) = store_at("ema-restart");
@@ -4020,6 +4056,11 @@ async fn an_indicator_alert_does_not_fire_twice_on_a_close_across_a_restart() {
     let row = store.server_alerts().unwrap().pop().unwrap();
     let row: Value = serde_json::from_str(&row).unwrap();
     assert!(row.get("level").is_none(), "{row}");
+    // What runs, defaults included.
+    assert_eq!(
+        row["indicator"]["params"],
+        json!({ "type": "ema", "length": 21, "source": "close", "offset": 0 })
+    );
     drop(a);
 
     let b = open(reopen(&path));
@@ -4070,9 +4111,10 @@ async fn an_indicator_fire_posts_the_line_and_its_value() {
     assert_eq!(body["indicator"]["name"], "ma");
     assert_eq!(body["indicator"]["line"], "SMA 4");
     assert_eq!(body["indicator"]["value"], 101.0);
+    // What runs, defaults included: the webhook says exactly what is computed.
     assert_eq!(
         body["indicator"]["params"],
-        json!({ "type": "sma", "length": 4 })
+        json!({ "type": "sma", "length": 4, "source": "close", "offset": 0 })
     );
 }
 

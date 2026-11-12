@@ -11,8 +11,14 @@ use chartgen::indicators;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// Closed bars a feed keeps for its indicator alerts: one Binance page.
+/// Bars a feed keeps for its indicator alerts: one Binance page. The read leaves out
+/// the forming bar, so an alert can count on one fewer.
 pub(super) const WINDOW_BARS: usize = 1000;
+
+/// Indicators that rescan a window of `period` bars at every bar, so they cost bars
+/// times period; and the most of each of their params on a server alert (ADR-0067).
+const RESCANNING: &[&str] = &["stoch", "cci", "mfi", "williams_r", "roc"];
+const MAX_RESCAN_PARAM: i64 = 200;
 
 /// The shortest interval an indicator alert reads: what it costs is per close.
 pub(super) const MIN_INTERVAL_SECS: i64 = 3600;
@@ -81,22 +87,33 @@ pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
             ALLOWED.join(", ")
         ));
     }
-    let params = match args.get("params") {
+    let given = match args.get("params") {
         None | Some(Value::Null) => json!({}),
         Some(v @ Value::Object(_)) => v.clone(),
         Some(_) => return Err("params must be an object".into()),
     };
-    if params.get("offset").is_some_and(|o| o.as_i64() != Some(0)) {
+    if given.get("offset").is_some_and(|o| o.as_i64() != Some(0)) {
         return Err(
             "A server alert reads the line at the bar that closed; offset is not taken".into(),
         );
     }
+    let params = full_params(name, &given)?;
+    if RESCANNING.contains(&name) {
+        for (k, v) in params.as_object().into_iter().flatten() {
+            if v.as_i64().is_some_and(|n| n > MAX_RESCAN_PARAM) {
+                return Err(format!(
+                    "{name} {k} is at most {MAX_RESCAN_PARAM} on a server alert"
+                ));
+            }
+        }
+    }
     let ind = indicators::by_name_configured(name, &params)?
         .ok_or_else(|| format!("unknown indicator {name}"))?;
     let need = ind.warmup_bars() + 2;
-    if need > WINDOW_BARS {
+    if need > WINDOW_BARS - 1 {
         return Err(format!(
-            "{name} with these params needs {need} bars of history; a server alert keeps {WINDOW_BARS}"
+            "{name} with these params needs {need} bars of history; a server alert reads {}",
+            WINDOW_BARS - 1
         ));
     }
     // Labels do not depend on the bars, so three of them name the lines.
@@ -159,6 +176,42 @@ pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
         compare,
         level,
     }))
+}
+
+/// `given` as `name` runs it: every param its schema names, with the defaults filled
+/// in, so a stored alert and its webhooks say what is computed. A key the schema
+/// does not name is refused rather than ignored.
+fn full_params(name: &str, given: &Value) -> Result<Value, String> {
+    let schema = indicators::by_name(name)
+        .ok_or_else(|| format!("unknown indicator {name}"))?
+        .params();
+    let specs = schema.as_array().cloned().unwrap_or_default();
+    let names: Vec<&str> = specs.iter().filter_map(|p| p["name"].as_str()).collect();
+    for k in given.as_object().into_iter().flatten().map(|(k, _)| k) {
+        if !names.contains(&k.as_str()) {
+            let takes = if names.is_empty() {
+                "it takes none".to_string()
+            } else {
+                format!("it takes {}", names.join(", "))
+            };
+            return Err(format!("{name} has no parameter {k}; {takes}"));
+        }
+    }
+    let mut full = serde_json::Map::new();
+    for spec in &specs {
+        let Some(k) = spec["name"].as_str() else {
+            continue;
+        };
+        let value = given
+            .get(k)
+            .filter(|v| !v.is_null())
+            .or_else(|| spec.get("default"))
+            .cloned();
+        if let Some(v) = value {
+            full.insert(k.to_string(), v);
+        }
+    }
+    Ok(Value::Object(full))
 }
 
 /// `spec` at the close of the last bar of `bars`. `None` while the window holds
@@ -248,6 +301,128 @@ mod tests {
             .unwrap();
         let offered = &create["inputSchema"]["properties"]["indicator"]["enum"];
         assert_eq!(offered, &json!(ALLOWED));
+    }
+
+    /// 999 closed bars of a wobbling rise, with volume.
+    fn window() -> Vec<Bar> {
+        (0..WINDOW_BARS - 1)
+            .map(|i| {
+                let c = 100.0 + i as f64 * 0.05 + (i as f64 * 0.7).sin() * 3.0;
+                Bar {
+                    open: c - 0.5,
+                    high: c + 1.0,
+                    low: c - 1.0,
+                    close: c,
+                    volume: 10.0 + (i % 7) as f64,
+                    date: (i as i64 * 3600).to_string(),
+                }
+            })
+            .collect()
+    }
+
+    /// The largest value of integer param `k` that `parse` accepts, with `base` for
+    /// the others, if any.
+    fn largest(name: &str, base: &Value, k: &str, max: i64) -> Option<i64> {
+        let accepts = |v: i64| {
+            let mut params = base.clone();
+            params[k] = json!(v);
+            parse(&json!({ "indicator": name, "params": params, "level": 1.0 })).is_ok()
+        };
+        let (mut lo, mut hi) = (1, max);
+        if !accepts(lo) {
+            return None;
+        }
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            if accepts(mid) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Some(lo)
+    }
+
+    /// An indicator whose `warmup_bars` says less than it needs would pass `parse`
+    /// with params it cannot read on the bars an alert keeps, and never fire.
+    #[test]
+    fn every_allowed_indicator_reads_a_value_at_its_largest_params() {
+        let bars = window();
+        for name in ALLOWED {
+            let schema = indicators::by_name(name).unwrap().params();
+            let specs = schema.as_array().cloned().unwrap_or_default();
+            // Each choice of each enum param on its own, the others at their default.
+            let mut bases = vec![json!({})];
+            for spec in &specs {
+                for choice in spec["enum"].as_array().into_iter().flatten() {
+                    bases.push(json!({ spec["name"].as_str().unwrap(): choice }));
+                }
+            }
+            for base in &bases {
+                for spec in specs.iter().filter(|s| s["type"] == "integer") {
+                    let k = spec["name"].as_str().unwrap();
+                    if k == "offset" {
+                        continue;
+                    }
+                    let max = spec["max"].as_i64().unwrap_or(10_000);
+                    let Some(v) = largest(name, base, k, max) else {
+                        continue;
+                    };
+                    let mut params = base.clone();
+                    params[k] = json!(v);
+                    let spec = parse(&json!({ "indicator": name, "params": params, "level": 1.0 }))
+                        .unwrap()
+                        .unwrap();
+                    let r = read(&spec, &bars);
+                    assert!(
+                        r.is_some_and(|r| r.prev.is_some()),
+                        "{name} {params} reads nothing on {} bars",
+                        bars.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rescanning_indicators_are_held_to_200() {
+        for name in RESCANNING {
+            let schema = indicators::by_name(name).unwrap().params();
+            for spec in schema.as_array().unwrap() {
+                let k = spec["name"].as_str().unwrap();
+                let at =
+                    |v: i64| parse(&json!({ "indicator": name, "params": { k: v }, "level": 1.0 }));
+                assert!(at(200).is_ok(), "{name} {k} 200");
+                let err = at(201).err().unwrap();
+                assert!(err.contains("at most 200"), "{name} {k}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn params_are_checked_by_name_and_stored_whole() {
+        let err = parse(&json!({ "indicator": "rsi", "params": { "lenght": 21 }, "level": 30.0 }))
+            .err()
+            .unwrap();
+        assert_eq!(err, "rsi has no parameter lenght; it takes length");
+        let err = parse(&json!({ "indicator": "stoch", "params": { "k": 5 }, "level": 30.0 }))
+            .err()
+            .unwrap();
+        assert!(err.contains("it takes period, k_smooth, d_smooth"), "{err}");
+        // What runs, defaults and all.
+        let rsi = parse(&json!({ "indicator": "rsi", "level": 30.0 }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rsi.params, json!({ "length": 14 }));
+        let ema = parse(&json!({
+            "indicator": "ma", "params": { "type": "ema", "length": 50 }, "compare": "close",
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ema.params,
+            json!({ "type": "ema", "length": 50, "source": "close", "offset": 0 })
+        );
     }
 
     #[test]

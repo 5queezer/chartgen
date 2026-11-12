@@ -41,6 +41,9 @@ const LIVE_FEED_INTERVAL: &str = "1m";
 const FEED_RETRY: Duration = Duration::from_secs(30);
 /// No price for this long and the alert shows as waiting.
 const FEED_QUIET: Duration = Duration::from_secs(120);
+/// Least time between two reads of a pair's bars after a gap or a lag (ADR-0067):
+/// a feed that keeps dropping closes cannot turn into a REST read per close.
+const REREAD_PAUSE: Duration = Duration::from_secs(60);
 /// A delivery still pending after this long, across a restart, is dropped.
 const EVENT_MAX_AGE_SECS: i64 = 3_600;
 const MINUTE: Duration = Duration::from_secs(60);
@@ -382,6 +385,10 @@ struct Watch {
     /// The newest close indicator alerts could not read for want of bars: read once
     /// they are there.
     pending_close: Option<i64>,
+    /// The bars were dropped for a gap or a lag, and are to be read again.
+    rereading: bool,
+    /// When a read after a gap or a lag last succeeded.
+    last_reread: Option<Instant>,
 }
 
 /// Calls in the last minute, per key.
@@ -793,6 +800,8 @@ impl ServerAlerts {
                     seeding: false,
                     early: Vec::new(),
                     pending_close: None,
+                    rereading: false,
+                    last_reread: None,
                 },
             );
         }
@@ -814,9 +823,14 @@ impl ServerAlerts {
                 w.bars = None;
                 w.early.clear();
                 w.pending_close = None;
+                w.rereading = false;
                 continue;
             }
             if w.bars.is_some() || w.seeding {
+                continue;
+            }
+            // The upkeep asks again each minute.
+            if w.rereading && w.last_reread.is_some_and(|t| t.elapsed() < REREAD_PAUSE) {
                 continue;
             }
             w.seeding = true;
@@ -869,6 +883,9 @@ impl ServerAlerts {
             }
         }
         w.bars = Some(bars);
+        if std::mem::take(&mut w.rereading) {
+            w.last_reread = Some(Instant::now());
+        }
         let Some(t) = w.pending_close.take() else {
             return;
         };
@@ -899,7 +916,7 @@ impl ServerAlerts {
         let mut st = self.lock();
         Self::forget_baselines(&mut st, key);
         if let Some(w) = st.watches.get_mut(key) {
-            w.bars = None;
+            w.rereading |= w.bars.take().is_some();
         }
         self.seed_windows(&mut st);
     }
@@ -973,6 +990,7 @@ impl ServerAlerts {
             if !added {
                 // No bars yet, or a close is missing: read them again, then this close.
                 reseed = watch.bars.take().is_some();
+                watch.rereading |= reseed;
                 watch.pending_close = Some(bar_time);
             }
         }
