@@ -862,6 +862,18 @@ export const SetupSchema = SetupLevelsSchema.extend({
   pending: z.array(SetupPendingSchema),
   revisions: z.number().int(),
   agent_revisions: z.number().int(),
+  // The agent's labels, such as strategy:retest-short. Empty on setups stored before
+  // tags existed.
+  tags: z.array(z.string()),
+  // From the fill on, in R of the risk at the fill and before costs: the furthest price
+  // went against the position (0 or less) and with it (0 or more). The fill bar counts
+  // only against it; nothing beyond the exit counts. Null before a fill, and on a setup
+  // filled before the server kept them.
+  mae_r: z.number().nonpositive().nullable(),
+  mfe_r: z.number().nonnegative().nullable(),
+  // Scored 1m bars from the fill bar to the exit bar (0 when one bar did both); while
+  // the setup is filled, those so far. Null when mae_r is.
+  bars_to_exit: z.number().int().nonnegative().nullable(),
 });
 export type Setup = z.infer<typeof SetupSchema>;
 

@@ -133,6 +133,23 @@ export interface CreateSetupInput {
    */
   symbol: string;
   /**
+   * Your labels for the setup, to group and filter by, such as strategy:retest-short or trigger:100eyes:abnormal-volatility. At most 10, each 1 to 64 characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.
+   *
+   * @maxItems 10
+   */
+  tags?:
+    | []
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string];
+  /**
    * Target prices beyond the entry zone, nearest first. The first one decides a win; the others are kept for the chart.
    *
    * @minItems 1
@@ -544,6 +561,23 @@ export interface ListSetupsInput {
    * Only this symbol's.
    */
   symbol?: string;
+  /**
+   * Only setups that have every one of these tags.
+   *
+   * @maxItems 10
+   */
+  tags?:
+    | []
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string];
 }
 
 export interface ListSubscriptionsInput {}
@@ -611,6 +645,23 @@ export interface ReviseSetupInput {
    * Why this change, in plain text. Kept in the setup's log.
    */
   reason: string;
+  /**
+   * Your labels for the setup, to group and filter by, such as strategy:retest-short or trigger:100eyes:abnormal-volatility. At most 10, each 1 to 64 characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.
+   *
+   * @maxItems 10
+   */
+  tags?:
+    | []
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string];
   /**
    * Target prices beyond the entry zone, nearest first. The first one decides a win; the others are kept for the chart.
    *

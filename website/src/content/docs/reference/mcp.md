@@ -1366,10 +1366,10 @@ setups; `can_create` in the list says so.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision` | The setup with its log |
-| `revise_setup` | `id`, `reason`; any of `thesis`, `drawings`, `entry`, `invalidation`, `targets`, `expires_at` | The setup with its log |
+| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags` | The setup with its log |
+| `revise_setup` | `id`, `reason`; any of `thesis`, `drawings`, `tags`, `entry`, `invalidation`, `targets`, `expires_at` | The setup with its log |
 | `get_setup` | `id` | The setup with its log |
-| `list_setups` | optional `status`, `symbol`, `limit` (default 50, at most 500) | `{enabled, can_create, replay, total, limits, setups: [...]}`, newest first, without logs |
+| `list_setups` | optional `status`, `symbol`, `tags` (only setups that have all of them), `limit` (default 50, at most 500) | `{enabled, can_create, replay, total, limits, setups: [...]}`, newest first, without logs |
 | `cancel_setup` | `id`, `reason` | The setup with its log |
 
 - `symbol`: a Binance symbol. Anything else is refused.
@@ -1382,8 +1382,12 @@ setups; `can_create` in the list says so.
 - `thesis`: at most 2000 characters. `reason`: at most 500.
 - `drawings`: as [`generate_chart`'s](#drawings), at most 50, on the bars of the setup's
   symbol and interval.
-- `status`, `result_r`, `fill`, `exit` and `costs` are set by the server. Sending one is an
-  error.
+- `tags`: at most 10 labels, each 1 to 64 characters of lowercase letters, digits and
+  `: - _ . /`, starting with a letter or digit, such as `strategy:retest-short` or
+  `trigger:100eyes:abnormal-volatility`. A tag given twice is kept once. On `revise_setup` the
+  list replaces the old one (`[]` clears it), and it can change after the fill too.
+- `status`, `result_r`, `mae_r`, `mfe_r`, `bars_to_exit`, `fill`, `exit` and `costs` are set by
+  the server. Sending one is an error.
 - `as_of`: [replay servers](/chartgen/guides/setups/#replay) only, where every call needs it.
   `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
 
@@ -1391,7 +1395,8 @@ A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `
 which rule set its levels), `status` (`watching`, `triggered`, `won`,
 `invalidated`, `expired`, `cancelled`), `created_at`, `costs`, `fill` and `exit` (each
 `{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off
-the operator's list), `scored_through`, `gap` (true if bars were missed and could
+the operator's list), `mae_r` and `mfe_r` and `bars_to_exit` (see
+[excursions](/chartgen/guides/setups/#excursions); null before a fill), `tags`, `scored_through`, `gap` (true if bars were missed and could
 not be read afterwards, so the result is incomplete), `pending`
 (changes that count from the next 1m bar), `revisions` and `agent_revisions`. `log` holds every
 entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `cancelled`,

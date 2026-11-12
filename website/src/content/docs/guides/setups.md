@@ -63,13 +63,44 @@ for the agent counts:**
 | The entry zone and the target, while watching | Filled only; that bar cannot win |
 | The invalidation, opening beyond it or never reaching the zone | Invalidated, never filled, 0 R |
 
+## Excursions
+
+From the fill on, a setup also says how far the price went each way, for reviewing a trade
+after the fact. They are read with the same 1m bars and the same rule as the result:
+
+- `mae_r`: the furthest the price went **against** the position, in R from the fill. It is 0 or
+  less: `-0.5` means half the risk.
+- `mfe_r`: the furthest it went **for** the position, in R. It is 0 or more.
+- `bars_to_exit`: the **1m bars** scored from the fill bar to the exit bar. A bar that fills and
+  closes a setup gives 0; one filled in a bar and closed at the open of the next gives 1. Bars
+  the server missed (`gap: true`) are not counted.
+
+They are measured from the fill price with the bars' highs and lows, **before costs**, so a
+setup that won at a target 2 R away has `mfe_r` 2 while its `result_r` is a little less. Where a
+bar is ambiguous they follow the scorer: the bar that fills a setup counts against it but not for
+it, a bar that reaches the invalidation counts as out at the stop (its open is the most it went
+for the position), and nothing past the exit counts. So a setup stopped at its invalidation
+has `mae_r` -1, or less if the price gapped through.
+
+While a setup is filled they are the values so far. Before a fill they are null, and they stay
+null on a setup that is never filled. Setups filled before the server kept them have none.
+
+## Tags
+
+`tags` labels a setup so that you can group your track record: `strategy:retest-short`,
+`trigger:100eyes:abnormal-volatility`, `pattern:double-top-ee`. Up to 10, each 1 to 64
+characters of lowercase letters, digits and `: - _ . /`, starting with a letter or digit; a
+tag given twice is kept once. `list_setups` with `tags` returns only
+the setups that have all of them. Tags are not levels: `revise_setup` can change them after the
+fill too, and the change goes to the log like any other.
+
 ## Changing a setup
 
 Nothing is edited in place. `revise_setup` and `cancel_setup` need a reason, and each adds an
 entry to the setup's log with what it was and what it became. `get_setup` returns the whole log,
 the server's own status moves included.
 
-- The thesis and drawings change at once.
+- The thesis, drawings and tags change at once.
 - New levels, and a cancel, **count from the next 1m bar**. The bar forming now still meets the
   setup as it was, so a fill or a stop inside it stands. Levels not yet in effect are under
   `pending`.
