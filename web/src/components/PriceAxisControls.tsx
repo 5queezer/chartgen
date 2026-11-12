@@ -316,15 +316,94 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     };
     const onUp = () => (pressed = false);
     const onDblClick = () => setAutoScale(true);
+    // klinecharts initializes y-axis scaling only in mouseDownEvent; its
+    // touchStartEvent bypasses that state. Feed a single-touch drag through
+    // the mouse path.
+    let touchId: number | null = null;
+    let touchStart = { x: 0, y: 0 };
+    let touchMoved = false;
+    let lastTap: { time: number; x: number; y: number } | null = null;
+    const onTouch = (e: TouchEvent) => {
+      let at: Touch | undefined;
+      if (e.type === "touchstart") {
+        if (touchId !== null || e.touches.length !== 1) return;
+        at = e.touches[0];
+        if (!at) return;
+        touchId = at.identifier;
+        touchStart = { x: at.clientX, y: at.clientY };
+        touchMoved = false;
+      } else {
+        if (touchId === null) return;
+        const ending = e.type === "touchend" || e.type === "touchcancel";
+        at = Array.from(ending ? e.changedTouches : e.touches).find(
+          (touch) => touch.identifier === touchId,
+        );
+        if (!at) return;
+        if (
+          e.type === "touchmove" &&
+          (Math.abs(at.clientX - touchStart.x) > 5 ||
+            Math.abs(at.clientY - touchStart.y) > 5)
+        ) {
+          touchMoved = true;
+          lastTap = null;
+        }
+      }
+      e.preventDefault();
+      if (e.type === "touchmove") {
+        batch(() => {
+          if (lockRatio()) setLockRatio(false);
+          if (autoScale()) setAutoScale(false);
+        });
+      }
+      const ending = e.type === "touchend" || e.type === "touchcancel";
+      const type = e.type === "touchstart" ? "mousedown" : e.type === "touchmove" ? "mousemove" : "mouseup";
+      const { left, right } = axisDom.getBoundingClientRect();
+      const mouseEvent = new MouseEvent(type, {
+        bubbles: true,
+        button: 0,
+        buttons: type === "mouseup" ? 0 : 1,
+        clientX: Math.min(Math.max(at.clientX, left + 1), right - 1),
+        clientY: at.clientY,
+      });
+      // Opt out of klinecharts' 500ms suppression of compatibility mouse
+      // events after a touch; this deliberate event starts its scale state.
+      Object.defineProperty(mouseEvent, "sourceCapabilities", {
+        value: { firesTouchEvents: false },
+      });
+      axisDom.dispatchEvent(mouseEvent);
+      if (e.type === "touchcancel") lastTap = null;
+      if (e.type === "touchend" && !touchMoved) {
+        const now = Date.now();
+        if (
+          lastTap &&
+          now - lastTap.time <= 500 &&
+          Math.abs(at.clientX - lastTap.x) + Math.abs(at.clientY - lastTap.y) < 30
+        ) {
+          setAutoScale(true);
+          lastTap = null;
+        } else {
+          lastTap = { time: now, x: at.clientX, y: at.clientY };
+        }
+      }
+      if (ending) touchId = null;
+    };
     axisDom.addEventListener("pointerdown", onDown);
     axisDom.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     axisDom.addEventListener("dblclick", onDblClick);
+    axisDom.addEventListener("touchstart", onTouch, { passive: false });
+    axisDom.addEventListener("touchmove", onTouch, { passive: false });
+    axisDom.addEventListener("touchend", onTouch, { passive: false });
+    axisDom.addEventListener("touchcancel", onTouch, { passive: false });
     onCleanup(() => {
       axisDom.removeEventListener("pointerdown", onDown);
       axisDom.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       axisDom.removeEventListener("dblclick", onDblClick);
+      axisDom.removeEventListener("touchstart", onTouch);
+      axisDom.removeEventListener("touchmove", onTouch);
+      axisDom.removeEventListener("touchend", onTouch);
+      axisDom.removeEventListener("touchcancel", onTouch);
     });
   });
 

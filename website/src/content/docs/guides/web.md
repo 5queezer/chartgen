@@ -141,7 +141,8 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   visible bar and `log` a logarithmic scale; they are mutually exclusive
   and clicking the active one returns to the normal scale. `auto` (on by
   default) keeps the axis fitted to the visible bars. Dragging the price
-  axis scales it by hand and turns `auto` off; double-clicking the axis or
+  axis with a mouse or one finger scales it by hand and turns `auto` off;
+  double-clicking the axis or
   clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
   The scale mode persists across reloads; `auto` starts on, unless the
   price-to-bar ratio is locked.
