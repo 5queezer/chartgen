@@ -22,7 +22,10 @@ use chartgen::data::{self, Bar};
 use chartgen::feed::FeedEvent;
 use chartgen::interval::Interval;
 use chartgen::push::{DeviceKeys, Vapid};
-use chartgen::scripting::persistence::{self, Store, StoredDevice, StoredEvent};
+use chartgen::scripting::persistence::{
+    self, LoggedEvent, NewEvent, Store, StoredDevice, StoredEvent, DELIVERY_DELIVERED,
+    DELIVERY_DROPPED, DELIVERY_FAILED, DELIVERY_WAITING,
+};
 use chartgen::webhook::{self, AgentReceiver, Policy, Target, Timing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -45,7 +48,7 @@ const FEED_QUIET: Duration = Duration::from_secs(120);
 /// a feed that keeps dropping closes cannot turn into a REST read per close.
 const REREAD_PAUSE: Duration = Duration::from_secs(60);
 /// A delivery still pending after this long, across a restart, is dropped.
-const EVENT_MAX_AGE_SECS: i64 = 3_600;
+const EVENT_MAX_AGE_SECS: i64 = chartgen::scripting::persistence::EVENT_NEWS_SECS;
 const MINUTE: Duration = Duration::from_secs(60);
 /// How often waiting deliveries are looked at. The budget is per tick, so the total
 /// per minute is spread out instead of being spent by whoever is first.
@@ -152,7 +155,7 @@ pub struct Limits {
     /// Wake-ups of the agent's receiver (ADR-0061) have a queue, a pace and slots of
     /// their own. They take nothing from the budgets above, so a receiver that hangs
     /// holds nobody else's slot, and nobody else's deliveries can crowd a wake-up out.
-    pub agent_pending: usize,
+    /// The queue is the event log, whose cap is the store's `EVENTS_WAITING_PER_OWNER`.
     pub agent_deliveries_per_minute: usize,
     pub agent_deliveries_in_flight: usize,
 }
@@ -176,7 +179,6 @@ impl Default for Limits {
             pending_deliveries_per_client: 50,
             deliveries_in_flight: 16,
             deliveries_in_flight_per_client: 2,
-            agent_pending: 50,
             agent_deliveries_per_minute: 30,
             agent_deliveries_in_flight: 2,
         }
@@ -443,9 +445,12 @@ struct State {
     served: HashMap<String, Instant>,
     pending: usize,
     client_slots: HashMap<String, Arc<Semaphore>>,
-    /// Wake-ups waiting for the agent's receiver, apart from everything above.
-    agent_queue: VecDeque<StoredEvent>,
+    /// Wake-ups being sent to the agent's receiver, by owner and event number: the
+    /// ones that wait are rows of the event log, not anything here.
+    agent_in_flight: HashSet<(String, i64)>,
     agent_sent: Window,
+    /// Wake-ups an older build left waiting, until they are carried into the log.
+    carried_wake_ups: Vec<StoredEvent>,
 }
 
 pub struct ServerAlerts {
@@ -564,7 +569,12 @@ pub fn start(hub: &Arc<ChartHub>) {
             );
         }
         alerts.set_agent(agent);
+    } else if let Err(e) = store.fail_waiting_events_except(None) {
+        // No receiver any more: what still waited has nobody to go to.
+        eprintln!("[alerts] cannot give up wake-ups left waiting: {e}");
     }
+    alerts.carry_over_wake_ups();
+    alerts.sweep_events();
     let _ = GLOBAL.set(alerts);
 }
 
@@ -690,6 +700,18 @@ impl ServerAlerts {
         });
         let oldest = chrono::Utc::now().timestamp() - EVENT_MAX_AGE_SECS;
         for event in events {
+            // A wake-up a build from before the event log left waiting: it goes into
+            // the log once the receiver is known (`carry_over_wake_ups`), not to a
+            // webhook it does not have.
+            if event.device.is_none()
+                && st
+                    .alerts
+                    .get(&event.alert_id)
+                    .is_some_and(|a| a.notify_agent)
+            {
+                st.carried_wake_ups.push(event);
+                continue;
+            }
             let owner = st.alerts.get(&event.alert_id).map(|a| a.owner.clone());
             // The list is read at startup, so this is where a removed client's
             // deliveries stop, and what it queued goes with them.
@@ -749,8 +771,81 @@ impl ServerAlerts {
     }
 
     /// Use `agent` for the alerts of its owner that ask for it. Once, at startup.
+    /// Wake-ups that still wait for anyone else have nobody to go to any more.
     pub(crate) fn set_agent(&self, agent: AgentReceiver) {
+        if let Err(e) = self.store.fail_waiting_events_except(Some(&agent.owner)) {
+            eprintln!("[alerts] cannot give up wake-ups of other owners: {e}");
+        }
         let _ = self.agent.set(agent);
+    }
+
+    /// Wake-ups a build from before the event log left waiting become `alert.fired`
+    /// events, under their own id and with the time of their fire, so that the hour a
+    /// wake-up stays news counts from then. They are sent the new way where this owner
+    /// has a receiver, and only logged where not. Once, at startup, after the receiver
+    /// is known.
+    pub(crate) fn carry_over_wake_ups(&self) {
+        let waiting = std::mem::take(&mut self.lock().carried_wake_ups);
+        let mut carried = 0;
+        for old in waiting {
+            let alert = self.lock().alerts.get(&old.alert_id).cloned();
+            let Some(alert) = alert else {
+                let _ = self.store.delete_server_alert_event(&old.id);
+                continue;
+            };
+            let fired: Value = serde_json::from_str(&old.body).unwrap_or_default();
+            let mut body = serde_json::Map::new();
+            for key in [
+                "symbol",
+                "interval",
+                "evaluate_on",
+                "trigger",
+                "price",
+                "level",
+                "condition",
+                "bar_time",
+                "fire_count",
+                "indicator",
+            ] {
+                if let Some(v) = fired.get(key) {
+                    body.insert(key.to_string(), v.clone());
+                }
+            }
+            let event = NewEvent {
+                id: old.id.clone(),
+                owner: alert.owner.clone(),
+                kind: "alert.fired".to_string(),
+                at: fired["fired_at"].as_i64().unwrap_or(old.created_at * 1000),
+                alert_id: Some(alert.id.clone()),
+                setup_id: alert.setup_id.clone(),
+                body: Value::Object(body).to_string(),
+                deliver: self.wakes(&alert.owner),
+            };
+            match self
+                .store
+                .carry_over_wake_up(&old.id, &event, old.created_at)
+            {
+                Ok(()) => carried += 1,
+                Err(e) => eprintln!("[alerts] cannot carry a waiting wake-up into the log: {e}"),
+            }
+        }
+        if carried > 0 {
+            println!("[alerts] carried {carried} waiting wake-ups over into the event log");
+        }
+    }
+
+    /// Give up wake-ups too old to be news, and drop events past their keep. The
+    /// events given up stay in the log, marked failed.
+    fn sweep_events(&self) {
+        if let Err(e) = self.store.tidy_events(chrono::Utc::now().timestamp()) {
+            eprintln!("[alerts] cannot sweep the event log: {e}");
+        }
+    }
+
+    /// Is there a receiver that wakes `owner`'s agent? What decides whether an event
+    /// of that owner is to be delivered or only logged.
+    pub fn wakes(&self, owner: &str) -> bool {
+        self.agent_of(owner).is_some()
     }
 
     /// The agent's receiver, if `owner` is the one it is configured for.
@@ -1110,13 +1205,43 @@ impl ServerAlerts {
             updated.fired_bar = Some(bar_time);
         }
         let events = self.prepare_deliveries(st, &mut updated, price, value, bar_time, at);
-        if let Err(e) =
-            self.store
-                .record_server_alert_fire(id, &updated.owner, &updated.json(), &events)
-        {
-            // Memory stays as the store has it, so a restart cannot disagree.
-            eprintln!("[alerts] cannot store a fire: {e}");
-            return;
+        // The fire as an event of the owner's log, which is also what wakes the agent
+        // (ADR-0061). Logged whether or not there is a receiver to wake.
+        let skipped = |why: &str| Delivery {
+            at,
+            status: None,
+            error: Some(why.to_string()),
+        };
+        let logged = updated
+            .notify_agent
+            .then(|| self.fire_event(&updated, price, value, bar_time, at));
+        if logged.as_ref().is_some_and(|e| !e.deliver) {
+            updated.last_delivery = Some(skipped("wake-up skipped: no receiver for this owner"));
+        }
+        let stored = self.store.record_logged_fire(
+            id,
+            &updated.owner,
+            &updated.json(),
+            &events,
+            logged.as_ref(),
+        );
+        match stored {
+            Err(e) => {
+                // Memory stays as the store has it, so a restart cannot disagree.
+                eprintln!("[alerts] cannot store a fire: {e}");
+                return;
+            }
+            // Logged, and its delivery dropped: the alert says why nothing came.
+            Ok(Some(delivery)) if delivery == DELIVERY_DROPPED => {
+                updated.last_delivery = Some(skipped("wake-up skipped: too many waiting"));
+                if let Err(e) = self
+                    .store
+                    .save_server_alert(id, &updated.owner, &updated.json())
+                {
+                    eprintln!("[alerts] cannot store a skipped wake-up: {e}");
+                }
+            }
+            Ok(_) => {}
         }
         st.alerts.insert(id.to_string(), updated);
         for event in events {
@@ -1128,27 +1253,49 @@ impl ServerAlerts {
         }
     }
 
-    /// Which queue an event waits in is decided here, once, from the alert as it is
-    /// now. That is also what says whether it counts in the shared total and which
-    /// way it is sent: an alert that is changed while its delivery waits moves
-    /// neither.
-    fn enqueue(st: &mut State, owner: String, event: StoredEvent) {
-        if Self::is_wake_up(st, &event) {
-            st.agent_queue.push_back(event);
-            return;
+    /// The fire of `alert` as an event. Its body is what happened: no note and nothing
+    /// of a setup, which the wake-up reads when it is sent.
+    fn fire_event(
+        &self,
+        alert: &Record,
+        price: f64,
+        value: Option<f64>,
+        bar_time: i64,
+        at: i64,
+    ) -> NewEvent {
+        let mut body = json!({
+            // What the wake-up says of the alert, also once the alert is gone.
+            "symbol": alert.symbol,
+            "interval": alert.interval,
+            "evaluate_on": alert.evaluate_on,
+            "trigger": alert.trigger,
+            "price": price,
+            // As the webhook says it: with compare: close, the line's value the close
+            // crossed (ADR-0067). The wake-up reads it from here, not from the alert,
+            // which may have changed since.
+            "level": alert.level().or(value),
+            "condition": alert.condition,
+            "bar_time": bar_time,
+            "fire_count": alert.fire_count,
+        });
+        if let Some(spec) = &alert.indicator {
+            body["indicator"] = indicator::view(spec, value);
         }
-        st.pending += 1;
-        st.queues.entry(owner).or_default().push_back(event);
+        NewEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner: alert.owner.clone(),
+            kind: "alert.fired".to_string(),
+            at,
+            alert_id: Some(alert.id.clone()),
+            setup_id: alert.setup_id.clone(),
+            body: body.to_string(),
+            deliver: self.wakes(&alert.owner),
+        }
     }
 
-    /// Is `event` a wake-up of the agent's receiver, and not a webhook of the alert's
-    /// own or a push?
-    fn is_wake_up(st: &State, event: &StoredEvent) -> bool {
-        event.device.is_none()
-            && st
-                .alerts
-                .get(&event.alert_id)
-                .is_some_and(|a| a.notify_agent)
+    fn enqueue(st: &mut State, owner: String, event: StoredEvent) {
+        st.pending += 1;
+        st.queues.entry(owner).or_default().push_back(event);
     }
 
     /// The deliveries of a fire: its webhook and one push per device, those allowed to
@@ -1249,19 +1396,6 @@ impl ServerAlerts {
                 }
             }
         }
-        // The wake-up of the agent's receiver, with a queue of its own: it is not
-        // counted above and what is above is not counted here. What is stored for it
-        // is this same body; what the receiver gets is made when it is sent
-        // (`agent_body`), so the setup's thesis is never copied into the event table.
-        if alert.notify_agent {
-            if self.agent_of(&alert.owner).is_none() {
-                hook_refusal = Some(refused("wake-up skipped: no receiver for this owner"));
-            } else if st.agent_queue.len() < limits.agent_pending {
-                events.push(event(id.clone(), None));
-            } else {
-                hook_refusal = Some(refused("wake-up skipped: too many waiting"));
-            }
-        }
         if hook_refusal.is_some() {
             alert.last_delivery = hook_refusal;
         }
@@ -1331,28 +1465,63 @@ impl ServerAlerts {
             st.served.insert(owner, now);
             left -= 1;
             if let Some(this) = self.me.upgrade() {
-                self.runtime.spawn(this.deliver(event, false));
+                self.runtime.spawn(this.deliver(event));
             }
         }
         st.queues.retain(|_, q| !q.is_empty());
-        // The agent's wake-ups, at their own pace and in their own slots.
-        while st
-            .agent_queue
-            .front()
-            .is_some_and(|e| e.created_at < oldest)
-        {
-            if let Some(stale) = st.agent_queue.pop_front() {
-                let _ = self.store.delete_server_alert_event(&stale.id);
-            }
+        self.dispatch_wake_ups(st, now);
+    }
+
+    /// Start the wake-ups that are due, at their own pace and in their own slots
+    /// (ADR-0061). What waits is rows of the event log, each with the time of its next
+    /// attempt, so nothing here has to be remembered across a restart.
+    fn dispatch_wake_ups(&self, st: &mut State, now: Instant) {
+        let Some(agent) = self.agent.get() else {
+            return;
+        };
+        let room = self
+            .limits
+            .agent_deliveries_in_flight
+            .saturating_sub(st.agent_in_flight.len());
+        if room == 0 {
+            return;
         }
-        if !st.agent_queue.is_empty()
-            && self.agent_slots.available_permits() > 0
-            && st
-                .agent_sent
-                .admit("", limits.agent_deliveries_per_minute, now)
-        {
-            if let (Some(event), Some(this)) = (st.agent_queue.pop_front(), self.me.upgrade()) {
-                self.runtime.spawn(this.deliver(event, true));
+        let unix = chrono::Utc::now().timestamp();
+        // One more than can start, so a row already in flight does not hide the next.
+        let wanted = (room + st.agent_in_flight.len()) as i64;
+        let due = match self.store.due_events(unix, wanted) {
+            Ok(due) => due,
+            Err(e) => {
+                eprintln!("[alerts] cannot read the wake-ups that are due: {e}");
+                return;
+            }
+        };
+        for event in due {
+            let key = (event.owner.clone(), event.seq);
+            if st.agent_in_flight.contains(&key) {
+                continue;
+            }
+            // Nobody to wake for it, or too old to be news: it stays in the log.
+            if event.owner != agent.owner || event.created_at < unix - EVENT_MAX_AGE_SECS {
+                let _ = self.store.set_event_delivery(
+                    &event.owner,
+                    event.seq,
+                    DELIVERY_FAILED,
+                    event.attempts,
+                    None,
+                );
+                continue;
+            }
+            if st.agent_in_flight.len() >= self.limits.agent_deliveries_in_flight
+                || !st
+                    .agent_sent
+                    .admit("", self.limits.agent_deliveries_per_minute, now)
+            {
+                return;
+            }
+            if let Some(this) = self.me.upgrade() {
+                st.agent_in_flight.insert(key);
+                self.runtime.spawn(this.deliver_wake_up(event));
             }
         }
     }
@@ -1517,7 +1686,6 @@ impl ServerAlerts {
         st.baselines.remove(id);
         st.values.remove(id);
         st.held_back.remove(id);
-        st.agent_queue.retain(|e| e.alert_id != id);
         let mut dropped = 0;
         for queue in st.queues.values_mut() {
             let before = queue.len();
@@ -1552,34 +1720,28 @@ impl ServerAlerts {
             .clone()
     }
 
-    /// Send one event, then record how it went and forget it. `wake_up` is the queue
-    /// it waited in: decided when it was queued, and not asked of the alert again.
-    async fn deliver(self: Arc<Self>, event: StoredEvent, wake_up: bool) {
-        let (hook, device, client, woken) = {
+    /// Send one event, then record how it went and forget it.
+    async fn deliver(self: Arc<Self>, event: StoredEvent) {
+        let (hook, device, client) = {
             let mut st = self.lock();
             let alert = st.alerts.get(&event.alert_id);
-            let woken = alert.filter(|_| wake_up).cloned();
-            // A webhook that was removed while its delivery waited is not sent.
-            let hook = alert.filter(|_| !wake_up).and_then(|a| a.webhook.clone());
+            let hook = alert.and_then(|a| a.webhook.clone());
             let owner = alert.map(|a| a.owner.clone()).unwrap_or_default();
             let device = event
                 .device
                 .as_ref()
                 .and_then(|d| st.devices.get(d))
                 .cloned();
-            (hook, device, self.client_slot(&mut st, &owner), woken)
+            (hook, device, self.client_slot(&mut st, &owner))
         };
         // One client's dead host cannot hold every slot.
-        let outcome = match (&event.device, hook, &device, woken) {
-            (None, _, _, Some(alert)) => Some(self.send_wake_up(&alert, &event).await),
-            (None, Some(hook), _, None) => Some(self.send(&hook, &event, &client).await),
-            (Some(_), _, Some(device), _) => Some(self.send_push(device, &event, &client).await),
+        let outcome = match (&event.device, hook, &device) {
+            (None, Some(hook), _) => Some(self.send(&hook, &event, &client).await),
+            (Some(_), _, Some(device)) => Some(self.send_push(device, &event, &client).await),
             _ => None,
         };
         let mut st = self.lock();
-        if !wake_up {
-            st.pending = st.pending.saturating_sub(1);
-        }
+        st.pending = st.pending.saturating_sub(1);
         if let Some(outcome) = outcome {
             // The push service says this subscription is gone for good.
             if let (Some(device), Some(404 | 410)) = (&device, outcome.status) {
@@ -1678,38 +1840,75 @@ impl ServerAlerts {
         }
     }
 
-    /// Wake the agent: one delivery to the receiver the operator configured, through
-    /// the webhook path's pinning and retries, in the agent's own slots. The body is
-    /// made here, from the stored fire and the setup as it is now, and is never logged.
-    async fn send_wake_up(&self, alert: &Record, event: &StoredEvent) -> Delivery {
-        let outcome = match self.agent_of(&alert.owner) {
+    /// One round of a wake-up: to the receiver the operator configured, through the
+    /// webhook path's pinning, in the agent's own slots. The first round is three quick
+    /// attempts, as any webhook has; each later one is a single attempt, at the time
+    /// the event carries. The body is made here, from the logged event and the setup as
+    /// it is now, and is never logged. The outcome goes to the event, and for an alert's
+    /// fire to the alert as well.
+    async fn deliver_wake_up(self: Arc<Self>, event: LoggedEvent) {
+        let alert = event
+            .alert_id
+            .as_ref()
+            .and_then(|id| self.lock().alerts.get(id).cloned());
+        let setup = event
+            .setup_id
+            .as_deref()
+            .and_then(|id| self.setup_of(&event.owner, id));
+        let outcome = match self.agent_of(&event.owner) {
             Some(agent) => {
-                let setup = alert
-                    .setup_id
-                    .as_deref()
-                    .and_then(|id| self.setup_of(&alert.owner, id));
-                let body = agent_body(&event.body, alert, setup.as_ref());
-                webhook::deliver(
-                    &agent.target,
-                    &self.policy,
-                    &body,
-                    &event.id,
-                    Some(agent.secret()),
-                    &self.timing,
-                    &[self.agent_slots.as_ref()],
-                )
-                .await
+                let body = wake_up_body(&event, alert.as_ref(), setup.as_ref());
+                let secret = Some(agent.secret());
+                let slots = [self.agent_slots.as_ref()];
+                let (target, policy, timing) = (&agent.target, &self.policy, &self.timing);
+                if event.attempts == 0 {
+                    webhook::deliver(target, policy, &body, &event.id, secret, timing, &slots).await
+                } else {
+                    webhook::deliver_once(target, policy, &body, &event.id, secret, timing, &slots)
+                        .await
+                }
             }
             None => webhook::Outcome {
-                status: None,
+                status: Some(0),
                 error: Some("wake-up skipped: no receiver for this owner".into()),
                 attempts: 0,
             },
         };
-        Delivery {
+        let unix = chrono::Utc::now().timestamp();
+        // What may pass later: no answer at all, a server's error, or "slow down".
+        let may_pass_later = matches!(outcome.status, None | Some(429 | 500..=599));
+        let next = LATER_ATTEMPTS_SECS
+            .get(event.attempts as usize)
+            .map(|wait| unix + wait)
+            // The hour an event stays news counts from when it was made, whatever
+            // happened to the server meanwhile: a receiver forgets its id after that.
+            .filter(|at| *at <= event.created_at + EVENT_MAX_AGE_SECS);
+        let (state, next) = match (&outcome.error, may_pass_later, next) {
+            (None, ..) => (DELIVERY_DELIVERED, None),
+            (Some(_), true, Some(at)) => (DELIVERY_WAITING, Some(at)),
+            _ => (DELIVERY_FAILED, None),
+        };
+        if let Err(e) =
+            self.store
+                .set_event_delivery(&event.owner, event.seq, state, event.attempts + 1, next)
+        {
+            eprintln!("[alerts] cannot store how a wake-up went: {e}");
+        }
+        let mut st = self.lock();
+        st.agent_in_flight.remove(&(event.owner.clone(), event.seq));
+        let Some(alert) = event.alert_id.as_ref().and_then(|id| st.alerts.get_mut(id)) else {
+            return;
+        };
+        alert.last_delivery = Some(Delivery {
             at: now_ms(),
-            status: outcome.status,
+            status: outcome.status.filter(|s| *s != 0),
             error: outcome.error,
+        });
+        if let Err(e) = self
+            .store
+            .save_server_alert(&alert.id, &alert.owner, &alert.json())
+        {
+            eprintln!("[alerts] cannot store a delivery: {e}");
         }
     }
 
@@ -2416,10 +2615,14 @@ const MAX_AGENT_BODY: usize = 8 * 1024;
 
 #[derive(Serialize)]
 struct WakeUp<'a> {
-    id: &'a Value,
-    r#type: &'static str,
-    at: &'a Value,
-    alert: FiredAlert<'a>,
+    id: &'a str,
+    r#type: &'a str,
+    at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alert: Option<FiredAlert<'a>>,
+    /// A setup's status as it changed: what this event reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change: Option<&'a Value>,
     /// The alert's `message`: the agent's word to itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<&'a str>,
@@ -2430,16 +2633,16 @@ struct WakeUp<'a> {
 #[derive(Serialize)]
 struct FiredAlert<'a> {
     id: &'a str,
-    symbol: &'a str,
-    interval: &'a str,
-    evaluate_on: EvaluateOn,
-    condition: Condition,
+    symbol: &'a Value,
+    interval: &'a Value,
+    evaluate_on: &'a Value,
+    condition: &'a Value,
     level: &'a Value,
     /// Only on an indicator alert, which `level` is then about.
     #[serde(skip_serializing_if = "Option::is_none")]
     indicator: Option<&'a Value>,
     price: &'a Value,
-    trigger: Trigger,
+    trigger: &'a Value,
     bar_time: &'a Value,
     fire_count: &'a Value,
 }
@@ -2473,12 +2676,18 @@ struct SetupNow<'a> {
     thesis: &'a str,
 }
 
-/// The body of a wake-up, from the stored fire. The order of its fields is this
-/// order, by construction: what tells the agent which event this is and where its
-/// setup stands comes first, the alert's note after it, and the thesis, the longest
-/// part, last. A receiver that shows only the beginning of a body still shows those.
-fn agent_body(fired: &str, alert: &Record, setup: Option<&chartgen::setups::Record>) -> String {
-    let fired: Value = serde_json::from_str(fired).unwrap_or_default();
+/// The body of a wake-up, from a logged event. The order of its fields is this order,
+/// by construction: what tells the agent which event this is and where its setup
+/// stands comes first, the alert's note after it, and the thesis, the longest part,
+/// last. A receiver that shows only the beginning of a body still shows those. The
+/// event says what happened and when; the setup is shown as it is now.
+fn wake_up_body(
+    event: &LoggedEvent,
+    alert: Option<&Record>,
+    setup: Option<&chartgen::setups::Record>,
+) -> String {
+    let happened: Value = serde_json::from_str(&event.body).unwrap_or_default();
+    let fired = event.kind == "alert.fired";
     let make = |thesis_chars: usize| {
         let setup = setup.map(|s| {
             let cut = s.thesis.char_indices().nth(thesis_chars).map(|(at, _)| at);
@@ -2507,23 +2716,32 @@ fn agent_body(fired: &str, alert: &Record, setup: Option<&chartgen::setups::Reco
             }
         });
         let body = WakeUp {
-            id: &fired["id"],
-            r#type: "alert.fired",
-            at: &fired["fired_at"],
-            alert: FiredAlert {
-                id: &alert.id,
-                symbol: &alert.symbol,
-                interval: &alert.interval,
-                evaluate_on: alert.evaluate_on,
-                condition: alert.condition,
-                level: &fired["level"],
-                indicator: fired.get("indicator"),
-                price: &fired["price"],
-                trigger: alert.trigger,
-                bar_time: &fired["bar_time"],
-                fire_count: &fired["fire_count"],
-            },
-            note: alert.message.as_deref(),
+            id: &event.id,
+            r#type: &event.kind,
+            at: event.at,
+            // From the event: what the fire saw, also when the alert was deleted or
+            // changed before this was sent.
+            alert: event
+                .alert_id
+                .as_deref()
+                .filter(|_| fired)
+                .map(|id| FiredAlert {
+                    id,
+                    symbol: &happened["symbol"],
+                    interval: &happened["interval"],
+                    evaluate_on: &happened["evaluate_on"],
+                    condition: &happened["condition"],
+                    // The fire's own: the level it compared with then, and an indicator
+                    // alert's line and value at that close (ADR-0067).
+                    level: &happened["level"],
+                    indicator: happened.get("indicator"),
+                    price: &happened["price"],
+                    trigger: &happened["trigger"],
+                    bar_time: &happened["bar_time"],
+                    fire_count: &happened["fire_count"],
+                }),
+            change: (!fired).then_some(&happened),
+            note: alert.filter(|_| fired).and_then(|a| a.message.as_deref()),
             setup,
         };
         serde_json::to_string(&body).unwrap_or_default()
@@ -2562,6 +2780,11 @@ fn add_close(bars: &mut Vec<Bar>, bar: Bar, interval: &str) -> bool {
     upsert_bar(bars, bar, indicator::WINDOW_BARS);
     true
 }
+
+/// When a wake-up that did not get through is tried again, counted from the round
+/// before: after the three quick attempts of the first, at 1, 5, 15 and 30 minutes.
+/// Together under the hour an event stays news.
+const LATER_ATTEMPTS_SECS: [i64; 4] = [60, 300, 900, 1800];
 
 /// A `once` alert that fired: it holds no place among the live ones until re-armed.
 fn is_spent(a: &Record) -> bool {
@@ -2696,6 +2919,7 @@ async fn run_upkeep(alerts: Weak<ServerAlerts>) {
         if now - last_sweep >= UPKEEP_EVERY {
             last_sweep = now;
             this.sweep(&mut this.lock(), now_ms());
+            this.sweep_events();
         }
     }
 }

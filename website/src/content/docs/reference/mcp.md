@@ -1430,10 +1430,73 @@ first, the thesis last, so a receiver that shows only the beginning of a body st
 the levels. The setup has no drawings and no log here; `get_setup` answers those. A body is
 at most 8 KiB: a thesis that would exceed it is cut, and `"thesis_cut": true` says so.
 
+**A status the server gives one of your setups wakes your agent too, with no flag on the
+setup:** `triggered`, `won`, `invalidated` and `expired` of a setup whose decision is
+`take`. The body then has `"type": "setup.status"` and, where an alert's body has `alert`,
+
+```json
+"change": { "from": "watching", "to": "triggered", "gap": false }
+```
+
+with `result_r` once there is one, followed by the setup. `at` is the time of the bar that
+decided it. Your own cancellation, and every change of a `skip` setup, are logged and
+wake nobody.
+
+**`change` says what happened; `setup` is the setup as it is when the body is sent.** A
+wake-up that reaches you late can say `triggered` about a setup that already shows `won`.
+
 Wake-ups have limits of their own, apart from the ones above: 50 waiting, 30 a minute, 2
-at once. Delivery is tried three times within about fifteen seconds and the outcome is on
-the alert (`last_status`, `last_error`). **If your receiver is away for longer than that,
-the wake-up is lost:** an agent that depends on one should also look by itself now and then.
+at once. Delivery is tried three times within about fifteen seconds. With no answer, a 5xx
+or a 429 it is tried once more after 1, 5, 15 and 30 minutes, while the event is younger
+than an hour; a restart of the server continues that. An alert shows the newest outcome
+(`last_status`, `last_error`). The same `webhook-id` can arrive twice: drop the second.
+
+#### Reading back what happened
+
+| Tool | Arguments | Returns |
+|------|-----------|---------|
+| `list_events` | optional `after` (a cursor, default 0), `limit` (default 50, at most 100) | `{events: [...], cursor, more, truncated}`, oldest first |
+
+Every event that could wake your agent is logged first, and stays whether or not a wake-up
+was sent or arrived. **An agent that was away asks `list_events` with the last `cursor` it
+kept, and repeats while `more` is true.**
+
+```json
+{
+  "events": [
+    { "seq": 41, "id": "d99a10e1-d742-4b79-9ccc-f75169944c6a", "type": "alert.fired",
+      "at": 1793965351000, "alert_id": "61c779cc-…", "setup_id": "0b6f6f0e-…",
+      "what": { "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "live",
+                "trigger": "once", "price": 65010.5, "level": 65000.0,
+                "condition": "crossing", "bar_time": 1793965320, "fire_count": 1 },
+      "delivery": "delivered" },
+    { "seq": 42, "id": "7a0c1d0e-…", "type": "setup.status",
+      "at": 1793965380000, "setup_id": "0b6f6f0e-…",
+      "what": { "from": "watching", "to": "triggered", "gap": false },
+      "delivery": "waiting" }
+  ],
+  "cursor": 42, "more": false, "truncated": false
+}
+```
+
+- `seq` counts your events from 1 and is never used twice. `id` is the `webhook-id` of the
+  wake-up, so what you were sent and what you read back can be matched.
+- `delivery`: `none` (logged only), `waiting`, `delivered`, `failed` (given up, or refused
+  by the receiver), `dropped` (too many were waiting).
+- An event holds no thesis and no note. Read the setup or the alert for those.
+- An `alert.fired` event says what the fire saw: `level` is the level it compared with
+  (`null` for an alert that has none), and
+  an [indicator alert](#indicator-alerts-on-the-server)'s also has `indicator` with the line's
+  `value` at that close, and with `compare: "close"` that value as `level`. It also holds the
+  alert's `symbol`, `interval`, `evaluate_on`, `condition` and `trigger` at the fire. The
+  wake-up's `alert` is made from the event, so it says the same even if the alert changed or
+  was deleted meanwhile; only its `note` comes from the alert, and is absent once the alert is
+  gone.
+- A wake-up that a build from before the event log left waiting goes into the log at the
+  next start, under its own id and with the time of its fire, and is sent from there.
+- The newest 1000 events are kept, for 7 days. **`truncated: true` means events after your
+  cursor are gone:** read your setups and alerts as they are instead of relying on the log.
+- Listed where server alerts or setups run. A replay server has no log and refuses the call.
 
 **Push** ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). `push: true` on an alert,
 with or without a webhook, sends the same JSON to each of your devices through Web Push, encrypted under

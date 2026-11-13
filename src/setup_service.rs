@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use chartgen::data::Bar;
 use chartgen::drawings;
 use chartgen::feed::FeedEvent;
-use chartgen::scripting::persistence::{self, Store, StoredSetup};
+use chartgen::scripting::persistence::{self, NewEvent, Store, StoredSetup};
 use chartgen::setups::{
     self, Decision, Draft, MinuteBar, Problem, Record, Revision, Status, LEVEL_FIELDS, MAX_THESIS,
 };
@@ -262,7 +262,20 @@ impl Setups {
         }
         drop(st);
         self.expire_unscored(fetch::now_ms());
+        self.tidy_events(chrono::Utc::now().timestamp());
         self.sync_feeds(&mut self.lock());
+    }
+
+    /// Keep the event log to what it promises (ADR-0061): a wake-up waits an hour, an
+    /// event is kept 7 days. Here as well as in the alert service, since setups write
+    /// events where no alert service runs.
+    fn tidy_events(&self, unix: i64) {
+        if self.replay.is_some() {
+            return;
+        }
+        if let Err(e) = self.store.tidy_events(unix) {
+            eprintln!("[setups] cannot sweep the event log: {e}");
+        }
     }
 
     /// End the open setups that ran out while their owner was off the operator's list.
@@ -408,10 +421,13 @@ impl Setups {
             })
             .collect();
         let (rows, added): (Vec<StoredSetup>, Vec<usize>) = rows.into_iter().unzip();
-        self.store.save_setups(&rows).map_err(|e| {
-            eprintln!("[setups] cannot store a setup: {e}");
-            "The setup store is unavailable".to_string()
-        })?;
+        let events = self.status_events(&changed);
+        self.store
+            .save_setups_logging(&rows, &events)
+            .map_err(|e| {
+                eprintln!("[setups] cannot store a setup: {e}");
+                "The setup store is unavailable".to_string()
+            })?;
         for (((record, _), row), added) in changed.into_iter().zip(rows).zip(added) {
             let key = (record.owner.clone(), record.id.clone());
             let log_bytes = st.setups.get(&key).map_or(0, |h| h.log_bytes) + added;
@@ -425,6 +441,49 @@ impl Setups {
             );
         }
         Ok(())
+    }
+
+    /// What this write says happened to a setup's status, as events of its owner's log
+    /// (ADR-0061), stored with the entries that say it. None on a replay, which has no
+    /// log and must answer the same on every run.
+    ///
+    /// A change the server made to a setup the agent took is also a wake-up, if the
+    /// operator configured a receiver for that owner. A cancellation is the agent's own
+    /// act, and nobody waits on a skip: those are logged and wake nobody.
+    fn status_events(&self, changed: &[(Record, Vec<Revision>)]) -> Vec<NewEvent> {
+        if self.replay.is_some() {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        for (record, log) in changed {
+            let wakes = self.alerts.as_ref().is_some_and(|a| a.wakes(&record.owner));
+            for entry in log {
+                let Some(status) = entry.changes.get("status") else {
+                    continue;
+                };
+                let by_server =
+                    entry.by == setups::By::Server && entry.kind == setups::Kind::Status;
+                let cancelled = status["to"] == json!(Status::Cancelled);
+                let mut body =
+                    json!({ "from": status["from"], "to": status["to"], "gap": record.gap });
+                if let Some(result) = entry.changes.get("result_r") {
+                    body["result_r"] = result["to"].clone();
+                }
+                events.push(NewEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    owner: record.owner.clone(),
+                    kind: "setup.status".to_string(),
+                    // When it happened: the bar's time, not the time of this write. After
+                    // the server was away, several are written at once.
+                    at: entry.at,
+                    alert_id: None,
+                    setup_id: Some(record.id.clone()),
+                    body: body.to_string(),
+                    deliver: wakes && by_server && !cancelled && record.decision == Decision::Take,
+                });
+            }
+        }
+        events
     }
 
     /// The store's key of a setup. A replay's ids count per owner, so that two callers
@@ -1123,7 +1182,11 @@ async fn run_upkeep(setups: Weak<Setups>) {
             return;
         };
         let this2 = this.clone();
-        let _ = tokio::task::spawn_blocking(move || this2.expire_unscored(fetch::now_ms())).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            this2.expire_unscored(fetch::now_ms());
+            this2.tidy_events(chrono::Utc::now().timestamp());
+        })
+        .await;
         this.sync_feeds(&mut this.lock());
     }
 }

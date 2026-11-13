@@ -2058,3 +2058,264 @@ fn a_file_with_refresh_tokens_and_no_setups_upgrades_and_keeps_them() {
     assert_eq!(store.refresh_tokens(0).unwrap().len(), 2);
     assert_eq!(store.oauth_clients().unwrap()[0].client_id, "agent");
 }
+
+// ---- ADR-0061: the event log ----
+
+fn an_event(owner: &str, n: usize, deliver: bool) -> persistence::NewEvent {
+    persistence::NewEvent {
+        id: format!("{owner}-event-{n}"),
+        owner: owner.to_string(),
+        kind: "setup.status".to_string(),
+        at: 1_000 + n as i64,
+        alert_id: None,
+        setup_id: Some("s1".to_string()),
+        body: r#"{"from":"watching","to":"triggered"}"#.to_string(),
+        deliver,
+    }
+}
+
+fn log(store: &persistence::Store, events: &[persistence::NewEvent]) {
+    store.save_setups_logging(&[], events).unwrap();
+}
+
+/// A file from the build before the event log, and one from two builds before, gain
+/// the table and keep what they had.
+#[test]
+fn a_file_from_before_the_event_log_upgrades_and_keeps_its_rows() {
+    for (version, alerts) in [(8, true), (9, true)] {
+        let dir = crate::test_dir::new(format!("chartgen-events-from-{version}"));
+        let path = dir.join("s.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for sql in &persistence::MIGRATIONS[..version] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", version as i64)
+            .unwrap();
+        if alerts {
+            conn.execute(
+                "INSERT INTO server_alerts (id, owner, record_json) VALUES ('a1', 'me', '{}')",
+                [],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO oauth_clients (client_id, redirect_uris, created_at) VALUES ('c1', '[]', 1)", []).unwrap();
+        drop(conn);
+        let store = persistence::Store::open(&path).unwrap();
+        drop(store);
+        let store = persistence::Store::open(&path).unwrap();
+        let version_now: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version_now,
+            persistence::MIGRATIONS.len() as i64,
+            "from {version}"
+        );
+        assert_eq!(store.server_alerts().unwrap().len(), 1, "from {version}");
+        assert_eq!(store.oauth_clients().unwrap().len(), 1, "from {version}");
+        log(&store, &[an_event("me", 1, false)]);
+        assert_eq!(
+            store.events_after("me", 0, 10).unwrap().0.len(),
+            1,
+            "from {version}"
+        );
+    }
+}
+
+/// An owner's numbers rise by one and are never given twice, also when every row has
+/// gone: a reader that holds a number must never be passed by a smaller one.
+#[test]
+fn an_owners_event_numbers_never_start_again() {
+    let store = persistence::Store::in_memory().unwrap();
+    log(
+        &store,
+        &[
+            an_event("me", 1, false),
+            an_event("me", 2, false),
+            an_event("you", 1, false),
+        ],
+    );
+    let (mine, oldest) = store.events_after("me", 0, 10).unwrap();
+    assert_eq!(mine.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(oldest, Some(1));
+    assert_eq!(
+        store.events_after("you", 0, 10).unwrap().0[0].seq,
+        1,
+        "each owner counts alone"
+    );
+    assert_eq!(store.events_after("me", 1, 10).unwrap().0.len(), 1);
+
+    // Every row of the owner ages out. The next event is 3, not 1.
+    assert_eq!(
+        store
+            .sweep_events(chrono::Utc::now().timestamp() + persistence::EVENT_TTL_SECS + 1)
+            .unwrap(),
+        3
+    );
+    assert_eq!(store.events_after("me", 0, 10).unwrap(), (Vec::new(), None));
+    assert_eq!(store.last_event_seq("me").unwrap(), 2);
+    log(&store, &[an_event("me", 3, false)]);
+    assert_eq!(store.events_after("me", 0, 10).unwrap().0[0].seq, 3);
+}
+
+#[test]
+fn an_owner_keeps_the_newest_thousand_events() {
+    let store = persistence::Store::in_memory().unwrap();
+    let events: Vec<_> = (1..=persistence::EVENTS_PER_OWNER as usize + 5)
+        .map(|n| an_event("me", n, false))
+        .collect();
+    log(&store, &events);
+    let (first, oldest) = store.events_after("me", 0, 2).unwrap();
+    assert_eq!(oldest, Some(6));
+    assert_eq!(
+        first.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        [6, 7],
+        "oldest first, and limited"
+    );
+    assert_eq!(
+        store.last_event_seq("me").unwrap(),
+        persistence::EVENTS_PER_OWNER + 5
+    );
+}
+
+/// A wake-up waits in the log itself. Beyond the owner's cap the event is still
+/// logged, and its entry says that its delivery was dropped.
+#[test]
+fn a_wake_up_waits_in_the_log_and_one_over_the_cap_is_logged_as_dropped() {
+    let store = persistence::Store::in_memory().unwrap();
+    let cap = persistence::EVENTS_WAITING_PER_OWNER as usize;
+    let events: Vec<_> = (1..=cap + 1).map(|n| an_event("me", n, true)).collect();
+    log(&store, &events);
+    log(
+        &store,
+        &[an_event("me", cap + 2, false), an_event("you", 1, true)],
+    );
+    let (all, _) = store.events_after("me", 0, 100).unwrap();
+    let states = |from: usize, to: usize| {
+        all[from..to]
+            .iter()
+            .map(|e| e.delivery.as_str())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    assert_eq!(states(0, cap), ["waiting"].into());
+    assert_eq!(all[cap].delivery, "dropped");
+    assert_eq!(all[cap + 1].delivery, "none");
+    assert_eq!(
+        store.events_after("you", 0, 10).unwrap().0[0].delivery,
+        "waiting",
+        "the cap is each owner's own"
+    );
+
+    let now = chrono::Utc::now().timestamp();
+    let due = store.due_events(now + 1, 100).unwrap();
+    assert_eq!(due.len(), cap + 1, "every waiting one, of both owners");
+    // A round that failed: tried once, due again in a minute, and not before.
+    store
+        .set_event_delivery("me", 1, "waiting", 1, Some(now + 60))
+        .unwrap();
+    assert!(!store
+        .due_events(now + 1, 100)
+        .unwrap()
+        .iter()
+        .any(|e| e.owner == "me" && e.seq == 1));
+    let later = store.due_events(now + 61, 100).unwrap();
+    let again = later
+        .iter()
+        .find(|e| e.owner == "me" && e.seq == 1)
+        .unwrap();
+    assert_eq!((again.attempts, again.next_attempt_at), (1, Some(now + 60)));
+    store
+        .set_event_delivery("me", 1, "delivered", 2, None)
+        .unwrap();
+    assert_eq!(
+        store.events_after("me", 0, 1).unwrap().0[0].delivery,
+        "delivered"
+    );
+
+    // Too old to be news: given up, and still in the log.
+    assert_eq!(store.fail_waiting_events_before(now + 10).unwrap(), cap);
+    assert!(store.due_events(now + 100, 100).unwrap().is_empty());
+    assert_eq!(store.events_after("me", 0, 100).unwrap().0.len(), cap + 2);
+}
+
+/// With sign-in off an owner is a client, and its events go when it is evicted.
+#[test]
+fn an_evicted_clients_events_go_with_it() {
+    let store = persistence::Store::in_memory().unwrap();
+    store
+        .save_oauth_client("c1", &["https://x/cb".to_string()])
+        .unwrap();
+    log(
+        &store,
+        &[an_event("c1", 1, true), an_event("other", 1, false)],
+    );
+    store.delete_oauth_client("c1").unwrap();
+    assert_eq!(store.events_after("c1", 0, 10).unwrap(), (Vec::new(), None));
+    assert_eq!(store.last_event_seq("c1").unwrap(), 0);
+    assert_eq!(store.events_after("other", 0, 10).unwrap().0.len(), 1);
+}
+
+/// An event is stored with what it reports or not at all: a log that says "fired"
+/// about a fire the store does not have, or the other way round, could not be trusted.
+#[test]
+fn an_event_and_what_it_reports_are_stored_together_or_not_at_all() {
+    let store = persistence::Store::in_memory().unwrap();
+    log(&store, &[an_event("me", 1, false)]);
+    // The same id again: the event's insert fails, after the other rows were written.
+    let again = an_event("me", 1, false);
+
+    store.save_server_alert("a1", "me", "before").unwrap();
+    let fire = store.record_logged_fire("a1", "me", "after", &[], Some(&again));
+    assert!(fire.is_err());
+    assert_eq!(store.server_alerts().unwrap(), ["before"]);
+
+    let setup = persistence::StoredSetup {
+        id: "s1".to_string(),
+        owner: "me".to_string(),
+        record: "{}".to_string(),
+        revisions: vec![(1, "{}".to_string())],
+    };
+    assert!(store.save_setups_logging(&[setup], &[again]).is_err());
+    assert!(store.setups().unwrap().is_empty());
+
+    // Nothing was numbered for what was not stored.
+    assert_eq!(store.events_after("me", 0, 10).unwrap().0.len(), 1);
+    assert_eq!(store.last_event_seq("me").unwrap(), 1);
+}
+
+/// A wake-up that still waits is not dropped to make room: its row stays until it was
+/// delivered or given up, however many events the owner logs meanwhile.
+#[test]
+fn a_waiting_wake_up_is_not_pruned_from_the_log() {
+    let store = persistence::Store::in_memory().unwrap();
+    log(&store, &[an_event("me", 0, true)]);
+    let more: Vec<_> = (1..=persistence::EVENTS_PER_OWNER as usize + 5)
+        .map(|n| an_event("me", n, false))
+        .collect();
+    log(&store, &more);
+    let (kept, oldest) = store.events_after("me", 0, 2).unwrap();
+    assert_eq!(oldest, Some(1));
+    assert_eq!((kept[0].seq, kept[0].delivery.as_str()), (1, "waiting"));
+    assert_eq!(kept[1].seq, 7, "the others before it are gone as before");
+    assert_eq!(store.due_events(i64::MAX, 10).unwrap().len(), 1);
+    // Once it is settled it goes the way of every old event, at the next write.
+    store
+        .set_event_delivery("me", 1, persistence::DELIVERY_FAILED, 1, None)
+        .unwrap();
+    log(&store, &[an_event("me", 5000, false)]);
+    assert_eq!(store.events_after("me", 0, 1).unwrap().0[0].seq, 8);
+    // What a reader has to know: how many are kept after its place.
+    let last = store.last_event_seq("me").unwrap();
+    let (page, kept, numbered) = store.events_page("me", last - 10, 3).unwrap();
+    assert_eq!((page.len(), kept, numbered), (3, 10, last));
+    assert_eq!(
+        store.events_page("me", 0, 1).unwrap().1,
+        persistence::EVENTS_PER_OWNER
+    );
+    // An owner with no log.
+    assert_eq!(
+        store.events_page("nobody", 0, 10).unwrap(),
+        (Vec::new(), 0, 0)
+    );
+}

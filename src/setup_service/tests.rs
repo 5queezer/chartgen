@@ -1997,3 +1997,276 @@ async fn an_open_shadow_keeps_its_feed_after_the_setup_closed_and_counts_toward_
     // Nothing is left to score: the feed is let go.
     assert!(!s.pairs().contains(&key()));
 }
+
+// ---- ADR-0061: a setup's status changes as events ----
+
+fn events_of(store: &Store, owner: &str) -> Vec<persistence::LoggedEvent> {
+    store.events_after(owner, 0, 100).unwrap().0
+}
+
+/// Setups beside alerts whose receiver, at `port`, wakes the agent of `owner`.
+fn waking(store: &'static Store, port: u16, owner: &str) -> (Arc<Setups>, Arc<ServerAlerts>) {
+    let alerts = ServerAlerts::new(
+        store,
+        hub(),
+        Policy::default(),
+        Access::Open,
+        None,
+        crate::server_alerts::Limits::default(),
+        Timing::default(),
+    );
+    let url = format!("http://127.0.0.1:{port}/webhooks/route");
+    let agent = chartgen::webhook::AgentReceiver::from_vars(
+        |name| match name {
+            "CHARTGEN_AGENT_WEBHOOK_URL" => Some(url.clone()),
+            "CHARTGEN_AGENT_WEBHOOK_OWNER" => Some(owner.to_string()),
+            "CHARTGEN_AGENT_WEBHOOK_SECRET" => {
+                Some("a-secret-of-thirty-two-characters".to_string())
+            }
+            _ => None,
+        },
+        None,
+    );
+    alerts.set_agent(agent.unwrap().unwrap());
+    let setups = live_on(
+        store,
+        hub(),
+        Access::parse(None),
+        Limits::default(),
+        Some(alerts.clone()),
+    );
+    (setups, alerts)
+}
+
+/// A receiver that answers 200 and keeps the bodies it got.
+async fn receiver() -> (u16, Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let got = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 16384];
+            let n = s.read(&mut buf).await.unwrap_or(0);
+            if buf.starts_with(b"POST ") {
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                got.lock()
+                    .unwrap()
+                    .push(request.split_once("\r\n\r\n").unwrap().1.to_string());
+            }
+            let _ = s
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+            let _ = s.shutdown().await;
+        }
+    });
+    (port, seen)
+}
+
+/// Each status the server gives a setup is an event of its owner's log, written with
+/// the entry that says it, at the bar's time. For a setup the agent took, with a
+/// receiver configured for the owner, it is also a wake-up that shows the setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_the_server_gives_a_setup_is_logged_at_the_bars_time_and_wakes_the_agent() {
+    let (port, seen) = receiver().await;
+    let store = mem();
+    let (s, _alerts) = waking(store, port, "owner");
+    let setup = created(&s, "owner");
+    let (t, p) = (first_bar(&setup), mid(&setup));
+    assert!(
+        events_of(store, "owner").is_empty(),
+        "making a setup is no event"
+    );
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    s.on_bar(
+        &key(),
+        bar(t + MINUTE_MS, p * 0.976, p * 1.06, p * 0.976, p * 1.05),
+    );
+
+    let log = events_of(store, "owner");
+    let told: Vec<(String, i64, Value)> = log
+        .iter()
+        .map(|e| (e.kind.clone(), e.at, serde_json::from_str(&e.body).unwrap()))
+        .collect();
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert_eq!(
+        (told[0].0.as_str(), told[0].1),
+        ("setup.status", t),
+        "the bar's time, not the write's"
+    );
+    assert_eq!(
+        told[0].2,
+        json!({ "from": "watching", "to": "triggered", "gap": false })
+    );
+    assert_eq!(told[1].1, t + MINUTE_MS);
+    assert_eq!(
+        (told[1].2["from"].clone(), told[1].2["to"].clone()),
+        (json!("triggered"), json!("won"))
+    );
+    assert!(told[1].2["result_r"].as_f64().unwrap() > 0.0);
+    assert!(log
+        .iter()
+        .all(|e| e.setup_id.as_deref() == Some(&id_of(&setup)) && e.alert_id.is_none()));
+    // What happened, and nothing of the setup's text.
+    assert!(log
+        .iter()
+        .all(|e| !e.body.contains("thesis") && e.body.len() < 200));
+
+    for _ in 0..600 {
+        if seen.lock().unwrap().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let bodies: Vec<Value> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| serde_json::from_str(b).unwrap())
+        .collect();
+    assert_eq!(bodies.len(), 2, "both wake the agent");
+    let filled = bodies
+        .iter()
+        .find(|b| b["change"]["to"] == "triggered")
+        .unwrap();
+    assert_eq!(
+        (filled["type"].clone(), filled["at"].clone()),
+        (json!("setup.status"), json!(t))
+    );
+    assert_eq!(filled["id"], log[0].id.as_str());
+    // The event says what happened then; the setup is shown as it is when it is sent.
+    assert_eq!(filled["setup"]["id"], id_of(&setup).as_str());
+    assert_eq!(filled["setup"]["thesis"], "example thesis");
+    // A filled setup's exit variants (ADR-0066), as get_setup has them.
+    let variants = &filled["setup"]["shadow_results"];
+    for v in ["v1_half_t1_be", "v2_be_at_1r", "v3_time_stop"] {
+        assert!(variants[v]["status"].is_string(), "{v}: {variants}");
+    }
+    assert!(filled.get("alert").is_none() && filled.get("note").is_none());
+    let raw = seen.lock().unwrap()[0].clone();
+    assert!(raw.find("\"change\":").unwrap() < raw.find("\"setup\":").unwrap());
+    assert!(raw.find("\"levels\":").unwrap() < raw.find("\"thesis\":").unwrap());
+}
+
+/// A cancellation is the agent's own act, and nobody waits on a skip: both are in the
+/// log and neither wakes anyone. Nor does another owner's setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancellation_a_skip_and_another_owners_setup_are_logged_and_wake_nobody() {
+    let (port, seen) = receiver().await;
+    let store = mem();
+    let (s, _alerts) = waking(store, port, "owner");
+
+    let mine = created(&s, "owner");
+    let (t, p) = (first_bar(&mine), mid(&mine));
+    call(
+        &s,
+        "cancel_setup",
+        json!({ "id": mine["id"], "reason": "example reason" }),
+        "owner",
+    )
+    .unwrap();
+    let skip = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+        "decision": "skip", "thesis": "example reason" });
+    let skip = call(&s, "create_setup", skip, "owner").unwrap();
+    let theirs = created(&s, "someone-else");
+    // Bars that cancel the first, and fill the skip and the other owner's.
+    for i in 0..3 {
+        s.on_bar(&key(), bar(t + i * MINUTE_MS, p, p * 1.3, p * 0.5, p));
+    }
+    let log = events_of(store, "owner");
+    let to: Vec<String> = log
+        .iter()
+        .map(|e| {
+            serde_json::from_str::<Value>(&e.body).unwrap()["to"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert!(to.contains(&"cancelled".to_string()), "{to:?}");
+    assert!(
+        log.iter()
+            .any(|e| e.setup_id.as_deref() == Some(&id_of(&skip))),
+        "the skip's changes are logged: {to:?}"
+    );
+    assert!(
+        log.iter().all(|e| e.delivery == "none"),
+        "{:?}",
+        log.iter().map(|e| &e.delivery).collect::<Vec<_>>()
+    );
+    let others = events_of(store, "someone-else");
+    assert!(!others.is_empty() && others.iter().all(|e| e.delivery == "none"));
+    assert!(others
+        .iter()
+        .all(|e| e.setup_id.as_deref() == Some(&id_of(&theirs))));
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(seen.lock().unwrap().is_empty(), "nobody was woken");
+}
+
+/// A replay keeps no event log: the same bars change the same statuses and log nothing,
+/// so its answers stay what they were.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_logs_no_events() {
+    crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), |replay| {
+        let s = replaying(replay);
+        let p = replay.quote("BTCUSDT", at_minute(1500)).unwrap().0;
+        let args = json!({
+            "symbol": "BTCUSDT", "interval": "15m", "direction": "long", "thesis": "example",
+            "entry": { "low": p * 0.99, "high": p * 0.995 }, "invalidation": p * 0.97,
+            "targets": [p * 1.02], "expires_at": at_minute(1600), "as_of": at_minute(1500),
+        });
+        let made = call(&s, "create_setup", args, "agent").unwrap();
+        let read = json!({ "id": made["id"], "as_of": at_minute(2900) });
+        let later = call(&s, "get_setup", read, "agent").unwrap();
+        assert_ne!(
+            later["status"], "watching",
+            "the bars must move it: {later}"
+        );
+        assert!(s.store.events_after("agent", 0, 10).unwrap().0.is_empty());
+        assert_eq!(s.store.last_event_seq("agent").unwrap(), 0);
+    });
+}
+
+/// The log is kept for 7 days, and a wake-up waits for an hour, wherever events are
+/// written: with setups on and server alerts off there is nobody else to see to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_event_log_is_tidied_where_only_setups_run() {
+    let store = mem();
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let made = created(&s, "owner");
+    let (t, p) = (first_bar(&made), mid(&made));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    // A wake-up left waiting from a time when a receiver was configured.
+    let waiting = NewEvent {
+        id: "left-waiting".to_string(),
+        owner: "owner".to_string(),
+        kind: "setup.status".to_string(),
+        at: t,
+        alert_id: None,
+        setup_id: Some(id_of(&made)),
+        body: "{}".to_string(),
+        deliver: true,
+    };
+    store.save_setups_logging(&[], &[waiting]).unwrap();
+    let delivery = || {
+        let log = events_of(store, "owner");
+        log.iter().map(|e| e.delivery.clone()).collect::<Vec<_>>()
+    };
+    let now = chrono::Utc::now().timestamp();
+    s.tidy_events(now);
+    assert_eq!(delivery(), ["none", "waiting"], "nothing is old yet");
+    s.tidy_events(now + persistence::EVENT_NEWS_SECS + 1);
+    assert_eq!(
+        delivery(),
+        ["none", "failed"],
+        "given up after the hour, and kept"
+    );
+    s.tidy_events(now + persistence::EVENT_TTL_SECS + 1);
+    assert!(events_of(store, "owner").is_empty(), "gone after 7 days");
+    assert_eq!(
+        store.last_event_seq("owner").unwrap(),
+        2,
+        "the numbers go on"
+    );
+}

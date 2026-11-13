@@ -558,6 +558,17 @@ export interface ListAlertsInput {}
 
 export interface ListDrawingToolsInput {}
 
+export interface ListEventsInput {
+  /**
+   * Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept.
+   */
+  after?: number;
+  /**
+   * Most events to return; more says whether others wait.
+   */
+  limit?: number;
+}
+
 export interface ListIndicatorsInput {}
 
 export interface ListServerAlertsInput {}

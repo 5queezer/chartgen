@@ -145,6 +145,31 @@ pub(super) const MIGRATIONS: &[&str] = &[
         SELECT RAISE(ABORT, 'a setup''s log is append-only');
     END;
 ",
+    // What happened that could wake an owner's agent (ADR-0061): a log the agent reads
+    // back, and the queue of its wake-ups. `seq` comes from `event_counters`, which
+    // outlives the rows, so a number is never given twice to one owner.
+    "
+    CREATE TABLE events (
+        owner            TEXT    NOT NULL,
+        seq              INTEGER NOT NULL,
+        id               TEXT    NOT NULL UNIQUE,
+        kind             TEXT    NOT NULL,
+        at               INTEGER NOT NULL,
+        created_at       INTEGER NOT NULL,
+        alert_id         TEXT,
+        setup_id         TEXT,
+        body             TEXT    NOT NULL,
+        delivery         TEXT    NOT NULL,
+        attempts         INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at  INTEGER,
+        PRIMARY KEY (owner, seq)
+    );
+    CREATE INDEX events_due ON events (next_attempt_at) WHERE delivery = 'waiting';
+    CREATE TABLE event_counters (
+        owner     TEXT PRIMARY KEY,
+        last_seq  INTEGER NOT NULL
+    );
+",
 ];
 
 /// Whether an owner is a signed-in account (ADR-0044).
@@ -166,6 +191,121 @@ pub struct StoredSetup {
     pub record: String,
     pub revisions: Vec<(u32, String)>,
 }
+
+/// Events kept per owner, and for how long: the log an agent reads back.
+pub const EVENTS_PER_OWNER: i64 = 1000;
+pub const EVENT_TTL_SECS: i64 = 7 * 86_400;
+/// Wake-ups of one owner that may wait for delivery. One more is still logged, and
+/// its entry says that its delivery was dropped.
+pub const EVENTS_WAITING_PER_OWNER: i64 = 50;
+/// How long an event is news: a wake-up that did not get through in this time is given
+/// up. It is the time a Standard Webhooks receiver remembers an id for.
+pub const EVENT_NEWS_SECS: i64 = 3_600;
+
+/// How an event's wake-up stands. `None`: nobody was to be woken for it.
+pub const DELIVERY_NONE: &str = "none";
+pub const DELIVERY_WAITING: &str = "waiting";
+pub const DELIVERY_DELIVERED: &str = "delivered";
+pub const DELIVERY_FAILED: &str = "failed";
+pub const DELIVERY_DROPPED: &str = "dropped";
+
+/// An event to log. `at` is when it happened, in ms: for a setup's status the bar's
+/// time, not the time of the write.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewEvent {
+    pub id: String,
+    pub owner: String,
+    pub kind: String,
+    pub at: i64,
+    pub alert_id: Option<String>,
+    pub setup_id: Option<String>,
+    pub body: String,
+    /// Wake the owner's agent for it.
+    pub deliver: bool,
+}
+
+/// A logged event. `seq` rises by one per owner and is never reused.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoggedEvent {
+    pub owner: String,
+    pub seq: i64,
+    pub id: String,
+    pub kind: String,
+    pub at: i64,
+    /// Unix seconds of the write: what its age is counted from.
+    pub created_at: i64,
+    pub alert_id: Option<String>,
+    pub setup_id: Option<String>,
+    pub body: String,
+    pub delivery: String,
+    /// Rounds of delivery tried so far.
+    pub attempts: i64,
+    pub next_attempt_at: Option<i64>,
+}
+
+/// Log `e` inside `tx`, and return how its delivery stands. The owner's oldest
+/// events beyond `EVENTS_PER_OWNER` and those past `EVENT_TTL_SECS` go in the same
+/// step; the counter stays.
+fn insert_event(tx: &rusqlite::Transaction, e: &NewEvent, now: i64) -> rusqlite::Result<String> {
+    let seq: i64 = tx.query_row(
+        "INSERT INTO event_counters (owner, last_seq) VALUES (?1, 1)
+         ON CONFLICT (owner) DO UPDATE SET last_seq = last_seq + 1
+         RETURNING last_seq",
+        params![e.owner],
+        |r| r.get(0),
+    )?;
+    let waiting: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM events WHERE owner = ?1 AND delivery = ?2",
+        params![e.owner, DELIVERY_WAITING],
+        |r| r.get(0),
+    )?;
+    let delivery = match (e.deliver, waiting < EVENTS_WAITING_PER_OWNER) {
+        (false, _) => DELIVERY_NONE,
+        (true, true) => DELIVERY_WAITING,
+        (true, false) => DELIVERY_DROPPED,
+    };
+    let due = (delivery == DELIVERY_WAITING).then_some(now);
+    tx.execute(
+        "INSERT INTO events (owner, seq, id, kind, at, created_at, alert_id, setup_id, body,
+                             delivery, attempts, next_attempt_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11)",
+        params![
+            e.owner, seq, e.id, e.kind, e.at, now, e.alert_id, e.setup_id, e.body, delivery, due
+        ],
+    )?;
+    // Not one whose wake-up still waits: it is given up or delivered within the hour,
+    // and goes at a later write.
+    tx.execute(
+        "DELETE FROM events WHERE owner = ?1 AND (seq <= ?2 OR created_at < ?3)
+         AND delivery <> ?4",
+        params![
+            e.owner,
+            seq - EVENTS_PER_OWNER,
+            now - EVENT_TTL_SECS,
+            DELIVERY_WAITING
+        ],
+    )?;
+    Ok(delivery.to_string())
+}
+
+fn logged_event(r: &rusqlite::Row) -> rusqlite::Result<LoggedEvent> {
+    Ok(LoggedEvent {
+        owner: r.get(0)?,
+        seq: r.get(1)?,
+        id: r.get(2)?,
+        kind: r.get(3)?,
+        at: r.get(4)?,
+        created_at: r.get(5)?,
+        alert_id: r.get(6)?,
+        setup_id: r.get(7)?,
+        body: r.get(8)?,
+        delivery: r.get(9)?,
+        attempts: r.get(10)?,
+        next_attempt_at: r.get(11)?,
+    })
+}
+
+const EVENT_COLUMNS: &str = "owner, seq, id, kind, at, created_at, alert_id, setup_id, body, delivery, attempts, next_attempt_at";
 
 /// What `Store::waiting_rows` counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -553,6 +693,12 @@ impl Store {
             "DELETE FROM refresh_tokens WHERE client_id = ?1",
             params![client_id],
         )?;
+        // With sign-in off a client is an owner: its events go with it (ADR-0061).
+        tx.execute("DELETE FROM events WHERE owner = ?1", params![client_id])?;
+        tx.execute(
+            "DELETE FROM event_counters WHERE owner = ?1",
+            params![client_id],
+        )?;
         tx.execute(
             "DELETE FROM oauth_clients WHERE client_id = ?1",
             params![client_id],
@@ -741,6 +887,21 @@ impl Store {
         record: &str,
         events: &[StoredEvent],
     ) -> rusqlite::Result<()> {
+        self.record_logged_fire(id, owner, record, events, None)
+            .map(|_| ())
+    }
+
+    /// `record_server_alert_fire`, with the fire also logged as an event the owner's
+    /// agent can read back and be woken for (ADR-0061), in the same transaction. How
+    /// the event's delivery stands is returned.
+    pub fn record_logged_fire(
+        &self,
+        id: &str,
+        owner: &str,
+        record: &str,
+        events: &[StoredEvent],
+        logged: Option<&NewEvent>,
+    ) -> rusqlite::Result<Option<String>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
@@ -754,12 +915,163 @@ impl Store {
                 params![e.id, e.alert_id, e.body, e.created_at, e.device],
             )?;
         }
-        tx.commit()
+        let delivery = match logged {
+            Some(e) => Some(insert_event(&tx, e, chrono::Utc::now().timestamp())?),
+            None => None,
+        };
+        tx.commit()?;
+        Ok(delivery)
+    }
+
+    /// The events of `owner` after `after`, oldest first, at most `limit`; and the
+    /// lowest number still kept, if any is.
+    pub fn events_after(
+        &self,
+        owner: &str,
+        after: i64,
+        limit: i64,
+    ) -> rusqlite::Result<(Vec<LoggedEvent>, Option<i64>)> {
+        let conn = self.conn();
+        let oldest: Option<i64> = conn.query_row(
+            "SELECT MIN(seq) FROM events WHERE owner = ?1",
+            params![owner],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM events WHERE owner = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![owner, after, limit], logged_event)?;
+        Ok((rows.collect::<rusqlite::Result<_>>()?, oldest))
+    }
+
+    /// One page of `owner`'s log for a reader at `after`: the events, how many are kept
+    /// after its place, and the highest number given. Fewer kept than were numbered
+    /// after it means that some are gone. Read as one, in one transaction:
+    /// an event written between three separate reads would make the count and the
+    /// number disagree, and the reader would be told that events are gone when none is.
+    pub fn events_page(
+        &self,
+        owner: &str,
+        after: i64,
+        limit: i64,
+    ) -> rusqlite::Result<(Vec<LoggedEvent>, i64, i64)> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let last: Option<i64> = tx
+            .query_row(
+                "SELECT last_seq FROM event_counters WHERE owner = ?1",
+                params![owner],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let kept: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM events WHERE owner = ?1 AND seq > ?2",
+            params![owner, after],
+            |r| r.get(0),
+        )?;
+        let events = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT {EVENT_COLUMNS} FROM events WHERE owner = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3"
+            ))?;
+            let rows = stmt.query_map(params![owner, after, limit], logged_event)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok((events, kept, last.unwrap_or(0)))
+    }
+
+    /// The highest number `owner` was ever given, kept or not.
+    pub fn last_event_seq(&self, owner: &str) -> rusqlite::Result<i64> {
+        let last: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT last_seq FROM event_counters WHERE owner = ?1",
+                params![owner],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(last.unwrap_or(0))
+    }
+
+    /// Wake-ups whose next attempt is due at `now`, the longest due first.
+    pub fn due_events(&self, now: i64, limit: i64) -> rusqlite::Result<Vec<LoggedEvent>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM events
+             WHERE delivery = ?1 AND next_attempt_at <= ?2
+             ORDER BY next_attempt_at, created_at, seq LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![DELIVERY_WAITING, now, limit], logged_event)?;
+        rows.collect()
+    }
+
+    /// Record how a wake-up went: its state, the rounds tried, and when the next is due.
+    pub fn set_event_delivery(
+        &self,
+        owner: &str,
+        seq: i64,
+        delivery: &str,
+        attempts: i64,
+        next_attempt_at: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE events SET delivery = ?3, attempts = ?4, next_attempt_at = ?5
+             WHERE owner = ?1 AND seq = ?2",
+            params![owner, seq, delivery, attempts, next_attempt_at],
+        )?;
+        Ok(())
+    }
+
+    /// Give up the wake-ups of events made before `cutoff` (unix seconds): what they
+    /// tell is no longer news. The events stay in the log, marked failed.
+    pub fn fail_waiting_events_before(&self, cutoff: i64) -> rusqlite::Result<usize> {
+        self.conn().execute(
+            "UPDATE events SET delivery = ?1, next_attempt_at = NULL
+             WHERE delivery = ?2 AND created_at < ?3",
+            params![DELIVERY_FAILED, DELIVERY_WAITING, cutoff],
+        )
+    }
+
+    /// Give up every waiting wake-up of owners other than `keep`: nobody is there to
+    /// receive them. `None` gives up all.
+    pub fn fail_waiting_events_except(&self, keep: Option<&str>) -> rusqlite::Result<usize> {
+        self.conn().execute(
+            "UPDATE events SET delivery = ?1, next_attempt_at = NULL
+             WHERE delivery = ?2 AND (?3 IS NULL OR owner <> ?3)",
+            params![DELIVERY_FAILED, DELIVERY_WAITING, keep],
+        )
+    }
+
+    /// What the log needs done now and then, whoever writes to it: give up the wake-ups
+    /// that are no longer news, and drop the events past their keep.
+    pub fn tidy_events(&self, now: i64) -> rusqlite::Result<()> {
+        self.fail_waiting_events_before(now - EVENT_NEWS_SECS)?;
+        self.sweep_events(now)?;
+        Ok(())
+    }
+
+    /// Drop events past `EVENT_TTL_SECS`, for owners who log nothing new. Not one whose
+    /// wake-up still waits; `tidy_events` gives those up first.
+    pub fn sweep_events(&self, now: i64) -> rusqlite::Result<usize> {
+        self.conn().execute(
+            "DELETE FROM events WHERE created_at < ?1 AND delivery <> ?2",
+            params![now - EVENT_TTL_SECS, DELIVERY_WAITING],
+        )
     }
 
     /// Write setups and the entries their logs gained, in one transaction (ADR-0059).
     /// A log entry is only ever inserted: one that exists already fails the write.
     pub fn save_setups(&self, setups: &[StoredSetup]) -> rusqlite::Result<()> {
+        self.save_setups_logging(setups, &[])
+    }
+
+    /// `save_setups`, with what the server just decided logged as events (ADR-0061)
+    /// in the same transaction as the entries that say it.
+    pub fn save_setups_logging(
+        &self,
+        setups: &[StoredSetup],
+        events: &[NewEvent],
+    ) -> rusqlite::Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         for s in setups {
@@ -773,6 +1085,9 @@ impl Store {
                     params![s.id, seq, body],
                 )?;
             }
+        }
+        for e in events {
+            insert_event(&tx, e, chrono::Utc::now().timestamp())?;
         }
         tx.commit()
     }
@@ -815,6 +1130,25 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+
+    /// Move a wake-up an older build left waiting, row `old_id` of the deliveries, into
+    /// the event log as `event`, in one transaction. `created_at` is the old row's, so
+    /// that the hour a wake-up is tried counts from its fire.
+    pub fn carry_over_wake_up(
+        &self,
+        old_id: &str,
+        event: &NewEvent,
+        created_at: i64,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        insert_event(&tx, event, created_at)?;
+        tx.execute(
+            "DELETE FROM server_alert_events WHERE id = ?1",
+            params![old_id],
+        )?;
+        tx.commit()
     }
 
     pub fn delete_server_alert_event(&self, id: &str) -> rusqlite::Result<()> {

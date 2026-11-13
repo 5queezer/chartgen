@@ -1,4 +1,6 @@
 mod chart_push;
+#[cfg(feature = "scripting")]
+mod event_log;
 mod fetch;
 mod intrabars;
 mod mcp;

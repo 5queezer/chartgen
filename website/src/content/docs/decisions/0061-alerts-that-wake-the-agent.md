@@ -10,7 +10,9 @@ sidebar:
 **Amended by:** [ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) (an indicator alert's wake-up carries the indicator; `level` is the one stored with the fire)
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (deliveries also carry the
 Standard Webhooks headers; one receiver inside, which only the operator can name; wake-ups have a
-queue, a pace and slots of their own)
+queue, a pace and slots of their own; a wake-up is tried again for up to an hour),
+[ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (each status the server gives a
+setup is also an event of its owner's log)
 
 ## Context and Problem Statement
 
@@ -125,8 +127,10 @@ note, then the setup with its status and levels first and the thesis last. A rec
 puts only the beginning of a body in front of the agent still shows where the setup stands.
 A body is at most 8 KiB; a thesis that would exceed it is cut and marked.
 
-The body is made when it is sent. What waits in the store for its turn is the fire alone,
-so a thesis is never copied into the event table.
+The body is made when it is sent. What waits in the store for its turn is the event alone,
+so a thesis is never copied into the event table. **The event says what happened; the setup
+in the body is the setup as it is when the body is sent.** A wake-up that gets through late
+can therefore say "triggered" about a setup that already shows `won`.
 
 **The link is a reference and nothing more.** An alert changes nothing on a setup, linked or
 not, and no tool takes a status as input. Deleting the alert leaves the setup alone.
@@ -136,19 +140,62 @@ In this version a setup can be named only together with `notify_agent`, and an a
 
 ### Limits
 
-Wake-ups have their own: **50 waiting, 30 a minute, 2 at once.** They are not counted in the
+Wake-ups have their own: **50 waiting per owner, 30 a minute, 2 at once.** They are not counted in the
 budgets of ADR-0042, and nothing there is counted in theirs. A receiver that takes
 connections and never answers holds those 2 slots and nobody else's. Other owners'
 deliveries cannot crowd a wake-up out. The alert's own limits (20 per owner, the watched
 pairs, changes per minute) apply as to any alert.
 
-### What it does not do yet
+### The event log
 
-A wake-up is tried three times within about fifteen seconds, as any webhook is, and its
-outcome is on the alert. **A receiver that is away for longer, a deploy for example, loses
-that wake-up.** A log of events the agent can read back, events for a setup's status changes
-and attempts over a longer time are a following step. Until then an agent that depends on a
-wake-up should also look by itself now and then.
+Everything that could wake an owner's agent is first written to a log in the store, one row
+per event, and stays there whether or not a wake-up was sent or got through. There are two
+kinds:
+
+- `alert.fired`: an alert with `notify_agent` fired. Written in the transaction that stores
+  the fire.
+- `setup.status`: the server gave a setup a status (`triggered`, `won`, `invalidated`,
+  `expired`), or its owner cancelled it. Written in the transaction that stores the setup's
+  own log entry, with **the time of the bar** that decided it, not the time of the write.
+
+An event holds what happened, as a few numbers and words, and the ids of the alert and the
+setup. It never holds a thesis or a note.
+
+Events are numbered per owner, from 1, and a number is never used again, also after the
+events before it are gone. The server keeps **the newest 1000 events of an owner, for 7
+days**, wherever events are written: the alert service and the setup service each see to
+it, so it holds with only one of them on. An event whose wake-up still waits is not dropped
+to make room; it goes once it was delivered or given up, which is within the hour. `list_events` reads them back after a cursor, and says `truncated` when events
+after the caller's cursor are no longer kept.
+
+A replay server writes no events and refuses `list_events`: its answers must not depend on
+anything a run leaves behind.
+
+### Which status changes wake the agent
+
+**A status the server gives a setup wakes the agent without any flag on the setup,** if the
+setup's decision is `take` and its owner is the one the receiver is configured for. The body
+then has `change` (`from`, `to`, `gap`, and `result_r` where there is one) in the place of
+`alert`, and the setup after it.
+
+**A cancellation and every change of a `skip` setup are logged and wake nobody.** A
+cancellation is the agent's own act, and nobody waits on a setup that was not taken. The
+same holds for the setups of every other owner: logged for them, delivered to no one.
+
+### Attempts over a longer time
+
+The log is also the queue. A wake-up is tried three times within about fifteen seconds, as
+any webhook is. If it got no answer, a 5xx or a 429, it is tried once more after 1, 5, 15
+and 30 minutes, each counted from the attempt before, **while the event is younger than one
+hour**. Then it is given up and marked `failed`. Any other answer is the receiver's refusal
+and is not tried again. The hour is the time a Standard Webhooks receiver remembers an id
+for, so a second arrival of one event is still recognised as the same.
+
+The times are in the store with the event. A restart continues the schedule where it was,
+and does not start it again. An alert shows the outcome of its newest attempt.
+
+What is not delivered within the hour is not lost: it is in the log, and an agent that
+was away reads it with `list_events`.
 
 ### Consequences
 
@@ -158,6 +205,8 @@ wake-up should also look by itself now and then.
 - Good: a receiver built for Standard Webhooks verifies a delivery without code for this
   server, and existing receivers see no change.
 - Good: a thesis goes to the owner's receiver only, and is not in the event table.
+- Good: a receiver that is away for a deploy gets its wake-ups when it is back, within the
+  hour, and the log answers for anything older.
 - Bad: one receiver and one owner per server. A second agent needs a public receiver and
   `webhook_url`, without the setup in the body.
 - Bad: the operator has to learn the owner's id and type it. With sign-in off it is a
@@ -165,14 +214,29 @@ wake-up should also look by itself now and then.
   refused id, and the setting has to follow it. Sign-in on, where the owner is the account,
   is the better fit.
 - Bad: changing any of the three settings takes a restart.
-- Bad: a wake-up can be lost, as above.
+- Bad: a wake-up can arrive up to an hour after what it reports, and more than once if an
+  answer was lost on the way. The receiver has to drop a repeated `webhook-id`.
+- Bad: there is no switch on a setup for its status wake-ups. Every `take` setup of the
+  agent's owner wakes it.
+- Bad: **while the store cannot be written, a wake-up that was sent is sent again.** Its
+  outcome is stored after the attempt. If that write fails, the row still says it is due,
+  and the next round sends it once more with its three quick attempts, for as long as the
+  store fails. It is accepted: every repeat carries the same `webhook-id`, which the
+  receiver drops, the repeats are held to the wake-ups' own 30 a minute and 2 at once, and
+  a store that cannot be written stops alerts and setups from firing anything new anyway.
+- Bad: **a build from before the log does not write to it.** On a store this build has
+  migrated it runs as before, since it ignores tables it does not know: alerts fire and
+  setups are scored, and none of that is in the log. After a roll forward the log has a
+  hole for that time, which no `truncated` reports, and a wake-up that waited through it
+  is tried again only if it is still younger than an hour.
 - Bad: **a build from before this decision that writes a linked alert drops the link.** It
   reads the record, ignores the two fields it does not know and runs the alert as one with
   no webhook; when it stores the alert again, after a fire or an update, the fields are
   gone. After a rollback and a roll forward, such alerts have to be given `notify_agent`
   again.
 - Neutral: the stored alert record gains `notify_agent` and `setup_id`, written only when
-  set. No table and no migration.
+  set. The log is two new tables, `events` and `event_counters`, added by the tenth
+  migration; no existing table changes.
 
 ## Pros and Cons of the Options
 
@@ -211,4 +275,15 @@ keeps failing and one that is absent, with nothing of the body, the path or the 
 what the server prints; and a wrong setting, which turns alerts off, says so, and leaves
 setups scored.
 
-Not validated when this was written: the agent's real receiver, and sign-in on.
+For the log: that an event and what it reports are stored together or not at all; the
+numbering across pruning; the schedule, attempt by attempt, to the give-up; that a restart
+continues it; which answers are tried again; the hour; the cap of waiting events; status
+events at the bar's time; that a cancellation, a skip and another owner's setup wake
+nobody; that a replay writes none; and `list_events` with its cursor, `more`, `truncated`
+and bounds. The real binary is run against a receiver that keeps failing until the attempt
+one minute later arrives, with nothing of the body in what the server prints. Two older
+builds were run on a file this build had migrated: both worked as before and left the log
+as it was.
+
+Not validated when this was written: the agent's real receiver, sign-in on, and the give-up
+after an hour in the real binary.

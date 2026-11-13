@@ -465,6 +465,26 @@ pub const SETUP_TOOLS: [&str; 5] = [
     "cancel_setup",
 ];
 
+/// Name of the tool that reads the event log back (ADR-0061).
+pub const EVENT_TOOLS: [&str; 1] = ["list_events"];
+
+/// The event log's tool (ADR-0061). `tools/list` appends it where server alerts or
+/// setups run, and never on a replay server; the generated TypeScript types always
+/// include it.
+pub fn event_tools() -> Vec<Value> {
+    vec![json!({
+        "name": "list_events",
+        "description": "What happened that could wake your agent, read back: your alerts that fired with notify_agent, and the status changes of your setups (triggered, won, invalidated, expired, cancelled). Every event is logged before any wake-up is tried and stays for 7 days whether or not it was delivered, so this answers what you missed while your receiver was away. Oldest first. Pass the cursor of the last answer as after to read on. An event says what happened and when; read the setup or alert as it is now with get_setup and list_server_alerts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "after": { "type": "integer", "minimum": 0, "default": 0, "description": "Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50, "description": "Most events to return; more says whether others wait." }
+            }
+        }
+    })]
+}
+
 /// Tools for setups the server scores on paper (ADR-0059). `tools/list` appends them
 /// only with `CHARTGEN_SETUPS=1` or on a replay server; the generated TypeScript types
 /// always include them.

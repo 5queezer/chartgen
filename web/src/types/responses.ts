@@ -613,6 +613,19 @@ export type ChartTickParams = z.infer<typeof ChartTickParamsSchema>;
 //   its URL or secret. `webhook_secret` only appears in the response that made it.
 // ---------------------------------------------------------------------------
 
+/**
+ * An indicator alert's indicator (ADR-0067), as `indicator::view` in
+ * `src/server_alerts/indicator.rs` writes it: in a list, `value` is the line at the last
+ * close read; in a fire's event or wake-up, the line at that close.
+ */
+export const IndicatorViewSchema = z.object({
+  name: z.string(),
+  params: z.record(z.string(), z.unknown()),
+  line: z.string(),
+  compare: z.enum(["level", "close"]),
+  value: z.number().nullable(),
+});
+
 export const ServerAlertSchema = z.object({
   id: z.string(),
   symbol: z.string(),
@@ -662,15 +675,7 @@ export const ServerAlertSchema = z.object({
    * Present only on an alert on an indicator's line at bar closes (ADR-0067). `value` is
    * the line at the last close it read, null until it has read one.
    */
-  indicator: z
-    .object({
-      name: z.string(),
-      params: z.record(z.string(), z.unknown()),
-      line: z.string(),
-      compare: z.enum(["level", "close"]),
-      value: z.number().nullable(),
-    })
-    .optional(),
+  indicator: IndicatorViewSchema.optional(),
 });
 export type ServerAlert = z.infer<typeof ServerAlertSchema>;
 
@@ -1055,3 +1060,77 @@ export const OperatorOverviewSchema = z.object({
   }),
 });
 export type OperatorOverview = z.infer<typeof OperatorOverviewSchema>;
+
+// ---------------------------------------------------------------------------
+// Event log (ADR-0061)
+//   Produced by `answer` and `view` in `src/event_log.rs`. `what` is the event's
+//   stored body: written by `fire_event` in `src/server_alerts.rs` for
+//   `alert.fired` and by `status_events` in `src/setup_service.rs` for
+//   `setup.status`. It never holds a thesis or a note.
+// ---------------------------------------------------------------------------
+
+/** `none`: logged only. `dropped`: too many were waiting. `failed`: given up. */
+export const EventDeliverySchema = z.enum([
+  "none",
+  "waiting",
+  "delivered",
+  "failed",
+  "dropped",
+]);
+export type EventDelivery = z.infer<typeof EventDeliverySchema>;
+
+const LoggedEventBaseSchema = z.object({
+  /** The owner's own counter: it only grows, and a number is never used twice. */
+  seq: z.number().int(),
+  /** The `id` of the wake-up, where one was sent. */
+  id: z.string(),
+  /** When it happened, in ms: a setup's status at its bar's time. */
+  at: z.number(),
+  alert_id: z.string().optional(),
+  setup_id: z.string().optional(),
+  delivery: EventDeliverySchema,
+});
+
+export const LoggedEventSchema = z.discriminatedUnion("type", [
+  LoggedEventBaseSchema.extend({
+    type: z.literal("alert.fired"),
+    what: z.object({
+      /** The alert as it was at the fire, so a wake-up can say it once the alert is gone. */
+      symbol: z.string(),
+      interval: z.string(),
+      evaluate_on: z.enum(["live", "close"]),
+      trigger: z.enum(["once", "every"]),
+      price: z.number(),
+      /**
+       * The level the fire compared with; with compare: close, the line's value; null for
+       * an alert that has no level, as one that fires at a bar's close.
+       */
+      level: z.number().nullable(),
+      condition: z.string(),
+      bar_time: z.number(),
+      fire_count: z.number().int(),
+      /** Only on an indicator alert's fire (ADR-0067). */
+      indicator: IndicatorViewSchema.optional(),
+    }),
+  }),
+  LoggedEventBaseSchema.extend({
+    type: z.literal("setup.status"),
+    what: z.object({
+      from: SetupStatusSchema,
+      to: SetupStatusSchema,
+      gap: z.boolean(),
+      result_r: z.number().nullable().optional(),
+    }),
+  }),
+]);
+export type LoggedEvent = z.infer<typeof LoggedEventSchema>;
+
+export const EventsPayloadSchema = z.object({
+  events: z.array(LoggedEventSchema),
+  /** Pass as `after` to read on. */
+  cursor: z.number().int(),
+  more: z.boolean(),
+  /** True when events after the caller's cursor are no longer kept. */
+  truncated: z.boolean(),
+});
+export type EventsPayload = z.infer<typeof EventsPayloadSchema>;

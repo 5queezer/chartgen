@@ -304,15 +304,31 @@ While it runs, `[alerts] notify_agent refused for owner <id>: CHARTGEN_AGENT_WEB
 another` is someone other than the configured owner asking. They were told only that this
 server does not send webhooks for them.
 
-A wake-up is tried three times within about fifteen seconds. **While the receiver is away
-for longer, a deploy of the agent for example, wake-ups are lost;** the alert shows the
-outcome in `last_status` and `last_error`. Changing any of the three settings takes a
-restart.
+A wake-up is tried three times within about fifteen seconds, and then once more after 1, 5,
+15 and 30 minutes while it is younger than an hour. **A receiver that is away for a deploy
+gets what it missed when it is back;** what is older than an hour is given up, stays in the
+event log, and the agent reads it with `list_events`. The alert shows the newest outcome in
+`last_status` and `last_error`. Besides alerts, each status the server gives a `take` setup
+of the configured owner is sent too, with no setting on the setup. Changing any of the
+three settings takes a restart. With the receiver's settings removed, what still waited is
+marked `failed` at the next start and stays in the log.
+
+The log is two tables in the store, `events` and `event_counters`, added when this build
+first opens the file. The server keeps the newest 1000 events of an owner for 7 days; there
+is nothing to clean up by hand.
 
 **After a rollback:** a build from before this feature runs an alert with `notify_agent` as
 one with no webhook, and when it stores that alert again, after it fires or is edited,
 `notify_agent` and `setup_id` are gone from it. Once the newer build runs again, set them
 on those alerts again.
+
+A build from before the event log starts on a file that has it and runs as before: it
+ignores the two tables. **It writes nothing to the log,** so what fires or changes while it
+runs is missing there afterwards, and nothing marks the hole. A wake-up that was waiting is
+tried again after the roll forward only if it is still younger than an hour. One that the
+older build left waiting in its own queue is moved into the log at the first start of the
+newer build, under its own id and with the time of its fire, and sent from there by the same
+rule; the start log says how many. No step is needed on the file in either direction.
 
 Before turning it on:
 
