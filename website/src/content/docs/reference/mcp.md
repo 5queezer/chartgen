@@ -1466,8 +1466,9 @@ kept, and repeats while `more` is true.**
   "events": [
     { "seq": 41, "id": "d99a10e1-d742-4b79-9ccc-f75169944c6a", "type": "alert.fired",
       "at": 1793965351000, "alert_id": "61c779cc-…", "setup_id": "0b6f6f0e-…",
-      "what": { "price": 65010.5, "level": 65000.0, "condition": "crossing",
-                "bar_time": 1793965320, "fire_count": 1 },
+      "what": { "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "live",
+                "trigger": "once", "price": 65010.5, "level": 65000.0,
+                "condition": "crossing", "bar_time": 1793965320, "fire_count": 1 },
       "delivery": "delivered" },
     { "seq": 42, "id": "7a0c1d0e-…", "type": "setup.status",
       "at": 1793965380000, "setup_id": "0b6f6f0e-…",
@@ -1485,8 +1486,13 @@ kept, and repeats while `more` is true.**
 - An event holds no thesis and no note. Read the setup or the alert for those.
 - An `alert.fired` event says what the fire saw: `level` is the level it compared with, and
   an [indicator alert](#indicator-alerts-on-the-server)'s also has `indicator` with the line's
-  `value` at that close, and with `compare: "close"` that value as `level`. The wake-up is
-  made from the event, so it says the same even if the alert changed meanwhile.
+  `value` at that close, and with `compare: "close"` that value as `level`. It also holds the
+  alert's `symbol`, `interval`, `evaluate_on`, `condition` and `trigger` at the fire. The
+  wake-up's `alert` is made from the event, so it says the same even if the alert changed or
+  was deleted meanwhile; only its `note` comes from the alert, and is absent once the alert is
+  gone.
+- A wake-up that a build from before the event log left waiting goes into the log at the
+  next start, under its own id and with the time of its fire, and is sent from there.
 - The newest 1000 events are kept, for 7 days. **`truncated: true` means events after your
   cursor are gone:** read your setups and alerts as they are instead of relying on the log.
 - Listed where server alerts or setups run. A replay server has no log and refuses the call.

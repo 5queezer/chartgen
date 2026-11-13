@@ -4595,3 +4595,111 @@ async fn an_indicator_wake_up_carries_the_line_and_the_level_it_crossed() {
     assert_eq!(what["level"], value);
     assert_eq!(what["indicator"]["value"], value);
 }
+
+/// A wake-up a build from before the event log left waiting is a delivery row with no
+/// device. At the next start it goes into the log under its own id and is sent the new
+/// way, with what its fire said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_up_left_waiting_by_an_older_build_is_carried_into_the_log_and_sent() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("wake-up-carried");
+    let (a, _setups) = waking(store, port, "me", Limits::default());
+    let id = create(&a, waking_spec(None), "me").await;
+    let record = a.lock().alerts[&id].json();
+    drop(a);
+    // What the older build stored: its webhook body, waiting, with no device.
+    let fired_at = now_ms() - 5_000;
+    let old = json!({
+        "id": "older-build-1", "type": "alert.fired", "alert_id": id,
+        "symbol": "BTCUSDT", "interval": "1m", "evaluate_on": "live",
+        "condition": "crossing", "level": 100.0, "price": 101.0, "trigger": "once",
+        "message": "a note", "bar_time": BASE + 60, "fired_at": fired_at, "fire_count": 1,
+    });
+    let row = StoredEvent {
+        id: "older-build-1".into(),
+        alert_id: id.clone(),
+        body: old.to_string(),
+        created_at: fired_at / 1000,
+        device: None,
+    };
+    store
+        .record_logged_fire(&id, "me", &record, &[row], None)
+        .unwrap();
+
+    let store = reopen(&path);
+    let (b, _setups) = waking(store, port, "me", Limits::default());
+    assert!(b.lock().queues.is_empty(), "not put in a webhook queue");
+    b.carry_over_wake_ups();
+    assert!(store.server_alert_events().unwrap().is_empty());
+    let (logged, ..) = store.events_after("me", 0, 10).unwrap();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(
+        (logged[0].id.as_str(), logged[0].at),
+        ("older-build-1", fired_at)
+    );
+
+    until("the wake-up", || !seen.lock().unwrap().is_empty()).await;
+    let raw = seen.lock().unwrap()[0].clone();
+    let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["id"], "older-build-1");
+    assert_eq!(body["alert"]["id"], id.as_str());
+    assert_eq!(body["alert"]["price"], 101.0);
+    assert_eq!(body["alert"]["level"], 100.0);
+    assert_eq!(body["alert"]["symbol"], "BTCUSDT");
+    assert_eq!(body["alert"]["bar_time"], BASE + 60);
+}
+
+/// An alert deleted before its wake-up was sent: the wake-up still says what the alert
+/// was, from its event. Only the note, which the event does not hold, is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_up_for_a_deleted_alert_says_what_the_alert_was() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("wake-up-deleted-alert");
+    // Nothing is sent while the alert exists: the pace allows none.
+    let held = Limits {
+        agent_deliveries_per_minute: 0,
+        ..Limits::default()
+    };
+    let (a, _setups) = waking(store, port, "me", held);
+    let mut args = spec("crossing", "every", 100.0);
+    args["notify_agent"] = json!(true);
+    args["interval"] = json!("4h");
+    let id = create(&a, args, "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 101.0);
+    let (logged, ..) = store.events_after("me", 0, 10).unwrap();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0].delivery, "waiting");
+    call(&a, "delete_server_alert", json!({ "alert_id": id }), "me")
+        .await
+        .unwrap();
+    drop(a);
+
+    let (_b, _setups) = waking(reopen(&path), port, "me", Limits::default());
+    until("the wake-up", || !seen.lock().unwrap().is_empty()).await;
+    let raw = seen.lock().unwrap()[0].clone();
+    let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let alert = &body["alert"];
+    assert_eq!(alert["id"], id.as_str(), "{body}");
+    assert_eq!(
+        (
+            alert["symbol"].clone(),
+            alert["interval"].clone(),
+            alert["evaluate_on"].clone(),
+            alert["condition"].clone(),
+            alert["trigger"].clone()
+        ),
+        (
+            json!("BTCUSDT"),
+            json!("4h"),
+            json!("live"),
+            json!("crossing"),
+            json!("every")
+        )
+    );
+    assert_eq!(
+        (alert["price"].clone(), alert["level"].clone()),
+        (json!(101.0), json!(100.0))
+    );
+    assert!(body.get("note").is_none());
+}

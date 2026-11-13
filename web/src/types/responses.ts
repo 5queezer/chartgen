@@ -1095,6 +1095,11 @@ export const LoggedEventSchema = z.discriminatedUnion("type", [
   LoggedEventBaseSchema.extend({
     type: z.literal("alert.fired"),
     what: z.object({
+      /** The alert as it was at the fire, so a wake-up can say it once the alert is gone. */
+      symbol: z.string(),
+      interval: z.string(),
+      evaluate_on: z.enum(["live", "close"]),
+      trigger: z.enum(["once", "every"]),
       price: z.number(),
       /** The level the fire compared with; with compare: close, the line's value. */
       level: z.number(),

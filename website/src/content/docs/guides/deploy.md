@@ -325,8 +325,10 @@ on those alerts again.
 A build from before the event log starts on a file that has it and runs as before: it
 ignores the two tables. **It writes nothing to the log,** so what fires or changes while it
 runs is missing there afterwards, and nothing marks the hole. A wake-up that was waiting is
-tried again after the roll forward only if it is still younger than an hour. No step is
-needed on the file in either direction.
+tried again after the roll forward only if it is still younger than an hour. One that the
+older build left waiting in its own queue is moved into the log at the first start of the
+newer build, under its own id and with the time of its fire, and sent from there by the same
+rule; the start log says how many. No step is needed on the file in either direction.
 
 Before turning it on:
 

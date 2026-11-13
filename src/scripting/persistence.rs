@@ -1132,6 +1132,25 @@ impl Store {
         rows.collect()
     }
 
+    /// Move a wake-up an older build left waiting, row `old_id` of the deliveries, into
+    /// the event log as `event`, in one transaction. `created_at` is the old row's, so
+    /// that the hour a wake-up is tried counts from its fire.
+    pub fn carry_over_wake_up(
+        &self,
+        old_id: &str,
+        event: &NewEvent,
+        created_at: i64,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        insert_event(&tx, event, created_at)?;
+        tx.execute(
+            "DELETE FROM server_alert_events WHERE id = ?1",
+            params![old_id],
+        )?;
+        tx.commit()
+    }
+
     pub fn delete_server_alert_event(&self, id: &str) -> rusqlite::Result<()> {
         self.conn()
             .execute("DELETE FROM server_alert_events WHERE id = ?1", params![id])?;

@@ -449,6 +449,8 @@ struct State {
     /// ones that wait are rows of the event log, not anything here.
     agent_in_flight: HashSet<(String, i64)>,
     agent_sent: Window,
+    /// Wake-ups an older build left waiting, until they are carried into the log.
+    carried_wake_ups: Vec<StoredEvent>,
 }
 
 pub struct ServerAlerts {
@@ -571,6 +573,7 @@ pub fn start(hub: &Arc<ChartHub>) {
         // No receiver any more: what still waited has nobody to go to.
         eprintln!("[alerts] cannot give up wake-ups left waiting: {e}");
     }
+    alerts.carry_over_wake_ups();
     alerts.sweep_events();
     let _ = GLOBAL.set(alerts);
 }
@@ -697,6 +700,18 @@ impl ServerAlerts {
         });
         let oldest = chrono::Utc::now().timestamp() - EVENT_MAX_AGE_SECS;
         for event in events {
+            // A wake-up a build from before the event log left waiting: it goes into
+            // the log once the receiver is known (`carry_over_wake_ups`), not to a
+            // webhook it does not have.
+            if event.device.is_none()
+                && st
+                    .alerts
+                    .get(&event.alert_id)
+                    .is_some_and(|a| a.notify_agent)
+            {
+                st.carried_wake_ups.push(event);
+                continue;
+            }
             let owner = st.alerts.get(&event.alert_id).map(|a| a.owner.clone());
             // The list is read at startup, so this is where a removed client's
             // deliveries stop, and what it queued goes with them.
@@ -762,6 +777,61 @@ impl ServerAlerts {
             eprintln!("[alerts] cannot give up wake-ups of other owners: {e}");
         }
         let _ = self.agent.set(agent);
+    }
+
+    /// Wake-ups a build from before the event log left waiting become `alert.fired`
+    /// events, under their own id and with the time of their fire, so that the hour a
+    /// wake-up stays news counts from then. They are sent the new way where this owner
+    /// has a receiver, and only logged where not. Once, at startup, after the receiver
+    /// is known.
+    pub(crate) fn carry_over_wake_ups(&self) {
+        let waiting = std::mem::take(&mut self.lock().carried_wake_ups);
+        let mut carried = 0;
+        for old in waiting {
+            let alert = self.lock().alerts.get(&old.alert_id).cloned();
+            let Some(alert) = alert else {
+                let _ = self.store.delete_server_alert_event(&old.id);
+                continue;
+            };
+            let fired: Value = serde_json::from_str(&old.body).unwrap_or_default();
+            let mut body = serde_json::Map::new();
+            for key in [
+                "symbol",
+                "interval",
+                "evaluate_on",
+                "trigger",
+                "price",
+                "level",
+                "condition",
+                "bar_time",
+                "fire_count",
+                "indicator",
+            ] {
+                if let Some(v) = fired.get(key) {
+                    body.insert(key.to_string(), v.clone());
+                }
+            }
+            let event = NewEvent {
+                id: old.id.clone(),
+                owner: alert.owner.clone(),
+                kind: "alert.fired".to_string(),
+                at: fired["fired_at"].as_i64().unwrap_or(old.created_at * 1000),
+                alert_id: Some(alert.id.clone()),
+                setup_id: alert.setup_id.clone(),
+                body: Value::Object(body).to_string(),
+                deliver: self.wakes(&alert.owner),
+            };
+            match self
+                .store
+                .carry_over_wake_up(&old.id, &event, old.created_at)
+            {
+                Ok(()) => carried += 1,
+                Err(e) => eprintln!("[alerts] cannot carry a waiting wake-up into the log: {e}"),
+            }
+        }
+        if carried > 0 {
+            println!("[alerts] carried {carried} waiting wake-ups over into the event log");
+        }
     }
 
     /// Give up wake-ups too old to be news, and drop events past their keep. The
@@ -1194,6 +1264,11 @@ impl ServerAlerts {
         at: i64,
     ) -> NewEvent {
         let mut body = json!({
+            // What the wake-up says of the alert, also once the alert is gone.
+            "symbol": alert.symbol,
+            "interval": alert.interval,
+            "evaluate_on": alert.evaluate_on,
+            "trigger": alert.trigger,
             "price": price,
             // As the webhook says it: with compare: close, the line's value the close
             // crossed (ADR-0067). The wake-up reads it from here, not from the alert,
@@ -2558,16 +2633,16 @@ struct WakeUp<'a> {
 #[derive(Serialize)]
 struct FiredAlert<'a> {
     id: &'a str,
-    symbol: &'a str,
-    interval: &'a str,
-    evaluate_on: EvaluateOn,
-    condition: Condition,
+    symbol: &'a Value,
+    interval: &'a Value,
+    evaluate_on: &'a Value,
+    condition: &'a Value,
     level: &'a Value,
     /// Only on an indicator alert, which `level` is then about.
     #[serde(skip_serializing_if = "Option::is_none")]
     indicator: Option<&'a Value>,
     price: &'a Value,
-    trigger: Trigger,
+    trigger: &'a Value,
     bar_time: &'a Value,
     fire_count: &'a Value,
 }
@@ -2644,21 +2719,27 @@ fn wake_up_body(
             id: &event.id,
             r#type: &event.kind,
             at: event.at,
-            alert: alert.filter(|_| fired).map(|alert| FiredAlert {
-                id: &alert.id,
-                symbol: &alert.symbol,
-                interval: &alert.interval,
-                evaluate_on: alert.evaluate_on,
-                condition: alert.condition,
-                // The fire's own: the level it compared with then, and an indicator
-                // alert's line and value at that close (ADR-0067).
-                level: &happened["level"],
-                indicator: happened.get("indicator"),
-                price: &happened["price"],
-                trigger: alert.trigger,
-                bar_time: &happened["bar_time"],
-                fire_count: &happened["fire_count"],
-            }),
+            // From the event: what the fire saw, also when the alert was deleted or
+            // changed before this was sent.
+            alert: event
+                .alert_id
+                .as_deref()
+                .filter(|_| fired)
+                .map(|id| FiredAlert {
+                    id,
+                    symbol: &happened["symbol"],
+                    interval: &happened["interval"],
+                    evaluate_on: &happened["evaluate_on"],
+                    condition: &happened["condition"],
+                    // The fire's own: the level it compared with then, and an indicator
+                    // alert's line and value at that close (ADR-0067).
+                    level: &happened["level"],
+                    indicator: happened.get("indicator"),
+                    price: &happened["price"],
+                    trigger: &happened["trigger"],
+                    bar_time: &happened["bar_time"],
+                    fire_count: &happened["fire_count"],
+                }),
             change: (!fired).then_some(&happened),
             note: alert.filter(|_| fired).and_then(|a| a.message.as_deref()),
             setup,

@@ -238,6 +238,10 @@ describe("list_events (ADR-0061)", () => {
     alert_id: "a-1",
     setup_id: "s-1",
     what: {
+      symbol: "BTCUSDT",
+      interval: "1h",
+      evaluate_on: "live",
+      trigger: "once",
       price: 101.5,
       level: 100,
       condition: "greater",
