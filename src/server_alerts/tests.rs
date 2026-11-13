@@ -4913,3 +4913,31 @@ async fn a_bar_close_alert_after_a_restart_fires_at_the_next_close_it_sees() {
         "a once alert that fired stays spent"
     );
 }
+
+/// A month ends when the calendar's does: an alert made on the 31st still fires at that
+/// month's close, which is after it, not 30 days after the month began.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_monthly_bar_close_alert_made_on_the_31st_fires_at_that_months_close() {
+    let (store, _) = store_at("bar-close-month");
+    let a = alerts_on(store, Policy::default(), Limits::default());
+    let mut args = at_close("every");
+    args["interval"] = json!("1M");
+    let id = create(&a, args, "me").await;
+    // 2026-10-01 and 2026-09-01, UTC. October has 31 days.
+    let (october, september) = (1_790_812_800, 1_788_220_800);
+    // Made on 31 October at noon: after 30 days of October, before its close.
+    a.lock().alerts.get_mut(&id).unwrap().created_at = (october + 30 * 86_400 + 43_200) * 1000;
+    let monthly = |t: i64| a.on_event(&key("1M"), FeedEvent::Bar(bar(t, 100.0)));
+    monthly(september);
+    assert_eq!(
+        a.lock().alerts[&id].fire_count,
+        0,
+        "September closed before it was made"
+    );
+    monthly(october);
+    assert_eq!(
+        a.lock().alerts[&id].fire_count,
+        1,
+        "October closed after it"
+    );
+}

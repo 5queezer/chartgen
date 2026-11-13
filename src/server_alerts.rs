@@ -1133,9 +1133,11 @@ impl ServerAlerts {
             return None;
         }
         if alert.condition == Condition::BarClose {
-            // Not for a bar that closed before the alert was made (ADR-0069).
-            let closed_ms =
-                data::interval_secs(&alert.feed_interval).map(|s| (bar_time + s) * 1000);
+            // Not for a bar that closed before the alert was made (ADR-0069). On the
+            // grid, so that a month ends when the calendar's does, not after 30 days.
+            let closed_ms = Interval::parse(&alert.feed_interval)
+                .ok()
+                .map(|iv| iv.grid_end(bar_time) * 1000);
             if closed_ms.is_none_or(|t| t <= alert.created_at) {
                 return None;
             }

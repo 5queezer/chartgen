@@ -5,7 +5,7 @@ sidebar:
   order: 69
 ---
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-11-13
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (a server alert can fire at a
 bar's close, whatever the price)
