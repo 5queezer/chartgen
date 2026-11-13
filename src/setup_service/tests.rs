@@ -2706,7 +2706,11 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
     assert!(setups::track_record(&all_of_them, Some(&by)).is_err());
     let (total, groups) = setups::track_record(&all_of_them[1..], Some(&by)).unwrap();
     assert_eq!((total["count"].clone(), groups.len()), (json!(50), 50));
-    assert_eq!(groups[1]["key"], 2, "by number, not by text: {}", groups[1]);
+    assert_eq!(
+        groups[1]["key"], 2.0,
+        "by number, not by text: {}",
+        groups[1]
+    );
 }
 
 /// A result with a gap, an expiry without a result and a cancellation are counted as
@@ -2840,4 +2844,127 @@ async fn record_answers_match_the_file_the_web_types_are_tested_against() {
         std::fs::write(&path, &text).unwrap();
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
+}
+
+/// A setup that was cancelled or ran out before its entry was reached has a result of
+/// 0 R. It is in `mean_r`, which is over every result there is; `entered` and
+/// `mean_r_entered` leave it out, so both readings can be had from one answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_tells_setups_that_were_entered_from_those_that_never_traded() {
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    assert!(base.fill.is_some());
+    // Four that were entered and two that never traded, with results chosen by hand.
+    let made = |entered: bool, status: Status, result: f64, version: &str| {
+        let mut r = base.clone();
+        r.status = status;
+        r.result_r = Some(result);
+        r.playbook_version = Some(version.to_string());
+        if !entered {
+            r.fill = None;
+            r.exit = None;
+        }
+        r
+    };
+    let six = [
+        made(true, Status::Won, 0.984, "v1"),
+        made(true, Status::Invalidated, -1.016, "v1"),
+        made(true, Status::Invalidated, -1.016, "v2"),
+        made(true, Status::Invalidated, -1.016, "v2"),
+        made(false, Status::Expired, 0.0, "v1"),
+        made(false, Status::Cancelled, 0.0, "v2"),
+    ];
+    let all: Vec<&Record> = six.iter().collect();
+    let by = setups::GroupBy::PlaybookVersion;
+    let (total, groups) = setups::track_record(&all, Some(&by)).unwrap();
+    let near = |v: &Value, to: f64| (v.as_f64().unwrap() - to).abs() < 1e-9;
+    assert_eq!(
+        (total["count"].clone(), total["with_result"].clone()),
+        (json!(6), json!(6))
+    );
+    assert!(near(&total["mean_r"], -0.344), "{total}");
+    assert_eq!(total["entered"], 4);
+    assert!(near(&total["mean_r_entered"], -0.516), "{total}");
+    // Per group as well: v1 has two entered of three, v2 two of three.
+    assert_eq!(
+        (groups[0]["key"].clone(), groups[0]["entered"].clone()),
+        (json!("v1"), json!(2))
+    );
+    assert!(
+        near(&groups[0]["mean_r"], (0.984 - 1.016) / 3.0),
+        "{}",
+        groups[0]
+    );
+    assert!(near(&groups[0]["mean_r_entered"], (0.984 - 1.016) / 2.0));
+    assert!(near(&groups[1]["mean_r_entered"], -1.016));
+
+    // Entered, and no result: one that ran out filled while nobody scored it.
+    let mut unscored = made(true, Status::Expired, 0.0, "v1");
+    unscored.result_r = None;
+    unscored.gap = true;
+    let (total, _) = setups::track_record(&[&unscored], None).unwrap();
+    assert_eq!(
+        (total["entered"].clone(), total["with_result"].clone()),
+        (json!(1), json!(0))
+    );
+    assert!(
+        total["mean_r_entered"].is_null(),
+        "no mean of no result: {total}"
+    );
+    // None entered: a count of 0 and no mean.
+    let (total, _) = setups::track_record(&[&six[4], &six[5]], None).unwrap();
+    assert_eq!(total["entered"], 0);
+    assert!(
+        total["mean_r_entered"].is_null() && near(&total["mean_r"], 0.0),
+        "{total}"
+    );
+}
+
+/// A feature's number is one value however it was written: 1 and 1.0 are one group.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_groups_a_number_by_its_value_not_by_how_it_was_written() {
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    let with = |value: Value| {
+        let mut r = base.clone();
+        r.features = Some(serde_json::Map::from_iter([("n".to_string(), value)]));
+        r
+    };
+    let four = [
+        with(json!(1)),
+        with(json!(1.0)),
+        with(json!(2)),
+        with(json!("1")),
+    ];
+    let all: Vec<&Record> = four.iter().collect();
+    let by = setups::GroupBy::Feature("n".to_string());
+    let (_, groups) = setups::track_record(&all, Some(&by)).unwrap();
+    let shown: Vec<String> = groups.iter().map(|g| g["key"].to_string()).collect();
+    assert_eq!(
+        shown,
+        ["1.0", "2.0", "\"1\""],
+        "a number as a decimal, a string as it is"
+    );
+    assert_eq!(groups[0]["count"], 2);
+}
+
+/// A call that only reads is not answered in the words of one that stores.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_track_record_does_not_speak_of_storing() {
+    let s = live();
+    let refused = call(
+        &s,
+        "get_track_record",
+        json!({ "group_by": "thesis" }),
+        "owner",
+    )
+    .unwrap_err();
+    assert_eq!(errors(&refused), ["group_by"]);
+    assert!(
+        !refused.contains("stored") && !refused.contains("this setup"),
+        "{refused}"
+    );
+    assert!(refused.contains("nothing was read"), "{refused}");
 }

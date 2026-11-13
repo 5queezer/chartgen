@@ -1908,9 +1908,10 @@ pub enum GroupBy {
 pub const MAX_RECORD_GROUPS: usize = 50;
 
 impl Record {
-    /// The value this setup is grouped under; null where it stated none.
+    /// The value this setup is grouped under; null where it stated none. A number is
+    /// written as a decimal, so that 1 and 1.0 are one group and read as `1.0`.
     fn group_key(&self, by: &GroupBy) -> Value {
-        match by {
+        let key = match by {
             GroupBy::PlaybookVersion => json!(self.playbook_version),
             GroupBy::Feature(name) => self
                 .features
@@ -1923,6 +1924,10 @@ impl Record {
                 .map(|p| ((p * 10.0).floor().min(9.0)) / 10.0)),
             GroupBy::Symbol => json!(self.symbol),
             GroupBy::Direction => json!(self.direction),
+        };
+        match key.as_f64() {
+            Some(number) => json!(number),
+            None => key,
         }
     }
 }
@@ -1938,6 +1943,10 @@ struct Tally {
     cancelled: u32,
     with_result: u32,
     total_r: f64,
+    /// Setups whose entry was reached, and the results of those.
+    entered: u32,
+    entered_with_result: u32,
+    entered_r: f64,
     gaps: u32,
     stated: u32,
     stated_sum: f64,
@@ -1954,9 +1963,17 @@ impl Tally {
             Status::Cancelled => self.cancelled += 1,
             Status::Watching | Status::Triggered => {}
         }
+        // Entered: the setup was filled at some time. One that was cancelled or ran out
+        // before that never traded; its result is 0 R all the same (ADR-0059).
+        let entered = r.fill.is_some();
+        self.entered += u32::from(entered);
         if let Some(result) = r.result_r {
             self.with_result += 1;
             self.total_r += result;
+            if entered {
+                self.entered_with_result += 1;
+                self.entered_r += result;
+            }
         }
         self.gaps += u32::from(r.gap);
         if let Some(p) = r.probability {
@@ -1977,6 +1994,8 @@ impl Tally {
             "with_result": self.with_result,
             "total_r": self.total_r,
             "mean_r": per(self.total_r, self.with_result),
+            "entered": self.entered,
+            "mean_r_entered": per(self.entered_r, self.entered_with_result),
             "gaps": self.gaps,
             "probability": {
                 "stated": self.stated,

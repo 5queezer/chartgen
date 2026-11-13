@@ -1026,8 +1026,11 @@ const TrackRecordCountsSchema = z.object({
   /** Setups with a result in R. One that expired filled while nobody scored it has none. */
   with_result: z.number().int(),
   total_r: z.number(),
-  /** Over `with_result`; null when that is 0. */
+  /** Over `with_result`; null when that is 0. A setup that never traded is in it with 0 R. */
   mean_r: z.number().nullable(),
+  /** Setups whose entry was reached, and the mean over those of them with a result. */
+  entered: z.number().int(),
+  mean_r_entered: z.number().nullable(),
   /** Results that do not cover bars the server missed. */
   gaps: z.number().int(),
   /** Of the setups that stated a probability: its mean, and how many of them won. */
@@ -1052,6 +1055,7 @@ export const TrackRecordPayloadSchema = z.object({
   /** In the order of the keys; null is the group of setups that stated none. */
   groups: z.array(
     TrackRecordCountsSchema.extend({
+      // A number is written as a decimal: 1 and 1.0 are the one group `1.0`.
       key: z.union([z.string(), z.number(), z.boolean()]).nullable(),
     }),
   ),

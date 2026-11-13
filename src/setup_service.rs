@@ -195,6 +195,17 @@ fn field_problem(field: &str, message: impl Into<String>) -> String {
     setups::problems_text(&[Problem::new(field, message)])
 }
 
+/// `field_problem` for a call that only reads: the same shape, and words that do not
+/// speak of storing.
+fn read_problem(field: &str, message: impl Into<String>) -> String {
+    let problem = Problem::new(field, message).to_json();
+    serde_json::to_string_pretty(&json!({
+        "error": "1 problem with this call; nothing was read. Fix it and send the call again.",
+        "setup_errors": [problem],
+    }))
+    .unwrap_or_default()
+}
+
 impl Setups {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -1068,7 +1079,7 @@ impl Setups {
             .as_object()
             .and_then(|map| map.keys().find(|k| !FIELDS.contains(&k.as_str())))
         {
-            return Err(field_problem(
+            return Err(read_problem(
                 unknown,
                 format!("{unknown} is not a field of this tool"),
             ));
@@ -1078,7 +1089,7 @@ impl Setups {
             Some(v) => Some(
                 v.as_str()
                     .and_then(normalize_quote_symbol)
-                    .ok_or_else(|| field_problem("symbol", "symbol must be a symbol"))?,
+                    .ok_or_else(|| read_problem("symbol", "symbol must be a symbol"))?,
             ),
         };
         fn one_of<T: serde::de::DeserializeOwned>(
@@ -1089,7 +1100,7 @@ impl Setups {
             given
                 .map(|v| serde_json::from_value(v.clone()))
                 .transpose()
-                .map_err(|_| field_problem(field, format!("{field} must be {values}")))
+                .map_err(|_| read_problem(field, format!("{field} must be {values}")))
         }
         let direction: Option<setups::Direction> =
             one_of(given("direction"), "direction", "long or short")?;
@@ -1098,7 +1109,7 @@ impl Setups {
             None => Ok(None),
             Some(v) => match v.as_str() {
                 Some(s) if s.chars().count() <= setups::MAX_STATED_TEXT => Ok(Some(s.to_string())),
-                _ => Err(field_problem(
+                _ => Err(read_problem(
                     field,
                     format!(
                         "{field} must be a string of at most {} characters",
@@ -1111,7 +1122,7 @@ impl Setups {
         let feature = text("feature")?;
         let time = |field: &str| {
             given(field)
-                .map(|v| drawings::parse_time(v, now).map_err(|e| field_problem(field, e)))
+                .map(|v| drawings::parse_time(v, now).map_err(|e| read_problem(field, e)))
                 .transpose()
         };
         let (from, to) = (time("from")?, time("to")?);
@@ -1119,23 +1130,23 @@ impl Setups {
             match (given("group_by").map(Value::as_str), feature) {
                 (None, None) => None,
                 (None, Some(_)) => {
-                    return Err(field_problem("feature", "feature needs group_by: feature"))
+                    return Err(read_problem("feature", "feature needs group_by: feature"))
                 }
                 (Some(Some("feature")), Some(name)) => Some(setups::GroupBy::Feature(name)),
                 (Some(Some("feature")), None) => {
-                    return Err(field_problem(
+                    return Err(read_problem(
                         "feature",
                         "group_by: feature needs feature, the name of one",
                     ))
                 }
                 (Some(_), Some(_)) => {
-                    return Err(field_problem("feature", "feature needs group_by: feature"))
+                    return Err(read_problem("feature", "feature needs group_by: feature"))
                 }
                 (Some(Some("playbook_version")), None) => Some(setups::GroupBy::PlaybookVersion),
                 (Some(Some("probability")), None) => Some(setups::GroupBy::Probability),
                 (Some(Some("symbol")), None) => Some(setups::GroupBy::Symbol),
                 (Some(Some("direction")), None) => Some(setups::GroupBy::Direction),
-                (Some(_), None) => return Err(field_problem(
+                (Some(_), None) => return Err(read_problem(
                     "group_by",
                     "group_by must be playbook_version, feature, probability, symbol or direction",
                 )),
@@ -1165,7 +1176,7 @@ impl Setups {
         let truncated = mine.len() > TRACK_RECORD_SETUPS;
         mine.truncate(TRACK_RECORD_SETUPS);
         let (total, groups) = setups::track_record(&mine, group_by.as_ref())
-            .map_err(|e| field_problem("group_by", e))?;
+            .map_err(|e| read_problem("group_by", e))?;
         Ok(json!({
             "replay": self.replay.is_some(),
             "closed": mine.len(),

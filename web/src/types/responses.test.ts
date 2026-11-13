@@ -348,6 +348,7 @@ describe("what a setup was made with, and the track record (ADR-0064)", () => {
   it("parses the record, with every field the server sends and no other", () => {
     const all = TrackRecordPayloadSchema.strict().parse(record.get_track_record);
     expect(all.closed).toBe(2);
+    expect(all.total.entered).toBeLessThanOrEqual(all.total.count);
     expect(all.groups).toEqual([]);
     const grouped = TrackRecordPayloadSchema.strict().parse(record.get_track_record_grouped);
     expect(grouped.group_by).toBe("feature");

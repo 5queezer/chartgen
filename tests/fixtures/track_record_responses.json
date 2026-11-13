@@ -73,10 +73,12 @@
     "total": {
       "cancelled": 0,
       "count": 2,
+      "entered": 2,
       "expired": 0,
       "gaps": 0,
       "invalidated": 1,
       "mean_r": 0.3056,
+      "mean_r_entered": 0.3056,
       "probability": {
         "mean": 0.5,
         "observed": 0.5,
@@ -97,11 +99,13 @@
       {
         "cancelled": 0,
         "count": 1,
+        "entered": 1,
         "expired": 0,
         "gaps": 0,
         "invalidated": 0,
         "key": null,
         "mean_r": 1.7659,
+        "mean_r_entered": 1.7659,
         "probability": {
           "mean": 0.4,
           "observed": 1.0,
@@ -115,11 +119,13 @@
       {
         "cancelled": 0,
         "count": 1,
+        "entered": 1,
         "expired": 0,
         "gaps": 0,
         "invalidated": 1,
         "key": true,
         "mean_r": -1.1547,
+        "mean_r_entered": -1.1547,
         "probability": {
           "mean": 0.6,
           "observed": 0.0,
@@ -136,10 +142,12 @@
     "total": {
       "cancelled": 0,
       "count": 2,
+      "entered": 2,
       "expired": 0,
       "gaps": 0,
       "invalidated": 1,
       "mean_r": 0.3056,
+      "mean_r_entered": 0.3056,
       "probability": {
         "mean": 0.5,
         "observed": 0.5,
