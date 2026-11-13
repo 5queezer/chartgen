@@ -4941,3 +4941,38 @@ async fn a_monthly_bar_close_alert_made_on_the_31st_fires_at_that_months_close()
         "October closed after it"
     );
 }
+
+/// A bar_close alert's wake-up is made from its logged event like any other: no level,
+/// its condition, the bar's close as the price and no indicator, in the log as sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bar_close_wake_up_from_the_log_has_no_level() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("bar-close-wake-up");
+    let (a, _setups) = waking(store, port, "me", Limits::default());
+    let mut args = at_close("once");
+    args["notify_agent"] = json!(true);
+    let id = create(&a, args, "me").await;
+    let t = an_hour_ahead();
+    hour_close(&a, t, 101.5);
+    until("the wake-up", || !seen.lock().unwrap().is_empty()).await;
+
+    let raw = seen.lock().unwrap()[0].clone();
+    let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let alert = &body["alert"];
+    assert_eq!(alert["id"], id.as_str());
+    assert_eq!(alert["condition"], "bar_close");
+    assert!(alert.get("level").is_some_and(Value::is_null), "{alert}");
+    assert!(alert.get("indicator").is_none(), "{alert}");
+    assert_eq!(alert["price"], 101.5, "the bar's close");
+    assert_eq!(alert["bar_time"], t);
+    assert_eq!(
+        (alert["interval"].clone(), alert["evaluate_on"].clone()),
+        (json!("1h"), json!("close"))
+    );
+    // The log holds the same, for list_events.
+    let (logged, ..) = store.events_after("me", 0, 10).unwrap();
+    let what: Value = serde_json::from_str(&logged[0].body).unwrap();
+    assert_eq!(what["condition"], "bar_close");
+    assert!(what.get("level").is_some_and(Value::is_null), "{what}");
+    assert!(what.get("indicator").is_none(), "{what}");
+}
