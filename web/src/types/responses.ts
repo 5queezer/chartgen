@@ -1043,8 +1043,8 @@ const TrackRecordCountsSchema = z.object({
     stated_entered: z.number().int(),
     won_entered: z.number().int(),
     observed_entered: z.number().nullable(),
-  }),
-});
+  }).strict(),
+}).strict();
 
 /** One fixed exit variant over the closed setups that have one (ADR-0066). */
 const TrackRecordVariantSchema = z.object({
@@ -1053,9 +1053,15 @@ const TrackRecordVariantSchema = z.object({
   total_r: z.number(),
   /** Over `with_result`; null when that is 0. */
   mean_r: z.number().nullable(),
+  /**
+   * The canonical result over the same setups, the pair to compare with: v1's open ones
+   * are runners after T1, so its closed set leans to losers until they end.
+   */
+  canonical_total_r: z.number(),
+  canonical_mean_r: z.number().nullable(),
   /** Variants of closed setups that are still open, which they can be for a while. */
   open: z.number().int(),
-});
+}).strict();
 
 export const TrackRecordPayloadSchema = z.object({
   replay: z.boolean(),
@@ -1079,8 +1085,8 @@ export const TrackRecordPayloadSchema = z.object({
     v1_half_t1_be: TrackRecordVariantSchema,
     v2_be_at_1r: TrackRecordVariantSchema,
     v3_time_stop: TrackRecordVariantSchema,
-  }),
-});
+  }).strict(),
+}).strict();
 export type TrackRecordPayload = z.infer<typeof TrackRecordPayloadSchema>;
 
 // ---------------------------------------------------------------------------

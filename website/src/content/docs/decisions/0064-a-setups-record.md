@@ -5,7 +5,7 @@ sidebar:
   order: 64
 ---
 
-**Status:** Accepted
+**Status:** Proposed
 **Date:** 2026-11-11
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (a setup holds three
 stated fields that no tool changes after it is made, and a tool counts closed setups)
@@ -106,6 +106,11 @@ There is no migration.
   result, and how many are still open. A closed setup's variant can stay open for a while, so
   open ones are counted apart and not in the means. Only a filled setup has variants, so they
   are over fewer setups than the total, which is said wherever they are.
+- **Each variant is paired with the canonical result over the same setups**
+  (`canonical_total_r`, `canonical_mean_r`). The open variants are not a random part: an open
+  v1 is a runner after T1, a winner, so v1's closed set leans to losers until those end, while
+  the total holds every filled setup. A variant beside the total would read worse than it is;
+  beside its own pair it compares like with like. The tool's description says so.
 - A number a feature holds is grouped by its value: `1` and `1.0` are one group, written as
   `1.0`.
 

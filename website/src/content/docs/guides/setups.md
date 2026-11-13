@@ -233,7 +233,9 @@ one of `playbook_version`, one feature, the probability in tenths, symbol or dir
   `mean_r_entered` count only the setups whose entry was reached, and `observed_entered` is
   the share that won among those.
 - `shadows` puts the fixed exit variants side by side over the setups that traded, with
-  those whose variant is still open counted apart.
+  those whose variant is still open counted apart. **Compare each with its own canonical
+  figures,** not with the total: v1's open positions are the runners after T1, so until they
+  end its closed ones are mostly losers.
 - Skips are in it as well, scored with the server's bracket. Filter with `decision`.
 
 ## When the server was away

@@ -2082,6 +2082,11 @@ pub fn track_record(
 /// positions closed, the total and mean of their results, and how many are still open,
 /// which a closed setup's can be for a while. Only filled setups have variants, so these
 /// are over fewer setups than `total` is.
+///
+/// The open ones are not a random part: v1's are the runners after T1, which is to say
+/// winners, so its closed set leans to losers until they end. Each variant therefore
+/// also gives the canonical result over the very setups it has a result for, and only
+/// that pair compares like with like.
 pub fn shadow_record(closed: &[&Record]) -> Value {
     #[derive(Default)]
     struct Variant {
@@ -2089,9 +2094,15 @@ pub fn shadow_record(closed: &[&Record]) -> Value {
         with_result: u32,
         total_r: f64,
         open: u32,
+        /// The canonical results of the setups in `with_result` that have one.
+        canonical_with_result: u32,
+        canonical_total_r: f64,
     }
     let mut v: [Variant; 3] = Default::default();
-    for shadows in closed.iter().filter_map(|r| r.shadow_results.as_ref()) {
+    for (record, shadows) in closed
+        .iter()
+        .filter_map(|r| Some((r, r.shadow_results.as_ref()?)))
+    {
         let each = [
             &shadows.v1_half_t1_be,
             &shadows.v2_be_at_1r,
@@ -2106,15 +2117,22 @@ pub fn shadow_record(closed: &[&Record]) -> Value {
             if let Some(r) = shadow.result_r {
                 tally.with_result += 1;
                 tally.total_r += r;
+                if let Some(canonical) = record.result_r {
+                    tally.canonical_with_result += 1;
+                    tally.canonical_total_r += canonical;
+                }
             }
         }
     }
+    let per = |sum: f64, n: u32| (n > 0).then(|| sum / f64::from(n));
     let view = |t: &Variant| {
         json!({
             "closed": t.closed,
             "with_result": t.with_result,
             "total_r": t.total_r,
-            "mean_r": (t.with_result > 0).then(|| t.total_r / f64::from(t.with_result)),
+            "mean_r": per(t.total_r, t.with_result),
+            "canonical_total_r": t.canonical_total_r,
+            "canonical_mean_r": per(t.canonical_total_r, t.canonical_with_result),
             "open": t.open,
         })
     };

@@ -2977,8 +2977,10 @@ async fn the_track_record_counts_each_exit_variant_and_those_still_open() {
     let won = closed(&s, long(), "owner", true);
     let base = s.owned("owner", &id_of(&won)).unwrap();
     assert!(base.shadow_results.is_some(), "a filled setup has variants");
-    let with = |v1: Option<f64>, v2: f64, v3: Option<f64>| {
+    // A setup with its own result and each variant's, None for one still open.
+    let with = |canonical: f64, v1: Option<f64>, v2: f64, v3: Option<f64>| {
         let mut r = base.clone();
+        r.result_r = Some(canonical);
         let sh = r.shadow_results.as_mut().unwrap();
         let set = |shadow: &mut chartgen::setups::Shadow, result: Option<f64>| match result {
             Some(x) => {
@@ -2997,27 +2999,36 @@ async fn the_track_record_counts_each_exit_variant_and_those_still_open() {
     };
     let mut never = base.clone();
     never.fill = None;
+    never.result_r = Some(0.0);
     never.shadow_results = None;
+    // The winner's v1 is a runner after T1, still open: v1's closed ones are the others.
     let four = [
-        with(Some(1.5), 1.0, Some(0.5)),
-        with(None, -1.0, Some(-0.5)),
-        with(Some(0.5), 0.0, None),
+        with(2.0, None, 1.0, Some(1.5)),
+        with(-1.0, Some(-1.0), -1.0, Some(-0.5)),
+        with(-1.0, Some(-1.0), 0.0, None),
         never,
     ];
     let all: Vec<&Record> = four.iter().collect();
     let v = setups::shadow_record(&all);
     assert_eq!(
         v["v1_half_t1_be"],
-        json!({ "closed": 2, "with_result": 2, "total_r": 2.0, "mean_r": 1.0, "open": 1 })
+        json!({ "closed": 2, "with_result": 2, "total_r": -2.0, "mean_r": -1.0,
+            "canonical_total_r": -2.0, "canonical_mean_r": -1.0, "open": 1 })
     );
     assert_eq!(
         v["v2_be_at_1r"],
-        json!({ "closed": 3, "with_result": 3, "total_r": 0.0, "mean_r": 0.0, "open": 0 })
+        json!({ "closed": 3, "with_result": 3, "total_r": 0.0, "mean_r": 0.0,
+            "canonical_total_r": 0.0, "canonical_mean_r": 0.0, "open": 0 })
     );
     assert_eq!(
         v["v3_time_stop"],
-        json!({ "closed": 2, "with_result": 2, "total_r": 0.0, "mean_r": 0.0, "open": 1 })
+        json!({ "closed": 2, "with_result": 2, "total_r": 1.0, "mean_r": 0.5,
+            "canonical_total_r": 1.0, "canonical_mean_r": 0.5, "open": 1 })
     );
+    // v1 at -1 beside the entered mean of 0 would read as a worse exit; beside the same
+    // setups' canonical -1 it is no different, which is what is known so far.
+    let (total, _) = setups::track_record(&all, None).unwrap();
+    assert_eq!(total["mean_r_entered"], 0.0);
     // In the answer, beside the total.
     let answer = call(&s, "get_track_record", json!({}), "owner").unwrap();
     assert!(

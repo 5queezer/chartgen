@@ -1622,9 +1622,12 @@ many match the filters.
                        "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 } }
   ],
   "shadows": {
-    "v1_half_t1_be": { "closed": 2, "with_result": 2, "total_r": 2.4, "mean_r": 1.2, "open": 1 },
-    "v2_be_at_1r":   { "closed": 3, "with_result": 3, "total_r": 1.1, "mean_r": 0.37, "open": 0 },
-    "v3_time_stop":  { "closed": 3, "with_result": 3, "total_r": 1.8, "mean_r": 0.6, "open": 0 }
+    "v1_half_t1_be": { "closed": 2, "with_result": 2, "total_r": -0.4, "mean_r": -0.2,
+                       "canonical_total_r": -0.5, "canonical_mean_r": -0.25, "open": 1 },
+    "v2_be_at_1r":   { "closed": 3, "with_result": 3, "total_r": 1.1, "mean_r": 0.37,
+                       "canonical_total_r": 2.1, "canonical_mean_r": 0.7, "open": 0 },
+    "v3_time_stop":  { "closed": 3, "with_result": 3, "total_r": 1.8, "mean_r": 0.6,
+                       "canonical_total_r": 2.1, "canonical_mean_r": 0.7, "open": 0 }
   }
 }
 ```
@@ -1646,7 +1649,11 @@ many match the filters.
   setups among those counted, in all and not per group: how many of its positions `closed`,
   how many of those have a result, their `total_r` and `mean_r`, and how many are still
   `open`, which a closed setup's variant can be for a while. A setup that never traded has
-  no variants, so these are over fewer setups than `total`.
+  no variants, so these are over fewer setups than `total`. **Compare a variant only with
+  its own `canonical_total_r` and `canonical_mean_r`,** the setups' own results over the
+  very setups the variant has a result for. The open ones are not a random part: an open
+  `v1_half_t1_be` is a runner after T1, a winner, so v1's closed ones lean to losers until
+  those end, and v1 beside `total` would look worse than it is.
 - A feature's number is one value however it was written: `1` and `1.0` are one group, and
   a number key is written as a decimal (`1.0`). The string `"1"` is another group.
 - **It counts and judges nothing.** There is no significance and no ranking. A group of a few

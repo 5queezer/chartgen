@@ -356,6 +356,21 @@ describe("what a setup was made with, and the track record (ADR-0064)", () => {
     expect(grouped.groups.reduce((n, g) => n + g.count, 0)).toBe(grouped.total.count);
   });
 
+  it("refuses a field the server does not send, at every level of the record", () => {
+    const strict = (change: (r: Record<string, any>) => void) => {
+      const r = structuredClone(record.get_track_record_grouped) as Record<string, any>;
+      change(r);
+      return TrackRecordPayloadSchema.safeParse(r).success;
+    };
+    expect(strict(() => {})).toBe(true);
+    expect(strict((r) => (r.extra = 1))).toBe(false);
+    expect(strict((r) => (r.total.extra = 1))).toBe(false);
+    expect(strict((r) => (r.total.probability.extra = 1))).toBe(false);
+    expect(strict((r) => (r.groups[0].extra = 1))).toBe(false);
+    expect(strict((r) => (r.shadows.extra = 1))).toBe(false);
+    expect(strict((r) => (r.shadows.v1_half_t1_be.extra = 1))).toBe(false);
+  });
+
   it("refuses a group whose key is not a value a setup can state", () => {
     const bad = structuredClone(record.get_track_record_grouped) as { groups: { key: unknown }[] };
     bad.groups[0]!.key = { nested: 1 };
