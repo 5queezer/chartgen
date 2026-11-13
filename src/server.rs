@@ -1704,7 +1704,7 @@ async fn health_handler() -> Json<Value> {
     eprintln!("[MCP] GET / (health/discovery check)");
     Json(json!({
         "name": "chartgen",
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "protocol": "MCP",
         "protocolVersion": "2025-03-26",
         "status": "ok"

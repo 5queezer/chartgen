@@ -116,7 +116,7 @@ fn handle_initialize(id: Option<Value>) -> Value {
             },
             "serverInfo": {
                 "name": "chartgen",
-                "version": "0.1.0"
+                "version": env!("CARGO_PKG_VERSION")
             }
         }
     })
