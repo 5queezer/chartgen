@@ -193,6 +193,9 @@ pub enum Condition {
     CrossingDown,
     Greater,
     Less,
+    /// A bar of the alert's interval closed, whatever the price (ADR-0069). It has no
+    /// level and is always evaluated at the close.
+    BarClose,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +225,7 @@ fn fires(condition: Condition, prev: Option<f64>, d: f64) -> bool {
     match condition {
         Condition::Greater => d > 0.0,
         Condition::Less => d < 0.0,
+        Condition::BarClose => true,
         _ => prev.is_some_and(|p| crossed(condition, p, d)),
     }
 }
@@ -1124,14 +1128,24 @@ impl ServerAlerts {
         bar_time: i64,
     ) -> Option<(Option<f64>, f64, Option<f64>)> {
         let alert = st.alerts.get(id)?;
+        // A close fires an alert once: a feed can send it again after a restart.
+        if alert.fired_bar.is_some_and(|b| bar_time <= b) {
+            return None;
+        }
+        if alert.condition == Condition::BarClose {
+            // Not for a bar that closed before the alert was made (ADR-0069).
+            let closed_ms =
+                data::interval_secs(&alert.feed_interval).map(|s| (bar_time + s) * 1000);
+            if closed_ms.is_none_or(|t| t <= alert.created_at) {
+                return None;
+            }
+            return Some((None, 0.0, None));
+        }
         let Some(spec) = &alert.indicator else {
             let level = alert.level?;
             let prev = st.baselines.insert(id.to_string(), price);
             return Some((prev.map(|p| p - level), price - level, None));
         };
-        if alert.fired_bar.is_some_and(|b| bar_time <= b) {
-            return None;
-        }
         let bars = st.watches.get(key)?.bars.as_ref()?;
         let end = bars.partition_point(|b| bar_time_of(b).is_some_and(|t| t <= bar_time));
         if end == 0 || bar_time_of(&bars[end - 1]) != Some(bar_time) {
@@ -1201,7 +1215,7 @@ impl ServerAlerts {
         let at = now_ms();
         updated.last_triggered_at = Some(at);
         updated.fire_count += 1;
-        if updated.indicator.is_some() {
+        if updated.indicator.is_some() || updated.condition == Condition::BarClose {
             updated.fired_bar = Some(bar_time);
         }
         let events = self.prepare_deliveries(st, &mut updated, price, value, bar_time, at);
@@ -2219,29 +2233,41 @@ impl ServerAlerts {
                 "Server alerts run on Binance symbols only; {symbol} stays a browser alert"
             ));
         }
+        let condition: Condition = enum_arg(args, "condition")?.ok_or("condition is required")?;
+        let at_close = condition == Condition::BarClose;
         let interval = match args.get("interval") {
+            None | Some(Value::Null) if at_close => return Err(BAR_CLOSE_INTERVAL.into()),
             None | Some(Value::Null) => LIVE_FEED_INTERVAL.to_string(),
             Some(v) => v.as_str().ok_or("interval must be a string")?.to_string(),
         };
         let evaluate_on = enum_arg(args, "evaluate_on")?;
-        let condition: Condition = enum_arg(args, "condition")?.ok_or("condition is required")?;
         let trigger: Trigger = enum_arg(args, "trigger")?.ok_or("trigger is required")?;
-        let spec = indicator::parse(args)?;
-        let level = match spec {
-            Some(_) => None,
-            None => Some(level_arg(args)?.ok_or("level is required")?),
-        };
-        if spec.is_some() {
-            if evaluate_on != Some(EvaluateOn::Close) {
-                return Err("An indicator alert reads bar closes: send evaluate_on: close".into());
-            }
-            if data::interval_secs(&interval).is_none_or(|s| s < indicator::MIN_INTERVAL_SECS) {
-                return Err(format!(
-                    "An indicator alert reads closes of 1h or longer, not {interval}"
-                ));
-            }
+        if at_close {
+            bar_close_args(args, evaluate_on)?;
         }
-        let evaluate_on = evaluate_on.unwrap_or(EvaluateOn::Live);
+        let spec = indicator::parse(args)?;
+        let level = match (at_close, &spec) {
+            (true, _) | (false, Some(_)) => None,
+            (false, None) => Some(level_arg(args)?.ok_or("level is required")?),
+        };
+        if spec.is_some() && evaluate_on != Some(EvaluateOn::Close) {
+            return Err("An indicator alert reads bar closes: send evaluate_on: close".into());
+        }
+        // What either costs is per close (ADR-0067, ADR-0069).
+        if (spec.is_some() || at_close)
+            && data::interval_secs(&interval).is_none_or(|s| s < indicator::MIN_INTERVAL_SECS)
+        {
+            let what = if at_close {
+                "A bar_close alert fires at"
+            } else {
+                "An indicator alert reads"
+            };
+            return Err(format!("{what} closes of 1h or longer, not {interval}"));
+        }
+        let evaluate_on = match at_close {
+            true => EvaluateOn::Close,
+            false => evaluate_on.unwrap_or(EvaluateOn::Live),
+        };
         let message = message_arg(args)?.filter(|m| !m.is_empty());
         let (webhook_url, sign) = webhook_args(args)?;
         let webhook_url = webhook_url.filter(|u| !u.is_empty());
@@ -2355,9 +2381,12 @@ impl ServerAlerts {
             .and_then(Value::as_str)
             .ok_or("alert_id is required")?;
         // First: a stranger's URL must not cost a lookup, or answer anything about it.
-        let compare = match self.lock().alerts.get(id).filter(|a| a.owner == owner) {
+        let (compare, at_close) = match self.lock().alerts.get(id).filter(|a| a.owner == owner) {
             None => return Err("No such alert".into()),
-            Some(a) => a.indicator.as_ref().map(|s| s.compare),
+            Some(a) => (
+                a.indicator.as_ref().map(|s| s.compare),
+                a.condition == Condition::BarClose,
+            ),
         };
         for field in ["indicator", "params", "line", "compare"] {
             if args.get(field).is_some_and(|v| !v.is_null()) {
@@ -2367,10 +2396,20 @@ impl ServerAlerts {
             }
         }
         let condition: Option<Condition> = enum_arg(args, "condition")?;
+        // A time is not a reading: neither kind becomes the other (ADR-0069).
+        if condition.is_some_and(|c| (c == Condition::BarClose) != at_close) {
+            return Err(
+                "An alert cannot become a bar_close alert or stop being one: delete it and create another".into(),
+            );
+        }
         let trigger: Option<Trigger> = enum_arg(args, "trigger")?;
-        let level = match compare {
-            None => level_arg(args)?,
-            Some(compare) => indicator::level_arg(args, compare)?,
+        let level = match (at_close, compare) {
+            (true, _) if args.get("level").is_some_and(|v| !v.is_null()) => {
+                return Err(NO_LEVEL.into())
+            }
+            (true, _) => None,
+            (false, None) => level_arg(args)?,
+            (false, Some(compare)) => indicator::level_arg(args, compare)?,
         };
         let message = message_arg(args)?;
         let active = match args.get("active") {
@@ -2594,6 +2633,30 @@ impl ServerAlerts {
         }
         view
     }
+}
+
+const NO_LEVEL: &str =
+    "A bar_close alert takes no level: it fires at every close, whatever the price";
+const BAR_CLOSE_INTERVAL: &str =
+    "A bar_close alert needs an interval of 1h or longer: the bars whose close it waits for";
+
+/// What a `bar_close` alert refuses (ADR-0069): it is a time, not a reading, so it
+/// takes no level and no indicator, and it is evaluated at the close.
+fn bar_close_args(args: &Value, evaluate_on: Option<EvaluateOn>) -> Result<(), String> {
+    for field in ["indicator", "params", "line", "compare"] {
+        if args.get(field).is_some_and(|v| !v.is_null()) {
+            return Err(format!(
+                "A bar_close alert fires at every close; it takes no {field}"
+            ));
+        }
+    }
+    if args.get("level").is_some_and(|v| !v.is_null()) {
+        return Err(NO_LEVEL.into());
+    }
+    if evaluate_on == Some(EvaluateOn::Live) {
+        return Err("A bar_close alert is evaluated at the close; leave evaluate_on out".into());
+    }
+    Ok(())
 }
 
 /// An alert has one webhook, its own URL or the agent's receiver, since it has one

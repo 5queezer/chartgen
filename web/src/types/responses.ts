@@ -631,7 +631,8 @@ export const ServerAlertSchema = z.object({
   symbol: z.string(),
   interval: z.string(),
   evaluate_on: z.enum(["live", "close"]),
-  condition: z.enum(["crossing", "crossing_up", "crossing_down", "greater", "less"]),
+  /** bar_close: at every close of the interval, with no level (ADR-0069). */
+  condition: z.enum(["crossing", "crossing_up", "crossing_down", "greater", "less", "bar_close"]),
   /** Null only on an indicator alert that compares the close with the line (ADR-0067). */
   level: z.number().nullable(),
   trigger: z.enum(["once", "every"]),

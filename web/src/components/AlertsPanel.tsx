@@ -25,8 +25,10 @@ import {
 import { setSymbol, symbol } from "../stores/layout";
 import {
   deleteServerAlert,
+  editsInDialog,
   serverAlertCondition,
   serverAlertError,
+  serverConditionLabel,
   serverAlerts,
   serverAlertsEnabled,
   serverAlertStatus,
@@ -224,10 +226,10 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
       <div class="flex-1 min-w-0">
         <div class="truncate" data-role="description">
           <Show
-            when={a().indicator}
+            when={!editsInDialog(a())}
             fallback={
               <>
-                {CONDITION_LABELS[a().condition]}{" "}
+                {serverConditionLabel(a().condition)}{" "}
                 <span class="font-semibold tabular-nums">{formatPrice(a().level ?? 0)}</span>
               </>
             }
@@ -268,8 +270,8 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
         </Show>
       </div>
       <div class="flex shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
-        {/* The dialog edits price alerts; an indicator alert changes through the tools. */}
-        <Show when={!a().indicator}>
+        {/* The dialog edits price alerts; the others change through the tools. */}
+        <Show when={editsInDialog(a())}>
           <button
             type="button"
             class={iconButtonClass}

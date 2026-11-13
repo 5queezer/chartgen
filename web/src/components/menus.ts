@@ -15,7 +15,12 @@ import {
 } from "../stores/indicators";
 import { setSymbol } from "../stores/layout";
 import { paramDefaults } from "../stores/layouts";
-import { deleteServerAlert, serverAlertError, updateServerAlert } from "../stores/serverAlerts";
+import {
+  deleteServerAlert,
+  editsInDialog,
+  serverAlertError,
+  updateServerAlert,
+} from "../stores/serverAlerts";
 import type { SeriesPayload, ServerAlert } from "../types/responses";
 import { openAlertDialog } from "./AlertDialog";
 import type { MenuItem, MenuSpec } from "./ContextMenu";
@@ -46,10 +51,10 @@ export function serverAlertMenu(a: ServerAlert, chartSymbol: string): MenuSpec {
   return {
     label: "Alert actions",
     items: [
-      // The dialog edits price alerts; an indicator alert changes through the tools.
-      ...(a.indicator
-        ? []
-        : [{ label: "Edit…", onSelect: () => openAlertDialog({ serverId: a.id }) }]),
+      // The dialog edits price alerts; the others change through the tools.
+      ...(editsInDialog(a)
+        ? [{ label: "Edit…", onSelect: () => openAlertDialog({ serverId: a.id }) }]
+        : []),
       {
         label: a.active ? "Pause" : "Resume",
         onSelect: () => send(updateServerAlert({ alert_id: a.id, active: !a.active })),

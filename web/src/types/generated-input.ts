@@ -42,9 +42,9 @@ export interface CreateServerAlertInput {
    */
   compare?: "level" | "close";
   /**
-   * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's.
+   * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's. bar_close: a bar of the interval closed, whatever the price; it needs an interval of 1h or longer, takes no level, indicator or compare, and an alert cannot change into or out of it.
    */
-  condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+  condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less" | "bar_close";
   /**
    * live: every price update, like a browser alert. close: only when a bar of the interval closes.
    */
@@ -54,11 +54,11 @@ export interface CreateServerAlertInput {
    */
   indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
   /**
-   * Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert.
+   * Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert. Required with condition bar_close, 1h or longer.
    */
   interval?: string;
   /**
-   * The price level, greater than 0. With indicator, the level the line is compared with, any number; none with compare: close.
+   * The price level, greater than 0. With indicator, the level the line is compared with, any number; none with compare: close or condition: bar_close.
    */
   level?: number;
   /**
@@ -844,11 +844,11 @@ export interface UpdateServerAlertInput {
    */
   alert_id: string;
   /**
-   * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's.
+   * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's. bar_close: a bar of the interval closed, whatever the price; it needs an interval of 1h or longer, takes no level, indicator or compare, and an alert cannot change into or out of it.
    */
-  condition?: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+  condition?: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less" | "bar_close";
   /**
-   * The price level, greater than 0, or an indicator alert's level, any number. Not on an alert with compare: close.
+   * The price level, greater than 0, or an indicator alert's level, any number. Not on an alert with compare: close or condition: bar_close.
    */
   level?: number;
   /**

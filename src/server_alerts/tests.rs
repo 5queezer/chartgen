@@ -4703,3 +4703,213 @@ async fn a_wake_up_for_a_deleted_alert_says_what_the_alert_was() {
     );
     assert!(body.get("note").is_none());
 }
+
+// ---- ADR-0069: an alert at a bar's close ----
+
+/// The open time of a 1h bar that closes after now: an alert only fires for a bar that
+/// closed after it was made.
+fn an_hour_ahead() -> i64 {
+    (chrono::Utc::now().timestamp() / HOUR + 2) * HOUR
+}
+
+fn at_close(trigger: &str) -> Value {
+    json!({ "symbol": "BTCUSDT", "interval": "1h", "condition": "bar_close", "trigger": trigger })
+}
+
+fn hour_close(a: &ServerAlerts, t: i64, price: f64) {
+    a.on_event(&key("1h"), FeedEvent::Bar(bar(t, price)));
+}
+
+fn hour_tick(a: &ServerAlerts, t: i64, price: f64) {
+    a.on_event(&key("1h"), FeedEvent::Tick(bar(t, price)));
+}
+
+/// A `bar_close` alert fires when a bar of its interval closes, whatever the price,
+/// and at nothing else: not at a price that moves, and not twice for one bar. Its
+/// webhook body says so, with no level and no indicator.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bar_close_alert_fires_at_each_close_and_at_nothing_else() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("bar-close");
+    let a = alerts_on(store, local(port), Limits::default());
+    let mut args = at_close("every");
+    args["webhook_url"] = json!(format!("http://127.0.0.1:{port}/hook"));
+    let made = call(&a, "create_server_alert", args, "me").await.unwrap();
+    let id = made["id"].as_str().unwrap().to_string();
+    assert_eq!(made["condition"], "bar_close");
+    assert_eq!(
+        made["evaluate_on"], "close",
+        "nothing else to evaluate it on"
+    );
+    assert!(made["level"].is_null(), "it has no level: {made}");
+    assert!(made.get("indicator").is_none(), "{made}");
+    let once = create(&a, at_close("once"), "me").await;
+    // Stored with no level at all, as an indicator alert on the close is.
+    let row = a.lock().alerts[&id].json();
+    assert!(!row.contains("\"level\""), "{row}");
+
+    let t = an_hour_ahead();
+    hour_tick(&a, t, 100.0);
+    hour_tick(&a, t, 250.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0, "a price is not a close");
+    hour_close(&a, t, 101.5);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    assert_eq!(a.lock().alerts[&id].fired_bar, Some(t));
+    // The same bar again, as a backfill sends it.
+    hour_close(&a, t, 101.5);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    hour_tick(&a, t + HOUR, 90.0);
+    hour_close(&a, t + HOUR, 90.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2, "and again at the next");
+    {
+        let st = a.lock();
+        assert!(st.alerts[&id].active, "it repeats");
+        assert_eq!(
+            st.alerts[&once].fire_count, 1,
+            "a once alert fired at the first"
+        );
+        assert!(!st.alerts[&once].active);
+    }
+
+    until("both deliveries", || seen.lock().unwrap().len() == 2).await;
+    let bodies: Vec<Value> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|raw| serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap())
+        .collect();
+    let first = bodies.iter().find(|b| b["bar_time"] == t).unwrap();
+    assert_eq!(first["condition"], "bar_close");
+    assert_eq!(first["price"], 101.5, "the bar's close");
+    assert!(first.get("level").is_some_and(Value::is_null), "{first}");
+    assert!(first.get("indicator").is_none(), "{first}");
+    assert_eq!(
+        (first["interval"].clone(), first["evaluate_on"].clone()),
+        (json!("1h"), json!("close"))
+    );
+    let listed = get(&a, "me", &id).await;
+    assert!(listed["level"].is_null(), "{listed}");
+}
+
+/// It is an alert like any other where limits are counted, and it takes nothing that
+/// contradicts it: no level, no indicator, no live evaluation, nothing under 1h, and
+/// no change into or out of its kind.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bar_close_alert_takes_no_level_or_indicator_and_keeps_its_kind() {
+    let (store, _) = store_at("bar-close-rules");
+    let limits = Limits {
+        alerts_per_client: 2,
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    for (change, why) in [
+        (json!({ "level": 100.0 }), "takes no level"),
+        (json!({ "evaluate_on": "live" }), "evaluated at the close"),
+        (
+            json!({ "interval": null }),
+            "needs an interval of 1h or longer",
+        ),
+        (
+            json!({ "interval": "15m" }),
+            "closes of 1h or longer, not 15m",
+        ),
+        (json!({ "interval": "1m" }), "not 1m"),
+        (json!({ "indicator": "rsi" }), "takes no indicator"),
+        (json!({ "params": { "length": 14 } }), "takes no params"),
+        (json!({ "compare": "close" }), "takes no compare"),
+        (json!({ "line": "RSI" }), "takes no line"),
+    ] {
+        let mut args = at_close("once");
+        for (k, v) in change.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        let refused = call(&a, "create_server_alert", args, "me")
+            .await
+            .unwrap_err();
+        assert!(refused.contains(why), "{change}: {refused}");
+    }
+    // evaluate_on close is what it is anyway, and 4h is fine.
+    let mut args = at_close("once");
+    args["evaluate_on"] = json!("close");
+    args["interval"] = json!("4h");
+    let id = create(&a, args, "me").await;
+    let priced = create(&a, spec("greater", "once", 100.0), "me").await;
+    for (alert, change, why) in [
+        (&id, json!({ "level": 100.0 }), "takes no level"),
+        (&id, json!({ "condition": "greater" }), "cannot become"),
+        (
+            &priced,
+            json!({ "condition": "bar_close" }),
+            "cannot become",
+        ),
+    ] {
+        let mut args = change.clone();
+        args["alert_id"] = json!(alert);
+        let refused = call(&a, "update_server_alert", args, "me")
+            .await
+            .unwrap_err();
+        assert!(refused.contains(why), "{change}: {refused}");
+    }
+    // What does not touch its kind is taken.
+    let noted = json!({ "alert_id": id, "trigger": "every", "message": "example note" });
+    let view = call(&a, "update_server_alert", noted, "me").await.unwrap();
+    assert_eq!(
+        (
+            view["trigger"].clone(),
+            view["condition"].clone(),
+            view["level"].clone()
+        ),
+        (json!("every"), json!("bar_close"), Value::Null)
+    );
+    // It counts among the owner's alerts.
+    let refused = call(&a, "create_server_alert", at_close("once"), "me")
+        .await
+        .unwrap_err();
+    assert!(refused.contains("Limit reached"), "{refused}");
+}
+
+/// A close the server did not see is not made up afterwards. After a restart an alert
+/// fires at the next close it sees, with that bar's time; never for a bar it already
+/// fired for, and never for one that closed before the alert was made.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bar_close_alert_after_a_restart_fires_at_the_next_close_it_sees() {
+    let (store, _) = store_at("bar-close-restart");
+    let a = alerts_on(store, Policy::default(), Limits::default());
+    let every = create(&a, at_close("every"), "me").await;
+    let once = create(&a, at_close("once"), "me").await;
+    let t = an_hour_ahead();
+    // A bar that closed before the alerts were made, as a feed can send it on joining.
+    hour_close(&a, t - 10 * HOUR, 100.0);
+    assert_eq!(a.lock().alerts[&every].fire_count, 0);
+    hour_close(&a, t, 100.0);
+    assert_eq!(a.lock().alerts[&every].fire_count, 1);
+    assert_eq!(a.lock().alerts[&once].fire_count, 1);
+    drop(a);
+
+    // The server was away while the bars t+1h .. t+4h closed.
+    let a = alerts_on(store, Policy::default(), Limits::default());
+    assert_eq!(a.lock().alerts[&every].fire_count, 1, "restored");
+    assert_eq!(a.lock().alerts[&every].fired_bar, Some(t), "restored");
+    // On joining, the bar it already fired for comes once more.
+    hour_close(&a, t, 100.0);
+    assert_eq!(
+        a.lock().alerts[&every].fire_count,
+        1,
+        "not twice for one bar"
+    );
+    hour_tick(&a, t + 5 * HOUR, 100.0);
+    assert_eq!(
+        a.lock().alerts[&every].fire_count,
+        1,
+        "nothing for what it missed"
+    );
+    hour_close(&a, t + 5 * HOUR, 100.0);
+    let st = a.lock();
+    assert_eq!(st.alerts[&every].fire_count, 2, "the next close it sees");
+    assert_eq!(st.alerts[&every].fired_bar, Some(t + 5 * HOUR));
+    assert_eq!(
+        st.alerts[&once].fire_count, 1,
+        "a once alert that fired stays spent"
+    );
+}

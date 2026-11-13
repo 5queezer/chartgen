@@ -611,8 +611,8 @@ pub const SERVER_ALERT_TOOLS: [&str; 6] = [
 pub fn server_alert_tools() -> Vec<Value> {
     let condition = json!({
         "type": "string",
-        "enum": ["crossing", "crossing_up", "crossing_down", "greater", "less"],
-        "description": "crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's."
+        "enum": ["crossing", "crossing_up", "crossing_down", "greater", "less", "bar_close"],
+        "description": "crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's. bar_close: a bar of the interval closed, whatever the price; it needs an interval of 1h or longer, takes no level, indicator or compare, and an alert cannot change into or out of it."
     });
     let trigger = json!({
         "type": "string",
@@ -627,10 +627,10 @@ pub fn server_alert_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "symbol": { "type": "string", "description": "Binance symbol, e.g. BTCUSDT." },
-                    "interval": { "type": "string", "description": "Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert.", "default": "1m" },
+                    "interval": { "type": "string", "description": "Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert. Required with condition bar_close, 1h or longer.", "default": "1m" },
                     "evaluate_on": { "type": "string", "enum": ["live", "close"], "description": "live: every price update, like a browser alert. close: only when a bar of the interval closes.", "default": "live" },
                     "condition": condition.clone(),
-                    "level": { "type": "number", "description": "The price level, greater than 0. With indicator, the level the line is compared with, any number; none with compare: close." },
+                    "level": { "type": "number", "description": "The price level, greater than 0. With indicator, the level the line is compared with, any number; none with compare: close or condition: bar_close." },
                     "trigger": trigger.clone(),
                     "indicator": { "type": "string", "enum": ["rsi", "ma", "macd", "stoch", "cci", "mfi", "williams_r", "roc", "atr", "adx"], "description": "Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: \"ema\", length: 50}. Fixed after creation." },
                     "params": { "type": "object", "additionalProperties": true, "description": "The indicator's params, as list_indicators lists them, e.g. {length: 14}. A name it does not take is refused; the alert keeps every param with its default filled in. Its history must fit in 999 bars (EMA 200 does); stoch, cci, mfi, williams_r and roc take at most 200 per param; offset is not taken." },
@@ -660,7 +660,7 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "alert_id": { "type": "string", "description": "The alert's id." },
                     "active": { "type": "boolean", "description": "Pause (false) or resume (true)." },
                     "condition": condition,
-                    "level": { "type": "number", "description": "The price level, greater than 0, or an indicator alert's level, any number. Not on an alert with compare: close." },
+                    "level": { "type": "number", "description": "The price level, greater than 0, or an indicator alert's level, any number. Not on an alert with compare: close or condition: bar_close." },
                     "trigger": trigger,
                     "message": { "type": "string", "maxLength": 200, "description": "Your note; an empty string removes it." },
                     "webhook_url": { "type": "string", "maxLength": 512, "description": "New https URL, or an empty string to remove the webhook." },

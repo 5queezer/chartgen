@@ -52,6 +52,7 @@ import {
 import { symbol as chartSymbol } from "../stores/layout";
 import {
   createServerAlert,
+  editsInDialog,
   serverAlertError,
   serverAlerts,
   serverAlertsCanCreate,
@@ -141,8 +142,9 @@ export interface OpenAlertOptions {
 /** Open the dialog to create an alert (or edit one with `id`). */
 export function openAlertDialog(opts: OpenAlertOptions = {}): void {
   const onServer = serverAlerts().find((a) => a.id === opts.serverId);
-  // The dialog edits price alerts only; an indicator alert's level is not a price.
-  if (onServer?.indicator) return;
+  // The dialog edits price alerts only: an indicator alert's level is not a price, and
+  // a bar_close alert has none.
+  if (onServer && !editsInDialog(onServer)) return;
   if (onServer) {
     setDraft({
       ...SERVER_DEFAULTS,
