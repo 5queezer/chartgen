@@ -1101,8 +1101,11 @@ export const LoggedEventSchema = z.discriminatedUnion("type", [
       evaluate_on: z.enum(["live", "close"]),
       trigger: z.enum(["once", "every"]),
       price: z.number(),
-      /** The level the fire compared with; with compare: close, the line's value. */
-      level: z.number(),
+      /**
+       * The level the fire compared with; with compare: close, the line's value; null for
+       * an alert that has no level, as one that fires at a bar's close.
+       */
+      level: z.number().nullable(),
       condition: z.string(),
       bar_time: z.number(),
       fire_count: z.number().int(),

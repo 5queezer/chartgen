@@ -2138,6 +2138,11 @@ async fn a_status_the_server_gives_a_setup_is_logged_at_the_bars_time_and_wakes_
     // The event says what happened then; the setup is shown as it is when it is sent.
     assert_eq!(filled["setup"]["id"], id_of(&setup).as_str());
     assert_eq!(filled["setup"]["thesis"], "example thesis");
+    // A filled setup's exit variants (ADR-0066), as get_setup has them.
+    let variants = &filled["setup"]["shadow_results"];
+    for v in ["v1_half_t1_be", "v2_be_at_1r", "v3_time_stop"] {
+        assert!(variants[v]["status"].is_string(), "{v}: {variants}");
+    }
     assert!(filled.get("alert").is_none() && filled.get("note").is_none());
     let raw = seen.lock().unwrap()[0].clone();
     assert!(raw.find("\"change\":").unwrap() < raw.find("\"setup\":").unwrap());

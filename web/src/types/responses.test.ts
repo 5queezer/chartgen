@@ -286,6 +286,17 @@ describe("list_events (ADR-0061)", () => {
     ).toThrow();
   });
 
+  it("parses a fire that had no level", () => {
+    const p = EventsPayloadSchema.parse({
+      events: [{ ...fired, what: { ...fired.what, level: null } }],
+      cursor: 1,
+      more: false,
+      truncated: false,
+    });
+    const what = p.events[0]?.what;
+    expect(what && "level" in what ? what.level : undefined).toBeNull();
+  });
+
   it("parses both kinds of event and the paging fields", () => {
     const p = EventsPayloadSchema.parse({
       events: [fired, status],

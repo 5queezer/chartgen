@@ -1484,7 +1484,8 @@ kept, and repeats while `more` is true.**
 - `delivery`: `none` (logged only), `waiting`, `delivered`, `failed` (given up, or refused
   by the receiver), `dropped` (too many were waiting).
 - An event holds no thesis and no note. Read the setup or the alert for those.
-- An `alert.fired` event says what the fire saw: `level` is the level it compared with, and
+- An `alert.fired` event says what the fire saw: `level` is the level it compared with
+  (`null` for an alert that has none), and
   an [indicator alert](#indicator-alerts-on-the-server)'s also has `indicator` with the line's
   `value` at that close, and with `compare: "close"` that value as `level`. It also holds the
   alert's `symbol`, `interval`, `evaluate_on`, `condition` and `trigger` at the fire. The
