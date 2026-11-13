@@ -1610,6 +1610,17 @@ fn replay_conflict(engine: bool, alerts: bool, setups: bool, signin: bool) -> Op
     .find_map(|(on, what)| on.then_some(what))
 }
 
+/// The address to listen on: `CHARTGEN_BIND`, an IP, or every interface when unset.
+fn bind_ip() -> Result<std::net::IpAddr, String> {
+    match std::env::var("CHARTGEN_BIND") {
+        Ok(v) if !v.trim().is_empty() => v
+            .trim()
+            .parse()
+            .map_err(|_| format!("CHARTGEN_BIND={v} is not an IP address")),
+        _ => Ok(std::net::Ipv4Addr::UNSPECIFIED.into()),
+    }
+}
+
 /// Make this a replay server if `CHARTGEN_REPLAY_FIXTURES` says so (ADR-0059). A replay
 /// answers from fixtures only, so it refuses to be anything else as well: no engine, no
 /// sign-in, no server alerts.
@@ -2138,8 +2149,18 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     let app = app.with_state(state);
 
     listener::keep_freed_memory_down();
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let ip = bind_ip().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
+    let addr = std::net::SocketAddr::new(ip, port);
     println!("MCP server listening on {}", addr);
+    if crate::replay::global().is_some() {
+        println!("Replay server bound to {addr}");
+        if !crate::replay::private_address(ip) {
+            eprintln!("[replay] WARNING: {ip} is neither loopback nor a Tailscale address: anyone who can reach this port can register and move the replay's one clock. Set CHARTGEN_BIND to this host's Tailscale address, or keep the port off other networks, as a container that publishes it on a private address only does (ADR-0068).");
+        }
+    }
     // `tap_io` does nothing here: axum gives the peer's address to tapped listeners and
     // to its own `TcpListener` only.
     let listener =

@@ -3,6 +3,7 @@ mod fetch;
 mod intrabars;
 mod mcp;
 mod replay;
+mod replay_fixtures;
 mod search;
 mod server;
 #[cfg(feature = "scripting")]
@@ -76,6 +77,15 @@ struct Cli {
     /// Use Binance testnet (paper trading)
     #[arg(long)]
     testnet: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Write replay fixtures of real Binance 1m bars, for CHARTGEN_REPLAY_FIXTURES (ADR-0068)
+    ReplayFixtures(replay_fixtures::Args),
 }
 
 fn main() {
@@ -83,6 +93,14 @@ fn main() {
     #[cfg(feature = "scripting")]
     chartgen::scripting::persistence::open_on_demand();
     let cli = Cli::parse();
+
+    if let Some(Command::ReplayFixtures(args)) = &cli.command {
+        if let Err(e) = replay_fixtures::run(args) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // A replay answers over HTTP, where a call has an owner and a clock. Any other mode
     // would read live prices while the caller believes it is replaying.

@@ -39,6 +39,7 @@ fn replay_server(name: &str) -> Server {
         .env_clear()
         .env("HOME", &home)
         .env("CHARTGEN_REPLAY_FIXTURES", fixtures)
+        .env("CHARTGEN_BIND", "127.0.0.1")
         .current_dir(&home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
