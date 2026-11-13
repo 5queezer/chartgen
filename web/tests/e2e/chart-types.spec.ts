@@ -52,6 +52,10 @@ const CASES: Case[] = [
   { label: "HLC area", probes: [LINE_EDGES], min: 1000 },
 ];
 
+// Solid up-candle blocks (`candleBlocks`) with candles shown. Over 90 sample clocks
+// at this viewport they number 600 to 3646, and 0 under every other type.
+const CANDLE_BLOCKS = 150;
+
 /** Pixels per probe on the price pane's canvases (below the first legend row). */
 const priceCounts = (page: Page, probes: Probe[]) =>
   page.evaluate((probes) => {
@@ -84,6 +88,52 @@ const priceCounts = (page: Page, probes: Probe[]) =>
     }
     return out;
   }, probes);
+
+/**
+ * Opaque up-color pixels at the center of a solid 3x3 block on the price pane: the
+ * bodies of up candles. A line of 2 px or less never makes one, so neither the
+ * series' own lines (HLC area's high edge, Baseline's upper line) nor the dashed last
+ * price line count. That line turns the up color whenever a live tick leaves the
+ * forming bar up, and the up color's whole count also moves with the sample data's
+ * clock, so a share of it could not tell hidden candles from shown ones.
+ */
+const candleBlocks = (page: Page) =>
+  page.evaluate(() => {
+    const label = document.querySelector(".pane-header-label");
+    if (!label) return 0;
+    const y = label.getBoundingClientRect().bottom + 20;
+    let blocks = 0;
+    for (const canvas of document.querySelectorAll<HTMLCanvasElement>(
+      ".chart-container canvas",
+    )) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width < 300 || y < rect.top || y >= rect.bottom) continue;
+      const ctx = canvas.getContext("2d");
+      const { width: w, height: h } = canvas;
+      if (!ctx || w === 0 || h === 0) continue;
+      const d = ctx.getImageData(0, 0, w, h).data;
+      const up = new Uint8Array(w * h);
+      for (let p = 0; p < w * h; p++) {
+        const i = p * 4;
+        up[p] = Number(
+          d[i + 3]! >= 250 &&
+            Math.abs(d[i]! - 0x26) <= 8 &&
+            Math.abs(d[i + 1]! - 0xa6) <= 8 &&
+            Math.abs(d[i + 2]! - 0x9a) <= 8,
+        );
+      }
+      for (let r = 1; r < h - 1; r++) {
+        for (let c = 1; c < w - 1; c++) {
+          let solid = true;
+          for (let k = 0; k < 9 && solid; k++) {
+            solid = up[(r + Math.floor(k / 3) - 1) * w + c + (k % 3) - 1] === 1;
+          }
+          if (solid) blocks++;
+        }
+      }
+    }
+    return blocks;
+  });
 
 async function pickChartType(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: /^Chart type/ }).click();
@@ -260,19 +310,16 @@ test.describe("chart types", () => {
     }) => {
       // Sample the baseline only once the candles are painted.
       await expect
-        .poll(async () => (await priceCounts(page, [BULL]))[0], { timeout: 15_000 })
-        .toBeGreaterThan(1000);
+        .poll(() => candleBlocks(page), { timeout: 15_000 })
+        .toBeGreaterThan(CANDLE_BLOCKS);
       const base = await priceCounts(page, c.probes);
-      const [candles] = await priceCounts(page, [BULL]);
       await pickChartType(page, c.label);
       await expect
         .poll(() => minGain(page, c.probes, base), { timeout: 15_000 })
         .toBeGreaterThan(c.min);
-      // klinecharts' own candles are hidden: what is left in the up color is
-      // the last price line. Baseline draws its upper line in that color.
-      if (c.label !== "Baseline") {
-        expect((await priceCounts(page, [BULL]))[0]).toBeLessThan(candles! / 4);
-      }
+      // klinecharts' own candles are hidden: not one up body is left. Read once,
+      // after the type has painted, so a retry cannot wait out candles that show.
+      expect(await candleBlocks(page)).toBe(0);
       await expectLegend(page);
       // The crosshair legend still reads the hovered bar's OHLC.
       const box = (await page.locator(".chart-host").boundingBox())!;
@@ -291,8 +338,8 @@ test.describe("chart types", () => {
 
       await pickChartType(page, "Candles");
       await expect
-        .poll(async () => (await priceCounts(page, [BULL]))[0], { timeout: 15_000 })
-        .toBeGreaterThan(1000);
+        .poll(() => candleBlocks(page), { timeout: 15_000 })
+        .toBeGreaterThan(CANDLE_BLOCKS);
       await expect.poll(() => minGain(page, c.probes, base)).toBeLessThan(c.min / 2);
     });
   }
