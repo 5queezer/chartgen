@@ -115,6 +115,50 @@ the server kept it.
 There is no separate exit reason: `status` says it. `won` is the first target, `invalidated` the
 invalidation, `expired` the expiry and `cancelled` your cancel.
 
+## Shadow results
+
+A setup is scored all out at its first target. To compare ways of managing the exit without
+committing to one, the server also scores every filled setup with three fixed **exit variants**
+on the same 1m bars, under `shadow_results`
+([ADR-0066](/chartgen/decisions/0066-shadow-exit-variants/)). They are for comparison only:
+`status` and `result_r` never change because of them, and you cannot choose or change them.
+
+| Variant | Rule |
+|---|---|
+| `v1_half_t1_be` | Half out at T1. The other half runs to T2 with its stop moved to break-even after costs, or to T1 where T1 is nearer the fill than that. With one target it runs until that stop or the expiry. |
+| `v2_be_at_1r` | All out at T1. Once price has gone +1R from the fill, the stop moves to break-even after costs. |
+| `v3_time_stop` | The setup as it is, but if T1 and the stop have not been reached by the close of the 12th bar of its interval after the fill bar (the 6th for 4h and longer), out at that close when it is below +0.5R. |
+
+- **Break-even after costs** is the price where an exit scores 0 R with the assumed fee and
+  slippage on both sides: a little above the fill for a long, a little below for a short.
+- **R** for the +1R and +0.5R rules is measured from the fill with the bars' highs, lows and
+  closes, before costs, as `mfe_r` is. The bars of the interval are the ones every chart here
+  uses: hours from the epoch, days from midnight UTC, weeks from Monday.
+- **The same rules as the setup:** the fill bar can stop a variant but cannot move its stop or
+  win it; a bar that reaches a stop and a target counts the stop; a bar that opens past a stop is
+  out at its open. A stop a variant moves counts **from the next bar**, so a bar that takes T1 or
+  reaches +1R and then falls back to the fill does not stop it out. A cancel or the expiry closes
+  every open variant at that bar's open, as it does the setup.
+- **A variant can outlive the setup.** v1's other half is still in after the setup was closed at
+  T1, and the server keeps scoring it until it is out or the setup's expiry. That keeps the
+  symbol's feed watched, but the setup is closed: it does not count as open, toward the limit
+  of open setups or of symbols.
+
+Each variant has:
+
+- `status`: `open`, `won` (its last target), `stopped` (out at or through the invalidation, also
+  when a gap went past a moved stop to it), `breakeven` (the moved stop was hit; its result is
+  near 0 R, a little under after a gap through the stop or when v1's stop is T1 because T1 is
+  nearer the fill than the costs), `timed_out`, `expired` or `cancelled`.
+- `result_r`: each part's R net of its own costs, weighted by its share. Null while open.
+- `stop`: the stop in force from the next bar on.
+- `exits`: each part closed, `{price, fraction, bar_time}`; v1 has two once both halves are out.
+- `exited_at`: the open time of the 1m bar of the last exit.
+- `time_stop_at`: v3 only, the time its time stop is judged; null once it was.
+
+`shadow_results` is null before the fill, on a setup never filled, and on setups filled before
+the server kept them.
+
 ## Tags
 
 `tags` labels a setup so that you can group your track record: `strategy:retest-short`,
@@ -165,6 +209,10 @@ that was not scored, and the setup's `gap` field is true from then on. Treat a r
 If the operator takes your account off the server's list, your setups are no longer scored. You
 can still read them. One that runs out meanwhile is marked `expired` with `gap: true`: at 0 R if
 it was never filled, and with no result (`result_r: null`) if it was, since no price was read.
+Its open shadow results end the same way, as `expired` with no result.
+
+A gap in bars after the setup closed, while only a shadow result was being scored, is in the
+log, but leaves `gap` false: the setup's own result covers all of its bars.
 
 ## Being woken about a setup
 

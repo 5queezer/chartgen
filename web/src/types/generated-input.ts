@@ -66,7 +66,7 @@ export interface CreateServerAlertInput {
    */
   push?: boolean;
   /**
-   * One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, thesis).
+   * One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, shadow results, thesis).
    */
   setup_id?: string;
   /**

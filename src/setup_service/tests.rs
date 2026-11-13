@@ -747,7 +747,14 @@ async fn bars_move_a_setup_and_its_log_is_kept() {
     assert!(won["result_r"].as_f64().unwrap() > 1.0);
     assert_eq!(kinds(&won), ["created", "status", "status"]);
     assert_eq!(won["log"][2]["by"], "server");
-    // Closed: its feed is let go.
+    // Closed, but v1's runner is still in (ADR-0066): watched until it is out, here at
+    // its break-even stop. Then its feed is let go.
+    assert_eq!(s.pairs(), HashSet::from([key()]));
+    s.on_bar(&key(), bar(t + 3 * MINUTE_MS, p, p, p * 0.97, p * 0.975));
+    assert_eq!(
+        get(&s)["shadow_results"]["v1_half_t1_be"]["status"],
+        "breakeven"
+    );
     assert!(s.pairs().is_empty());
 }
 
@@ -1922,4 +1929,71 @@ async fn a_row_from_before_tags_and_excursions_loads() {
         call(&s, "get_setup", json!({ "id": new["id"] }), "owner").unwrap()["tags"],
         json!([])
     );
+}
+
+/// v1's runner outlives the setup's close (ADR-0066): the setup's feed is kept, across a
+/// restart too, until the last shadow closes. It holds no place among the open setups
+/// and no symbol of the owner's.
+#[tokio::test]
+async fn an_open_shadow_keeps_its_feed_after_the_setup_closed_and_counts_toward_no_limit() {
+    let (store, dir) = store_at("shadows");
+    let limits = Limits {
+        open_per_owner: 1,
+        symbols_per_owner: 1,
+        ..Limits::default()
+    };
+    let s = live_on(store, hub(), Access::parse(None), limits, None);
+    let mut args = long();
+    let p = args["entry"]["high"].as_f64().unwrap() / 0.98;
+    args["targets"] = json!([p * 1.05, p * 1.08]);
+    let setup = call(&s, "create_setup", args, "owner").unwrap();
+    assert_eq!(setup["shadow_results"], Value::Null, "none before the fill");
+    let (id, t) = (id_of(&setup), first_bar(&setup));
+    let get = |s: &Setups| call(s, "get_setup", json!({ "id": id }), "owner").unwrap();
+
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    assert_eq!(get(&s)["shadow_results"]["v1_half_t1_be"]["status"], "open");
+    s.on_bar(
+        &key(),
+        bar(t + MINUTE_MS, p * 0.976, p * 1.06, p * 0.975, p * 1.05),
+    );
+    let won = get(&s);
+    assert_eq!(won["status"], "won");
+    let v1 = &won["shadow_results"]["v1_half_t1_be"];
+    assert_eq!(v1["status"], "open");
+    assert_eq!(v1["exits"][0]["fraction"], 0.5);
+    assert_eq!(won["shadow_results"]["v2_be_at_1r"]["status"], "won");
+    // Still watched for the runner, and not open: another setup, on another symbol,
+    // fits the limits of one open setup on one symbol.
+    assert_eq!(s.pairs(), HashSet::from([key()]));
+    let open = call(&s, "list_setups", json!({ "status": "open" }), "owner").unwrap();
+    assert_eq!(open["total"], 0);
+    let other = call(&s, "create_setup", long_on("ETHUSDT"), "owner").unwrap();
+    call(
+        &s,
+        "cancel_setup",
+        json!({ "id": other["id"], "reason": "example reason" }),
+        "owner",
+    )
+    .unwrap();
+
+    // A restart: the closed setup's open shadow joins its feed again.
+    drop(s);
+    let s = live_on(reopen(&dir.db()), hub(), Access::parse(None), limits, None);
+    assert!(s.pairs().contains(&key()));
+    s.on_bar(
+        &key(),
+        bar(t + 2 * MINUTE_MS, p * 1.05, p * 1.09, p * 1.04, p * 1.085),
+    );
+    let done = get(&s);
+    let v1 = &done["shadow_results"]["v1_half_t1_be"];
+    assert_eq!(v1["status"], "won");
+    assert_eq!(v1["exited_at"], json!(t + 2 * MINUTE_MS));
+    assert!(v1["result_r"].as_f64().unwrap() > done["result_r"].as_f64().unwrap());
+    // The setup's own fields stay as its close left them, its log too.
+    assert_eq!(done["result_r"], won["result_r"]);
+    assert_eq!(done["exit"], won["exit"]);
+    assert_eq!(kinds(&done), ["created", "status", "status"]);
+    // Nothing is left to score: the feed is let go.
+    assert!(!s.pairs().contains(&key()));
 }

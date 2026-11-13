@@ -795,8 +795,8 @@ export type TpoMeta = Omit<TpoPayload, "profiles" | "has_more">;
 // ---------------------------------------------------------------------------
 // Setups (ADR-0059)
 //   Produced by `Record::view` in `src/setups.rs` and by `Setups::view` and
-//   `Setups::list` in `src/setup_service.rs`. The server sets status, fill, exit
-//   and result_r; an agent never does. `tests/fixtures/setup_responses.json` holds
+//   `Setups::list` in `src/setup_service.rs`. The server sets status, fill, exit,
+//   result_r and shadow_results; an agent never does. `tests/fixtures/setup_responses.json` holds
 //   real answers, pinned by a Rust test and parsed here in `responses.test.ts`.
 // ---------------------------------------------------------------------------
 
@@ -847,6 +847,50 @@ export const SetupDrawingSchema = z.object({
 });
 export type SetupDrawing = z.infer<typeof SetupDrawingSchema>;
 
+/** How a shadow exit variant ended, or that it has not (ADR-0066). */
+export const SetupShadowStatusSchema = z.enum([
+  "open",
+  "won",
+  "stopped",
+  "breakeven",
+  "timed_out",
+  "expired",
+  "cancelled",
+]);
+export type SetupShadowStatus = z.infer<typeof SetupShadowStatusSchema>;
+
+/** One fixed exit variant scored on the setup's own 1m bars from the fill on. */
+export const SetupShadowSchema = z
+  .object({
+    status: SetupShadowStatusSchema,
+    // The parts' R, each net of its own costs, weighted by share. Null while open, and
+    // when it expired while nobody scored it.
+    result_r: z.number().nullable(),
+    // The stop in force from the next bar on: the invalidation, or break-even after
+    // costs once v1 took T1 (T1 where that is nearer) or v2 reached +1R. A stop exit at
+    // or through the invalidation is "stopped"; one at a moved stop short of it is
+    // "breakeven", near 0 R.
+    stop: z.number(),
+    // Each part closed: price, share of the position, 1m bar open time (ms).
+    exits: z.array(
+      z.object({ price: z.number(), fraction: z.number().positive(), bar_time: z.number() }),
+    ),
+    exited_at: z.number().nullable(),
+    // v3: close time (ms) of the bar its time stop judges; null once judged, and for v1/v2.
+    time_stop_at: z.number().nullable(),
+  })
+  .strict();
+export type SetupShadow = z.infer<typeof SetupShadowSchema>;
+
+export const SetupShadowsSchema = z
+  .object({
+    v1_half_t1_be: SetupShadowSchema,
+    v2_be_at_1r: SetupShadowSchema,
+    v3_time_stop: SetupShadowSchema,
+  })
+  .strict();
+export type SetupShadows = z.infer<typeof SetupShadowsSchema>;
+
 export const SetupSchema = SetupLevelsSchema.extend({
   id: z.string(),
   symbol: z.string(),
@@ -891,6 +935,10 @@ export const SetupSchema = SetupLevelsSchema.extend({
   // of the risk from the zone's edge nearest the price to the invalidation; 0 once
   // filled. Null before the first bar, and on setups stored before the server kept it.
   closest_approach_r: z.number().nonnegative().nullable(),
+  // Fixed exit variants scored on the same bars, for comparison only: they never change
+  // status or result_r, and one may stay open after the setup closed (ADR-0066). Null
+  // before the fill, and on setups filled before the server kept them.
+  shadow_results: SetupShadowsSchema.nullable(),
   // In bars of the setup's own interval, to two places; null before a fill.
   // bars_to_exit runs to the newest scored bar while filled, and is null on a setup
   // that expired filled while nobody scored it. bars_to_mae/mfe are null when

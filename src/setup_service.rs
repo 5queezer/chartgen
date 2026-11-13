@@ -274,7 +274,7 @@ impl Setups {
             .setups
             .values()
             .map(|h| &h.record)
-            .filter(|r| r.status.is_open() && !self.runs(r))
+            .filter(|r| r.is_scoring() && !self.runs(r))
             .filter_map(|r| {
                 let mut record = r.clone();
                 let log = record.expire_unscored(now);
@@ -315,11 +315,12 @@ impl Setups {
         }
     }
 
-    /// Whether a setup is scored: open, and its owner still one the operator allows.
-    /// The list is read at startup, so an owner taken off it stops here from the restart
-    /// that read the new list, as its alerts do (ADR-0042). Its setups stay readable.
+    /// Whether a setup is scored: open or with a shadow open (ADR-0066), and its owner
+    /// still one the operator allows. The list is read at startup, so an owner taken off
+    /// it stops here from the restart that read the new list, as its alerts do
+    /// (ADR-0042). Its setups stay readable.
     fn runs(&self, record: &Record) -> bool {
-        record.status.is_open() && self.access.may_create(&record.owner)
+        record.is_scoring() && self.access.may_create(&record.owner)
     }
 
     fn wanted_feeds(&self, st: &State) -> HashSet<FeedKey> {
@@ -330,7 +331,8 @@ impl Setups {
             .collect()
     }
 
-    /// The feeds open setups hold, for the server's limit on watched pairs.
+    /// The feeds open setups hold, for the server's limit on watched pairs. A closed
+    /// setup's open shadow holds its feed too: the server does watch it (ADR-0066).
     pub fn pairs(&self) -> HashSet<FeedKey> {
         self.wanted_feeds(&self.lock())
     }
@@ -467,7 +469,7 @@ impl Setups {
             .setups
             .values()
             .map(|h| &h.record)
-            .filter(|r| r.owner == owner && r.status.is_open())
+            .filter(|r| r.owner == owner && r.is_scoring())
             .cloned()
             .collect();
         open.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
@@ -1033,7 +1035,7 @@ impl Setups {
             let mut log = Vec::new();
             for b in missed.iter().chain([&bar]) {
                 let next = record.next_bar_time();
-                if !record.status.is_open() || b.time < next {
+                if !record.is_scoring() || b.time < next {
                     continue;
                 }
                 if b.time > next {

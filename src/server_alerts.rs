@@ -2186,6 +2186,7 @@ struct SetupNow<'a> {
     closest_approach_r: Option<f64>,
     #[serde(flatten)]
     durations: chartgen::setups::Durations,
+    shadow_results: Option<&'a chartgen::setups::Shadows>,
     tags: &'a [String],
     gap: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -2219,6 +2220,7 @@ fn agent_body(fired: &str, alert: &Record, setup: Option<&chartgen::setups::Reco
                 mfe_at: s.mfe_at,
                 closest_approach_r: s.closest_approach_r,
                 durations: s.durations(),
+                shadow_results: s.shadow_results.as_ref(),
                 tags: &s.tags,
                 gap: s.gap,
                 thesis_cut: cut.is_some(),
