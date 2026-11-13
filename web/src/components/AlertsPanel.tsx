@@ -25,6 +25,7 @@ import {
 import { setSymbol, symbol } from "../stores/layout";
 import {
   deleteServerAlert,
+  serverAlertCondition,
   serverAlertError,
   serverAlerts,
   serverAlertsEnabled,
@@ -222,8 +223,17 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
     >
       <div class="flex-1 min-w-0">
         <div class="truncate" data-role="description">
-          {CONDITION_LABELS[a().condition]}{" "}
-          <span class="font-semibold tabular-nums">{formatPrice(a().level)}</span>{" "}
+          <Show
+            when={a().indicator}
+            fallback={
+              <>
+                {CONDITION_LABELS[a().condition]}{" "}
+                <span class="font-semibold tabular-nums">{formatPrice(a().level ?? 0)}</span>
+              </>
+            }
+          >
+            <span class="first-letter:uppercase">{serverAlertCondition(a())}</span>
+          </Show>{" "}
           <span
             class="text-xs text-[color:var(--color-accent)]"
             title="Runs on the server, with no browser open"
@@ -258,18 +268,21 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
         </Show>
       </div>
       <div class="flex shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
-        <button
-          type="button"
-          class={iconButtonClass}
-          aria-label="Edit alert"
-          title="Edit"
-          onClick={(e) => {
-            e.stopPropagation();
-            openAlertDialog({ serverId: a().id });
-          }}
-        >
-          <span aria-hidden="true">✎</span>
-        </button>
+        {/* The dialog edits price alerts; an indicator alert changes through the tools. */}
+        <Show when={!a().indicator}>
+          <button
+            type="button"
+            class={iconButtonClass}
+            aria-label="Edit alert"
+            title="Edit"
+            onClick={(e) => {
+              e.stopPropagation();
+              openAlertDialog({ serverId: a().id });
+            }}
+          >
+            <span aria-hidden="true">✎</span>
+          </button>
+        </Show>
         <button
           type="button"
           class={iconButtonClass}

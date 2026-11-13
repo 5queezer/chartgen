@@ -14,6 +14,8 @@ const BASE: i64 = 1_700_000_040;
 struct Fake {
     seeds: AtomicUsize,
     feeds: Mutex<Vec<mpsc::Sender<FeedEvent>>>,
+    /// What `seed` reads, when set: the history of indicator alerts.
+    history: Mutex<Option<Vec<Bar>>>,
 }
 
 impl Fake {
@@ -37,6 +39,15 @@ impl PushSource for Fake {
         self.seeds.fetch_add(1, Ordering::SeqCst);
         if symbol == "NOSUCHUSDT" {
             return Err("unknown symbol".into());
+        }
+        if let Some(bars) = self.history.lock().unwrap().clone() {
+            let skip = bars.len().saturating_sub(count);
+            return Ok(OhlcvData {
+                bars: bars[skip..].to_vec(),
+                symbol: None,
+                interval: None,
+                session: None,
+            });
         }
         data::sample_ohlcv(symbol, timeframe, count, None, 1_704_067_200_000)
     }
@@ -3807,4 +3818,419 @@ async fn an_ordinary_alerts_body_is_byte_for_byte_what_it_was() {
         r#"{{"alert_id":"{id}","bar_time":{bar_time},"condition":"crossing","evaluate_on":"live","fire_count":1,"fired_at":{at},"id":"{event}","interval":"1m","level":100.0,"message":"hello","price":101.0,"symbol":"BTCUSDT","trigger":"once","type":"alert.fired"}}"#
     );
     assert_eq!(body, expected);
+}
+
+// ---- Indicator alerts (ADR-0067) ----
+
+const HOUR: i64 = 3600;
+
+/// Open times of `n` closed hourly bars, the last one ending at least an hour ago.
+fn hours(n: usize) -> Vec<i64> {
+    let start = (chrono::Utc::now().timestamp() / HOUR - n as i64 - 2) * HOUR;
+    (0..n as i64).map(|i| start + i * HOUR).collect()
+}
+
+fn history(closes: &[f64]) -> Vec<Bar> {
+    hours(closes.len())
+        .into_iter()
+        .zip(closes)
+        .map(|(t, &c)| bar(t, c))
+        .collect()
+}
+
+fn on_rsi(condition: &str, level: f64) -> Value {
+    json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "rsi", "params": { "length": 14 },
+        "condition": condition, "trigger": "every", "level": level,
+    })
+}
+
+/// Server alerts on a fake whose history is `bars`, and the alert `args` make,
+/// once its bars are read.
+async fn with_history(
+    name: &str,
+    bars: Vec<Bar>,
+    args: Value,
+) -> (Arc<ServerAlerts>, Arc<Fake>, String) {
+    let (store, _) = store_at(name);
+    let fake = Arc::new(Fake::default());
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake.clone()),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let id = create(&a, args, "me").await;
+    until("the bars", || {
+        a.lock()
+            .watches
+            .get(&key("1h"))
+            .is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    (a, fake, id)
+}
+
+fn rsi_at(closes: &[f64]) -> f64 {
+    *chartgen::indicators::rsi::compute_rsi(closes, 14)
+        .last()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rsi_fires_at_the_close_it_crosses_its_level() {
+    // A long rise: RSI is high. Then each close falls, until RSI is under 25.
+    let mut closes: Vec<f64> = (0..300)
+        .map(|i| 100.0 + i as f64 * 0.5 + (i % 3) as f64)
+        .collect();
+    let bars = history(&closes);
+    let mut t = bar_time_of(bars.last().unwrap()).unwrap();
+    let (a, _, id) = with_history("rsi-cross", bars, on_rsi("crossing_down", 25.0)).await;
+    let k = key("1h");
+    let mut fired_at = None;
+    for step in 0..40 {
+        let close = closes.last().unwrap() - 3.0;
+        closes.push(close);
+        t += HOUR;
+        let before = rsi_at(&closes[..closes.len() - 1]);
+        let now = rsi_at(&closes);
+        a.on_event(&k, FeedEvent::Bar(bar(t, close)));
+        let fired = a.lock().alerts[&id].fire_count;
+        if before >= 25.0 && now < 25.0 {
+            assert_eq!(fired, 1, "it fires at the close RSI crossed, step {step}");
+            fired_at = Some(t);
+            let view = get(&a, "me", &id).await;
+            assert!((view["indicator"]["value"].as_f64().unwrap() - now).abs() < 1e-9);
+            assert_eq!(view["indicator"]["line"], "RSI");
+            assert_eq!(view["level"], 25.0);
+            assert_eq!(view["feed"], "live");
+        } else {
+            assert_eq!(
+                fired,
+                u64::from(fired_at.is_some()),
+                "step {step}, rsi {now}"
+            );
+        }
+    }
+    assert!(fired_at.is_some(), "RSI never went under 25");
+    // A tick under the level is not a close.
+    a.on_event(&k, FeedEvent::Tick(bar(t + HOUR, 1.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_close_crossing_an_ema_fires_against_the_line_one_bar_before() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "ema", "length": 21 }, "compare": "close",
+        "condition": "crossing_up", "trigger": "once",
+    });
+    let (a, _, id) = with_history("ema-cross", bars, args).await;
+    let k = key("1h");
+    // On the line is not above it, and below it is not either.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 100.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 99.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 110.0)));
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["fire_count"], 1);
+    assert!(view["level"].is_null());
+    assert_eq!(view["indicator"]["line"], "EMA 21");
+    assert_eq!(view["indicator"]["compare"], "close");
+    // EMA 21 moved a 2/22 step towards 99, then one towards 110.
+    let below = 100.0 - 2.0 / 22.0;
+    let ema = view["indicator"]["value"].as_f64().unwrap();
+    assert!(
+        (ema - (below + (110.0 - below) * 2.0 / 22.0)).abs() < 1e-9,
+        "{ema}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_close_reads_the_bars_again_and_then_that_close() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "sma", "length": 5 }, "compare": "close",
+        "condition": "crossing_up", "trigger": "once",
+    });
+    let (a, fake, id) = with_history("sma-gap", bars.clone(), args).await;
+    let seeds = fake.seeds.load(Ordering::SeqCst);
+    // The close of t + 1h, under the line, never came. REST has it, and the next one,
+    // which is over the line. Both have closed by the clock too: `hours` keeps room.
+    let mut full = bars;
+    full.push(bar(t + HOUR, 99.0));
+    full.push(bar(t + 2 * HOUR, 120.0));
+    *fake.history.lock().unwrap() = Some(full);
+    a.on_event(&key("1h"), FeedEvent::Bar(bar(t + 2 * HOUR, 120.0)));
+    until("a second read", || {
+        fake.seeds.load(Ordering::SeqCst) > seeds
+    })
+    .await;
+    until("the waiting close", || a.lock().alerts[&id].fire_count == 1).await;
+    let fired = a.lock().alerts[&id].fired_bar;
+    assert_eq!(fired, Some(t + 2 * HOUR));
+}
+
+/// A feed that keeps dropping closes reads the bars at most once a minute.
+#[tokio::test(flavor = "multi_thread")]
+async fn bars_are_read_again_at_most_once_a_minute() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "sma", "length": 5 }, "compare": "close",
+        "condition": "crossing_up", "trigger": "every",
+    });
+    let (a, fake, _) = with_history("sma-reread", bars, args).await;
+    let k = key("1h");
+    let reads = || fake.seeds.load(Ordering::SeqCst);
+    let seeded = |a: &Arc<ServerAlerts>| a.lock().watches[&key("1h")].bars.is_some();
+    let first = reads();
+    // A gap: read again.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 100.0)));
+    until("a read after the gap", || {
+        reads() == first + 1 && seeded(&a)
+    })
+    .await;
+    // A lag right after: the bars go, and wait out the pause.
+    a.lost_events(&k);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(reads(), first + 1);
+    assert!(!seeded(&a));
+    // The upkeep once the pause is over.
+    a.lock().watches.get_mut(&k).unwrap().last_reread =
+        Some(Instant::now() - REREAD_PAUSE - Duration::from_secs(1));
+    a.sweep(&mut a.lock(), now_ms());
+    until("a read after the pause", || {
+        reads() == first + 2 && seeded(&a)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_indicator_alert_does_not_fire_twice_on_a_close_across_a_restart() {
+    let (store, path) = store_at("ema-restart");
+    let fake = Arc::new(Fake::default());
+    let mut closes = vec![100.0; 300];
+    closes[299] = 99.0;
+    let bars = history(&closes);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "ema", "length": 21 }, "compare": "close",
+        "condition": "crossing_up", "trigger": "every",
+    });
+    let open = |store| {
+        ServerAlerts::new(
+            store,
+            hub_with(fake.clone()),
+            Policy::default(),
+            Access::Open,
+            None,
+            Limits::default(),
+            quick_timing(),
+        )
+    };
+    let a = open(store);
+    let id = create(&a, args, "me").await;
+    let seeded = |a: &Arc<ServerAlerts>| {
+        a.lock()
+            .watches
+            .get(&key("1h"))
+            .is_some_and(|w| w.bars.is_some())
+    };
+    until("the bars", || seeded(&a)).await;
+    a.on_event(&key("1h"), FeedEvent::Bar(bar(t + HOUR, 110.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    // The record keeps its level out of the field a price alert reads.
+    let row = store.server_alerts().unwrap().pop().unwrap();
+    let row: Value = serde_json::from_str(&row).unwrap();
+    assert!(row.get("level").is_none(), "{row}");
+    // What runs, defaults included.
+    assert_eq!(
+        row["indicator"]["params"],
+        json!({ "type": "ema", "length": 21, "source": "close", "offset": 0 })
+    );
+    drop(a);
+
+    let b = open(reopen(&path));
+    until("the bars after a restart", || seeded(&b)).await;
+    b.on_event(&key("1h"), FeedEvent::Bar(bar(t + HOUR, 110.0)));
+    assert_eq!(b.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_indicator_fire_posts_the_line_and_its_value() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("rsi-payload");
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        local(port),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let mut args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "sma", "length": 4 }, "compare": "close",
+        "condition": "greater", "trigger": "once",
+    });
+    args["webhook_url"] = json!(format!("http://127.0.0.1:{port}/hook"));
+    let id = create(&a, args, "me").await;
+    until("the bars", || {
+        a.lock()
+            .watches
+            .get(&key("1h"))
+            .is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    a.on_event(&key("1h"), FeedEvent::Bar(bar(t + HOUR, 104.0)));
+    until("the delivery", || !seen.lock().unwrap().is_empty()).await;
+    let raw = seen.lock().unwrap()[0].clone();
+    let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["alert_id"], id.as_str());
+    assert_eq!(body["price"], 104.0);
+    // The level is the line the close went above: SMA 4 of 100, 100, 100, 104.
+    assert_eq!(body["level"], 101.0);
+    assert_eq!(body["indicator"]["name"], "ma");
+    assert_eq!(body["indicator"]["line"], "SMA 4");
+    assert_eq!(body["indicator"]["value"], 101.0);
+    // What runs, defaults included: the webhook says exactly what is computed.
+    assert_eq!(
+        body["indicator"]["params"],
+        json!({ "type": "sma", "length": 4, "source": "close", "offset": 0 })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indicator_input_is_checked() {
+    let (store, _) = store_at("rsi-input");
+    let limits = Limits {
+        changes_per_minute: 100,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let refused = |args: Value| {
+        let a = a.clone();
+        async move {
+            call(&a, "create_server_alert", args, "me")
+                .await
+                .unwrap_err()
+        }
+    };
+    let with = |patch: Value| {
+        let mut args = on_rsi("less", 30.0);
+        for (k, v) in patch.as_object().unwrap() {
+            if v.is_null() {
+                args.as_object_mut().unwrap().remove(k);
+            } else {
+                args[k] = v.clone();
+            }
+        }
+        args
+    };
+    for (patch, says) in [
+        (
+            json!({ "indicator": "volume_profile" }),
+            "cannot watch the indicator",
+        ),
+        (
+            json!({ "indicator": "my_script" }),
+            "cannot watch the indicator",
+        ),
+        (json!({ "evaluate_on": null }), "evaluate_on: close"),
+        (json!({ "evaluate_on": "live" }), "evaluate_on: close"),
+        (json!({ "interval": "15m" }), "1h or longer"),
+        (json!({ "level": null }), "level is required"),
+        (json!({ "compare": "close" }), "send no level"),
+        (
+            json!({ "compare": "sideways" }),
+            "compare has an unknown value",
+        ),
+        (
+            json!({ "line": "Signal" }),
+            "has no line Signal; it has RSI",
+        ),
+        (json!({ "params": [14] }), "params must be an object"),
+        (json!({ "params": { "length": 500 } }), "bars of history"),
+        (
+            json!({ "indicator": "ma", "params": { "type": "ema", "length": 21, "offset": 2 } }),
+            "offset",
+        ),
+    ] {
+        let err = refused(with(patch.clone())).await;
+        assert!(err.contains(says), "{patch}: {err}");
+    }
+    let err = refused(json!({ "symbol": "BTCUSDT", "condition": "less", "trigger": "once", "level": 5.0, "line": "RSI" })).await;
+    assert!(err.contains("line needs indicator"), "{err}");
+    assert!(a.lock().alerts.is_empty());
+
+    // A level may be anything an indicator can read, below zero too.
+    let mut macd =
+        with(json!({ "indicator": "macd", "params": null, "line": "signal", "level": -50.0 }));
+    macd["condition"] = json!("crossing_up");
+    let made = call(&a, "create_server_alert", macd, "me").await.unwrap();
+    assert_eq!(made["indicator"]["line"], "Signal");
+    assert_eq!(made["level"], -50.0);
+    let id = made["id"].as_str().unwrap();
+    let upd = |args: Value| {
+        let a = a.clone();
+        async move { call(&a, "update_server_alert", args, "me").await }
+    };
+    assert!(upd(json!({ "alert_id": id, "line": "MACD" }))
+        .await
+        .unwrap_err()
+        .contains("cannot change"));
+    assert_eq!(
+        upd(json!({ "alert_id": id, "level": -20.5 }))
+            .await
+            .unwrap()["level"],
+        -20.5
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alert_on_the_close_against_a_line_takes_no_level_in_an_update() {
+    let (store, _) = store_at("ema-update");
+    let a = plain(store);
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "4h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "ema", "length": 50 }, "compare": "close",
+        "condition": "crossing", "trigger": "every",
+    });
+    let id = create(&a, args, "me").await;
+    let err = call(
+        &a,
+        "update_server_alert",
+        json!({ "alert_id": id, "level": 5.0 }),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("takes no level"), "{err}");
+    let ok = call(
+        &a,
+        "update_server_alert",
+        json!({ "alert_id": id, "condition": "crossing_down" }),
+        "me",
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok["condition"], "crossing_down");
 }

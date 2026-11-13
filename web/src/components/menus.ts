@@ -46,7 +46,10 @@ export function serverAlertMenu(a: ServerAlert, chartSymbol: string): MenuSpec {
   return {
     label: "Alert actions",
     items: [
-      { label: "Edit…", onSelect: () => openAlertDialog({ serverId: a.id }) },
+      // The dialog edits price alerts; an indicator alert changes through the tools.
+      ...(a.indicator
+        ? []
+        : [{ label: "Edit…", onSelect: () => openAlertDialog({ serverId: a.id }) }]),
       {
         label: a.active ? "Pause" : "Resume",
         onSelect: () => send(updateServerAlert({ alert_id: a.id, active: !a.active })),

@@ -898,7 +898,10 @@ alert runs in this browser.
 
 - **Only price alerts on Binance symbols.** Drawing and indicator alerts run in the
   browser, and the dialog says so when one is the source. A stock is refused with
-  the reason.
+  the reason. An agent can also make an alert on an indicator's line at bar closes, such as RSI
+  under 25 on 4h ([indicator alerts on the server](/chartgen/reference/mcp/#indicator-alerts-on-the-server)).
+  The Alerts tab lists those as *RSI less than 25* or *close crossing up EMA 50*. They can be
+  paused, resumed and deleted there, but not edited: the dialog edits price alerts.
 - **Check on** is *Every tick*, like a browser alert, or *Bar close* of the chart's
   interval, which reads only the closes of those bars. An interval with no Binance
   stream of its own can only use *Every tick*.

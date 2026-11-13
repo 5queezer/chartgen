@@ -592,7 +592,7 @@ pub fn server_alert_tools() -> Vec<Value> {
     let condition = json!({
         "type": "string",
         "enum": ["crossing", "crossing_up", "crossing_down", "greater", "less"],
-        "description": "crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one."
+        "description": "crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's."
     });
     let trigger = json!({
         "type": "string",
@@ -602,7 +602,7 @@ pub fn server_alert_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "create_server_alert",
-            "description": "Create a price alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing and indicator alerts cannot run here. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
+            "description": "Create an alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It watches the price, or with indicator an indicator's line at the closes of bars of 1h or longer: the line against level (RSI under 25), or with compare: close the bar's close against the line (the close crossing EMA 50). It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing alerts cannot run here. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -610,8 +610,12 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "interval": { "type": "string", "description": "Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert.", "default": "1m" },
                     "evaluate_on": { "type": "string", "enum": ["live", "close"], "description": "live: every price update, like a browser alert. close: only when a bar of the interval closes.", "default": "live" },
                     "condition": condition.clone(),
-                    "level": { "type": "number", "description": "The price level; greater than 0." },
+                    "level": { "type": "number", "description": "The price level, greater than 0. With indicator, the level the line is compared with, any number; none with compare: close." },
                     "trigger": trigger.clone(),
+                    "indicator": { "type": "string", "enum": ["rsi", "ma", "macd", "stoch", "cci", "mfi", "williams_r", "roc", "atr", "adx"], "description": "Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: \"ema\", length: 50}. Fixed after creation." },
+                    "params": { "type": "object", "additionalProperties": true, "description": "The indicator's params, as list_indicators lists them, e.g. {length: 14}. A name it does not take is refused; the alert keeps every param with its default filled in. Its history must fit in 999 bars (EMA 200 does); stoch, cci, mfi, williams_r and roc take at most 200 per param; offset is not taken." },
+                    "line": { "type": "string", "description": "Which of the indicator's lines, by its legend label, e.g. Signal for macd or %D for stoch. Default: its first line." },
+                    "compare": { "type": "string", "enum": ["level", "close"], "description": "level: the line against level. close: the bar's close against the line, with no level; a crossing is then the close and the line one bar before against both now.", "default": "level" },
                     "message": { "type": "string", "maxLength": 200, "description": "Your note, sent in the webhook payload." },
                     "webhook_url": { "type": "string", "maxLength": 512, "description": "https URL to POST to when the alert fires." },
                     "sign": { "type": "boolean", "description": "Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.", "default": false },
@@ -619,24 +623,24 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires: a signed POST to the receiver this server's operator configured for you. Instead of webhook_url, not with it. Refused where no receiver is configured for you.", "default": false },
                     "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, shadow results, thesis)." }
                 },
-                "required": ["symbol", "condition", "level", "trigger"]
+                "required": ["symbol", "condition", "trigger"]
             }
         }),
         json!({
             "name": "list_server_alerts",
-            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "update_server_alert",
-            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval and evaluate_on cannot change: delete and create instead.",
+            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on and an indicator alert's indicator, params, line and compare cannot change: delete and create instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "alert_id": { "type": "string", "description": "The alert's id." },
                     "active": { "type": "boolean", "description": "Pause (false) or resume (true)." },
                     "condition": condition,
-                    "level": { "type": "number", "description": "The price level; greater than 0." },
+                    "level": { "type": "number", "description": "The price level, greater than 0, or an indicator alert's level, any number. Not on an alert with compare: close." },
                     "trigger": trigger,
                     "message": { "type": "string", "maxLength": 200, "description": "Your note; an empty string removes it." },
                     "webhook_url": { "type": "string", "maxLength": 512, "description": "New https URL, or an empty string to remove the webhook." },

@@ -18,8 +18,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use chartgen::data;
+use chartgen::data::{self, Bar};
 use chartgen::feed::FeedEvent;
+use chartgen::interval::Interval;
 use chartgen::push::{DeviceKeys, Vapid};
 use chartgen::scripting::persistence::{self, Store, StoredDevice, StoredEvent};
 use chartgen::webhook::{self, AgentReceiver, Policy, Target, Timing};
@@ -29,7 +30,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 
-use crate::chart_push::{ChartHub, FeedKey, FeedLease};
+use crate::chart_push::{upsert_bar, ChartHub, FeedKey, FeedLease};
 use crate::fetch;
 use crate::mcp::{normalize_quote_symbol, tool_err, tool_ok};
 
@@ -40,6 +41,9 @@ const LIVE_FEED_INTERVAL: &str = "1m";
 const FEED_RETRY: Duration = Duration::from_secs(30);
 /// No price for this long and the alert shows as waiting.
 const FEED_QUIET: Duration = Duration::from_secs(120);
+/// Least time between two reads of a pair's bars after a gap or a lag (ADR-0067):
+/// a feed that keeps dropping closes cannot turn into a REST read per close.
+const REREAD_PAUSE: Duration = Duration::from_secs(60);
 /// A delivery still pending after this long, across a restart, is dropped.
 const EVENT_MAX_AGE_SECS: i64 = 3_600;
 const MINUTE: Duration = Duration::from_secs(60);
@@ -291,7 +295,11 @@ struct Record {
     evaluate_on: EvaluateOn,
     feed_interval: String,
     condition: Condition,
-    level: f64,
+    /// The price level. Absent on an indicator alert, whose level is in `indicator`:
+    /// a build from before them cannot read the row, and skips it rather than run it
+    /// as a price alert (ADR-0067).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    level: Option<f64>,
     trigger: Trigger,
     #[serde(default)]
     message: Option<String>,
@@ -330,11 +338,27 @@ struct Record {
     /// The owner's setup this alert is about: a reference, and what the wake-up shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     setup_id: Option<String>,
+    /// Open time of the bar an indicator alert last fired for, so that a bar sent
+    /// again after a restart does not fire it twice. Written only once it has fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fired_bar: Option<i64>,
+    /// An indicator's line at bar closes instead of the price (ADR-0067).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    indicator: Option<indicator::Spec>,
 }
 
 impl Record {
     fn feed(&self) -> FeedKey {
         (self.symbol.clone(), self.feed_interval.clone())
+    }
+
+    /// The level it compares with: the price's, or the indicator line's. `None` for
+    /// an indicator alert that compares the close with the line.
+    fn level(&self) -> Option<f64> {
+        match &self.indicator {
+            Some(spec) => spec.level,
+            None => self.level,
+        }
     }
 
     fn json(&self) -> String {
@@ -351,6 +375,20 @@ struct Watch {
     last_closed: Option<i64>,
     last_price: Option<f64>,
     last_at: Option<Instant>,
+    /// Closed bars, oldest first, while an indicator alert reads this feed: read
+    /// over REST, then kept up from its closes (ADR-0067). `None` until read, and
+    /// again when a close is missing.
+    bars: Option<Vec<Bar>>,
+    seeding: bool,
+    /// Closes that arrived while the bars were being read.
+    early: Vec<Bar>,
+    /// The newest close indicator alerts could not read for want of bars: read once
+    /// they are there.
+    pending_close: Option<i64>,
+    /// The bars were dropped for a gap or a lag, and are to be read again.
+    rereading: bool,
+    /// When a read after a gap or a lag last succeeded.
+    last_reread: Option<Instant>,
 }
 
 /// Calls in the last minute, per key.
@@ -387,6 +425,8 @@ struct State {
     watches: HashMap<FeedKey, Watch>,
     /// The previous price each alert read; lost on a restart, on purpose.
     baselines: HashMap<String, f64>,
+    /// The line's value at the last close each indicator alert read.
+    values: HashMap<String, f64>,
     changes: Window,
     fires: Window,
     /// Per client, and under "" every delivery of either kind.
@@ -756,9 +796,129 @@ impl ServerAlerts {
                     last_closed: None,
                     last_price: None,
                     last_at: None,
+                    bars: None,
+                    seeding: false,
+                    early: Vec::new(),
+                    pending_close: None,
+                    rereading: false,
+                    last_reread: None,
                 },
             );
         }
+        self.seed_windows(st);
+    }
+
+    /// Read the bars of each feed an indicator alert needs and has none of, and
+    /// let go of those nobody reads. One REST read per feed, through the Binance
+    /// gate; a refused one is tried again by the upkeep.
+    fn seed_windows(&self, st: &mut State) {
+        let wanting: HashSet<FeedKey> = st
+            .alerts
+            .values()
+            .filter(|a| self.runs(a) && a.indicator.is_some())
+            .map(Record::feed)
+            .collect();
+        for (key, w) in &mut st.watches {
+            if !wanting.contains(key) {
+                w.bars = None;
+                w.early.clear();
+                w.pending_close = None;
+                w.rereading = false;
+                continue;
+            }
+            if w.bars.is_some() || w.seeding {
+                continue;
+            }
+            // The upkeep asks again each minute.
+            if w.rereading && w.last_reread.is_some_and(|t| t.elapsed() < REREAD_PAUSE) {
+                continue;
+            }
+            w.seeding = true;
+            let (hub, me, key) = (self.hub.clone(), self.me.clone(), key.clone());
+            self.runtime.spawn(async move {
+                let read = {
+                    let key = key.clone();
+                    tokio::task::spawn_blocking(move || {
+                        hub.seed_bars(&key.0, &key.1, indicator::WINDOW_BARS)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+                };
+                if let Some(this) = me.upgrade() {
+                    this.install_window(&key, read);
+                }
+            });
+        }
+    }
+
+    /// The bars read for `key`: keep the closed ones, add the closes that came
+    /// meanwhile, and read the close indicator alerts were waiting for.
+    fn install_window(&self, key: &FeedKey, read: Result<Vec<Bar>, String>) {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        let Some(w) = st.watches.get_mut(key) else {
+            return;
+        };
+        w.seeding = false;
+        let early = std::mem::take(&mut w.early);
+        let mut bars = match read {
+            Ok(bars) => bars,
+            Err(e) => {
+                eprintln!("[alerts] history of {} {}: {e}", key.0, key.1);
+                return;
+            }
+        };
+        // The forming bar is not a close.
+        let now = chrono::Utc::now().timestamp();
+        if let Ok(grid) = Interval::parse(&key.1) {
+            bars.retain(|b| bar_time_of(b).is_some_and(|t| grid.grid_end(t) <= now));
+        }
+        for bar in early {
+            if !add_close(&mut bars, bar, &key.1) {
+                eprintln!(
+                    "[alerts] history of {} {} has a gap; reading again",
+                    key.0, key.1
+                );
+                return;
+            }
+        }
+        w.bars = Some(bars);
+        if std::mem::take(&mut w.rereading) {
+            w.last_reread = Some(Instant::now());
+        }
+        let Some(t) = w.pending_close.take() else {
+            return;
+        };
+        let Some(close) = w
+            .bars
+            .as_ref()
+            .and_then(|b| b.last())
+            .filter(|b| bar_time_of(b) == Some(t))
+            .map(|b| b.close)
+        else {
+            return;
+        };
+        let ids: Vec<String> = st
+            .alerts
+            .values()
+            .filter(|a| self.runs(a) && a.indicator.is_some() && a.feed() == *key)
+            .map(|a| a.id.clone())
+            .collect();
+        let now = Instant::now();
+        for id in ids {
+            self.evaluate(st, key, &id, close, t, now);
+        }
+    }
+
+    /// The feed went on without us: the baselines start over, and the bars, which
+    /// may now miss a close, are read again.
+    fn lost_events(&self, key: &FeedKey) {
+        let mut st = self.lock();
+        Self::forget_baselines(&mut st, key);
+        if let Some(w) = st.watches.get_mut(key) {
+            w.rereading |= w.bars.take().is_some();
+        }
+        self.seed_windows(&mut st);
     }
 
     fn forget_baselines(st: &mut State, key: &FeedKey) {
@@ -794,6 +954,11 @@ impl ServerAlerts {
         let now = Instant::now();
         let mut guard = self.lock();
         let st = &mut *guard;
+        let windowed = is_close
+            && st
+                .alerts
+                .values()
+                .any(|a| self.runs(a) && a.indicator.is_some() && a.feed() == *key);
         let Some(watch) = st.watches.get_mut(key) else {
             return;
         };
@@ -813,6 +978,22 @@ impl ServerAlerts {
         if is_close {
             watch.last_closed = Some(bar_time);
         }
+        let mut reseed = false;
+        if windowed && watch.seeding {
+            watch.early.push(bar);
+            watch.pending_close = Some(bar_time);
+        } else if windowed {
+            let added = watch
+                .bars
+                .as_mut()
+                .is_some_and(|bars| add_close(bars, bar, &key.1));
+            if !added {
+                // No bars yet, or a close is missing: read them again, then this close.
+                reseed = watch.bars.take().is_some();
+                watch.rereading |= reseed;
+                watch.pending_close = Some(bar_time);
+            }
+        }
 
         let ids: Vec<String> = st
             .alerts
@@ -828,21 +1009,69 @@ impl ServerAlerts {
             .map(|a| a.id.clone())
             .collect();
         for id in ids {
-            self.evaluate(st, &id, price, bar_time, now);
+            self.evaluate(st, key, &id, price, bar_time, now);
+        }
+        if reseed {
+            self.seed_windows(st);
         }
     }
 
-    fn evaluate(&self, st: &mut State, id: &str, price: f64, bar_time: i64, now: Instant) {
+    /// The alert's reading at `price`, on the bar opening at `bar_time`: how far it is
+    /// past its level now and at the reading before, and an indicator line's value. A
+    /// price alert's reading before is the last price it read; an indicator alert's is
+    /// the same comparison at the close before, from the feed's bars.
+    fn reading(
+        &self,
+        st: &mut State,
+        key: &FeedKey,
+        id: &str,
+        price: f64,
+        bar_time: i64,
+    ) -> Option<(Option<f64>, f64, Option<f64>)> {
+        let alert = st.alerts.get(id)?;
+        let Some(spec) = &alert.indicator else {
+            let level = alert.level?;
+            let prev = st.baselines.insert(id.to_string(), price);
+            return Some((prev.map(|p| p - level), price - level, None));
+        };
+        if alert.fired_bar.is_some_and(|b| bar_time <= b) {
+            return None;
+        }
+        let bars = st.watches.get(key)?.bars.as_ref()?;
+        let end = bars.partition_point(|b| bar_time_of(b).is_some_and(|t| t <= bar_time));
+        if end == 0 || bar_time_of(&bars[end - 1]) != Some(bar_time) {
+            return None;
+        }
+        let Some(r) = indicator::read(spec, &bars[..end]) else {
+            st.values.remove(id);
+            return None;
+        };
+        st.values.insert(id.to_string(), r.value);
+        Some((r.prev, r.d, Some(r.value)))
+    }
+
+    fn evaluate(
+        &self,
+        st: &mut State,
+        key: &FeedKey,
+        id: &str,
+        price: f64,
+        bar_time: i64,
+        now: Instant,
+    ) {
+        let Some((prev, d, value)) = self.reading(st, key, id, price, bar_time) else {
+            return;
+        };
         let Some(alert) = st.alerts.get(id) else {
             return;
         };
-        let prev = st.baselines.insert(id.to_string(), price);
         let armed = Armed {
             active: alert.active,
             disarmed: alert.disarmed,
         };
-        let (condition, trigger, level) = (alert.condition, alert.trigger, alert.level);
-        let (next, fired) = step(condition, trigger, level, armed, prev, price, true);
+        // Both readings are already relative to the level.
+        let (condition, trigger) = (alert.condition, alert.trigger);
+        let (next, fired) = step(condition, trigger, 0.0, armed, prev, d, true);
         let (next, fired) = if fired
             && trigger == Trigger::Every
             && !st
@@ -850,7 +1079,7 @@ impl ServerAlerts {
                 .admit(id, self.limits.fires_per_alert_per_minute, now)
         {
             st.held_back.insert(id.to_string(), now);
-            step(condition, trigger, level, armed, prev, price, false)
+            step(condition, trigger, 0.0, armed, prev, d, false)
         } else {
             (next, fired)
         };
@@ -877,7 +1106,10 @@ impl ServerAlerts {
         let at = now_ms();
         updated.last_triggered_at = Some(at);
         updated.fire_count += 1;
-        let events = self.prepare_deliveries(st, &mut updated, price, bar_time, at);
+        if updated.indicator.is_some() {
+            updated.fired_bar = Some(bar_time);
+        }
+        let events = self.prepare_deliveries(st, &mut updated, price, value, bar_time, at);
         if let Err(e) =
             self.store
                 .record_server_alert_fire(id, &updated.owner, &updated.json(), &events)
@@ -928,6 +1160,7 @@ impl ServerAlerts {
         st: &State,
         alert: &mut Record,
         price: f64,
+        value: Option<f64>,
         bar_time: i64,
         at: i64,
     ) -> Vec<StoredEvent> {
@@ -937,7 +1170,7 @@ impl ServerAlerts {
             return Vec::new();
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let body = json!({
+        let mut body = json!({
             "id": id,
             "type": "alert.fired",
             "alert_id": alert.id,
@@ -945,15 +1178,20 @@ impl ServerAlerts {
             "interval": alert.interval,
             "evaluate_on": alert.evaluate_on,
             "condition": alert.condition,
-            "level": alert.level,
+            // With compare: close, the line's value is the level the close crossed.
+            "level": alert.level().or(value),
             "price": price,
             "trigger": alert.trigger,
             "message": alert.message,
             "bar_time": bar_time,
             "fired_at": at,
             "fire_count": alert.fire_count,
-        })
-        .to_string();
+        });
+        // Only on an indicator alert: a price alert's body is as it always was.
+        if let Some(spec) = &alert.indicator {
+            body["indicator"] = indicator::view(spec, value);
+        }
+        let body = body.to_string();
         let limits = &self.limits;
         let waiting = st.queues.get(&alert.owner).map_or(0, VecDeque::len);
         let mut events: Vec<StoredEvent> = Vec::new();
@@ -1277,6 +1515,7 @@ impl ServerAlerts {
         self.store.delete_server_alert(id)?;
         st.alerts.remove(id);
         st.baselines.remove(id);
+        st.values.remove(id);
         st.held_back.remove(id);
         st.agent_queue.retain(|e| e.alert_id != id);
         let mut dropped = 0;
@@ -1785,10 +2024,25 @@ impl ServerAlerts {
             None | Some(Value::Null) => LIVE_FEED_INTERVAL.to_string(),
             Some(v) => v.as_str().ok_or("interval must be a string")?.to_string(),
         };
-        let evaluate_on = enum_arg(args, "evaluate_on")?.unwrap_or(EvaluateOn::Live);
+        let evaluate_on = enum_arg(args, "evaluate_on")?;
         let condition: Condition = enum_arg(args, "condition")?.ok_or("condition is required")?;
         let trigger: Trigger = enum_arg(args, "trigger")?.ok_or("trigger is required")?;
-        let level = level_arg(args)?.ok_or("level is required")?;
+        let spec = indicator::parse(args)?;
+        let level = match spec {
+            Some(_) => None,
+            None => Some(level_arg(args)?.ok_or("level is required")?),
+        };
+        if spec.is_some() {
+            if evaluate_on != Some(EvaluateOn::Close) {
+                return Err("An indicator alert reads bar closes: send evaluate_on: close".into());
+            }
+            if data::interval_secs(&interval).is_none_or(|s| s < indicator::MIN_INTERVAL_SECS) {
+                return Err(format!(
+                    "An indicator alert reads closes of 1h or longer, not {interval}"
+                ));
+            }
+        }
+        let evaluate_on = evaluate_on.unwrap_or(EvaluateOn::Live);
         let message = message_arg(args)?.filter(|m| !m.is_empty());
         let (webhook_url, sign) = webhook_args(args)?;
         let webhook_url = webhook_url.filter(|u| !u.is_empty());
@@ -1872,6 +2126,8 @@ impl ServerAlerts {
             device_pushes_fire: None,
             notify_agent,
             setup_id,
+            fired_bar: None,
+            indicator: spec,
         };
         // With setups: nobody else may take a pair between this check and the write.
         let _pairs = pair_gate();
@@ -1900,12 +2156,23 @@ impl ServerAlerts {
             .and_then(Value::as_str)
             .ok_or("alert_id is required")?;
         // First: a stranger's URL must not cost a lookup, or answer anything about it.
-        if !self.lock().alerts.get(id).is_some_and(|a| a.owner == owner) {
-            return Err("No such alert".into());
+        let compare = match self.lock().alerts.get(id).filter(|a| a.owner == owner) {
+            None => return Err("No such alert".into()),
+            Some(a) => a.indicator.as_ref().map(|s| s.compare),
+        };
+        for field in ["indicator", "params", "line", "compare"] {
+            if args.get(field).is_some_and(|v| !v.is_null()) {
+                return Err(format!(
+                    "{field} cannot change: delete the alert and create another"
+                ));
+            }
         }
         let condition: Option<Condition> = enum_arg(args, "condition")?;
         let trigger: Option<Trigger> = enum_arg(args, "trigger")?;
-        let level = level_arg(args)?;
+        let level = match compare {
+            None => level_arg(args)?,
+            Some(compare) => indicator::level_arg(args, compare)?,
+        };
         let message = message_arg(args)?;
         let active = match args.get("active") {
             None | Some(Value::Null) => None,
@@ -1942,10 +2209,15 @@ impl ServerAlerts {
         // back, and neither does the dialog sending the same values again.
         let redefined = condition.is_some_and(|c| c != next.condition)
             || trigger.is_some_and(|t| t != next.trigger)
-            || level.is_some_and(|l| l != next.level);
+            || level.is_some_and(|l| Some(l) != next.level());
         next.condition = condition.unwrap_or(next.condition);
         next.trigger = trigger.unwrap_or(next.trigger);
-        next.level = level.unwrap_or(next.level);
+        if let Some(l) = level {
+            match next.indicator.as_mut() {
+                Some(spec) => spec.level = Some(l),
+                None => next.level = Some(l),
+            }
+        }
         if let Some(m) = message {
             next.message = Some(m).filter(|m| !m.is_empty());
         }
@@ -2067,7 +2339,8 @@ impl ServerAlerts {
         let watch = st.watches.get(&a.feed());
         let live = watch
             .and_then(|w| w.last_at)
-            .is_some_and(|t| t.elapsed() < FEED_QUIET);
+            .is_some_and(|t| t.elapsed() < FEED_QUIET)
+            && (a.indicator.is_none() || watch.is_some_and(|w| w.bars.is_some()));
         let held_back = st
             .held_back
             .get(&a.id)
@@ -2087,7 +2360,7 @@ impl ServerAlerts {
             "interval": a.interval,
             "evaluate_on": a.evaluate_on,
             "condition": a.condition,
-            "level": a.level,
+            "level": a.level(),
             "trigger": a.trigger,
             "message": a.message,
             "active": a.active,
@@ -2116,6 +2389,9 @@ impl ServerAlerts {
         }
         if let Some(setup) = &a.setup_id {
             view["setup_id"] = json!(setup);
+        }
+        if let Some(spec) = &a.indicator {
+            view["indicator"] = indicator::view(spec, st.values.get(&a.id).copied());
         }
         view
     }
@@ -2158,7 +2434,10 @@ struct FiredAlert<'a> {
     interval: &'a str,
     evaluate_on: EvaluateOn,
     condition: Condition,
-    level: f64,
+    level: &'a Value,
+    /// Only on an indicator alert, which `level` is then about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indicator: Option<&'a Value>,
     price: &'a Value,
     trigger: Trigger,
     bar_time: &'a Value,
@@ -2237,7 +2516,8 @@ fn agent_body(fired: &str, alert: &Record, setup: Option<&chartgen::setups::Reco
                 interval: &alert.interval,
                 evaluate_on: alert.evaluate_on,
                 condition: alert.condition,
-                level: alert.level,
+                level: &fired["level"],
+                indicator: fired.get("indicator"),
                 price: &fired["price"],
                 trigger: alert.trigger,
                 bar_time: &fired["bar_time"],
@@ -2260,6 +2540,27 @@ fn agent_body(fired: &str, alert: &Record, setup: Option<&chartgen::setups::Reco
         }
     }
     make(fits)
+}
+
+/// A bar's open time, in seconds.
+fn bar_time_of(bar: &Bar) -> Option<i64> {
+    bar.date.parse().ok()
+}
+
+/// Add a close to a window of closed bars. False, leaving the window as it was, if
+/// a close is missing before it: the indicator would read a gap as no time at all.
+fn add_close(bars: &mut Vec<Bar>, bar: Bar, interval: &str) -> bool {
+    if let (Some(last), Some(t), Ok(grid)) = (
+        bars.last().and_then(bar_time_of),
+        bar_time_of(&bar),
+        Interval::parse(interval),
+    ) {
+        if t > grid.grid_end(last) {
+            return false;
+        }
+    }
+    upsert_bar(bars, bar, indicator::WINDOW_BARS);
+    true
 }
 
 /// A `once` alert that fired: it holds no place among the live ones until re-armed.
@@ -2368,9 +2669,7 @@ async fn run_watch(
         };
         match event {
             Ok(event) => this.on_event(&key, event),
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                ServerAlerts::forget_baselines(&mut this.lock(), &key);
-            }
+            Err(broadcast::error::RecvError::Lagged(_)) => this.lost_events(&key),
             Err(broadcast::error::RecvError::Closed) => {
                 eprintln!("[alerts] feed {} {} ended", key.0, key.1);
                 drop(this);
@@ -2400,6 +2699,8 @@ async fn run_upkeep(alerts: Weak<ServerAlerts>) {
         }
     }
 }
+
+mod indicator;
 
 #[cfg(test)]
 mod tests;

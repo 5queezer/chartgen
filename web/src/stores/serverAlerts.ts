@@ -35,8 +35,16 @@ export function serverAlertStatus(a: ServerAlert): ServerAlertStatus {
   return a.active ? "active" : a.last_triggered_at !== null ? "triggered" : "paused";
 }
 
+/** What the alert watches and when it fires: "crossing 100.00", "RSI less than 25". */
+export function serverAlertCondition(a: ServerAlert): string {
+  const cond = CONDITION_LABELS[a.condition].toLowerCase();
+  const ind = a.indicator;
+  if (!ind) return `${cond} ${formatPrice(a.level ?? 0)}`;
+  return ind.compare === "close" ? `close ${cond} ${ind.line}` : `${ind.line} ${cond} ${a.level}`;
+}
+
 export function serverAlertText(a: ServerAlert): string {
-  const head = `${a.symbol} ${CONDITION_LABELS[a.condition].toLowerCase()} ${formatPrice(a.level)}`;
+  const head = `${a.symbol} ${serverAlertCondition(a)}`;
   return a.message ? `${head} — ${a.message}` : head;
 }
 
