@@ -1,0 +1,244 @@
+{
+  "create_setup_stated": {
+    "agent_revisions": 0,
+    "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
+    "bracket": "agent",
+    "closest_approach_r": null,
+    "costs": {
+      "fee_bps_per_side": 5.0,
+      "slippage_bps_per_side": 2.0
+    },
+    "created_at": 1767261600000,
+    "decision": "take",
+    "direction": "long",
+    "drawings": [],
+    "entry": {
+      "high": 60196.413329999996,
+      "low": 60075.89999
+    },
+    "exit": null,
+    "expires_at": 1767279600000,
+    "features": {
+      "example_flag": true,
+      "example_label": "a",
+      "example_number": 1.5
+    },
+    "fill": null,
+    "gap": false,
+    "id": "setup-000001",
+    "interval": "15m",
+    "invalidation": 59654.103299999995,
+    "log": [
+      {
+        "at": 1767261600000,
+        "by": "agent",
+        "changes": {
+          "features": {
+            "to": {
+              "example_flag": true,
+              "example_label": "a",
+              "example_number": 1.5
+            }
+          },
+          "playbook_version": {
+            "to": "v1"
+          },
+          "probability": {
+            "to": 0.6
+          }
+        },
+        "kind": "created",
+        "reason": null,
+        "seq": 1
+      }
+    ],
+    "mae_at": null,
+    "mae_r": null,
+    "mfe_at": null,
+    "mfe_r": null,
+    "pending": [],
+    "playbook_version": "v1",
+    "probability": 0.6,
+    "result_r": null,
+    "revisions": 1,
+    "scored_through": null,
+    "shadow_results": null,
+    "status": "watching",
+    "symbol": "BTCUSDT",
+    "tags": [],
+    "targets": [
+      60738.723359999996
+    ],
+    "thesis": "example thesis"
+  },
+  "get_track_record": {
+    "closed": 2,
+    "feature": null,
+    "group_by": null,
+    "groups": [],
+    "open": 0,
+    "replay": true,
+    "shadows": {
+      "v1_half_t1_be": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 1.05295,
+        "open": 0,
+        "total_r": 2.1059,
+        "with_result": 2
+      },
+      "v2_be_at_1r": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      },
+      "v3_time_stop": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      }
+    },
+    "total": {
+      "cancelled": 0,
+      "count": 2,
+      "entered": 2,
+      "expired": 0,
+      "gaps": 0,
+      "invalidated": 1,
+      "mean_r": 0.3056,
+      "mean_r_entered": 0.3056,
+      "probability": {
+        "mean": 0.5,
+        "observed": 0.5,
+        "observed_entered": 0.5,
+        "stated": 2,
+        "stated_entered": 2,
+        "won": 1,
+        "won_entered": 1
+      },
+      "total_r": 0.6112,
+      "with_result": 2,
+      "won": 1
+    },
+    "truncated": false
+  },
+  "get_track_record_grouped": {
+    "closed": 2,
+    "feature": "example_flag",
+    "group_by": "feature",
+    "groups": [
+      {
+        "cancelled": 0,
+        "count": 1,
+        "entered": 1,
+        "expired": 0,
+        "gaps": 0,
+        "invalidated": 0,
+        "key": null,
+        "mean_r": 1.7659,
+        "mean_r_entered": 1.7659,
+        "probability": {
+          "mean": 0.4,
+          "observed": 1.0,
+          "observed_entered": 1.0,
+          "stated": 1,
+          "stated_entered": 1,
+          "won": 1,
+          "won_entered": 1
+        },
+        "total_r": 1.7659,
+        "with_result": 1,
+        "won": 1
+      },
+      {
+        "cancelled": 0,
+        "count": 1,
+        "entered": 1,
+        "expired": 0,
+        "gaps": 0,
+        "invalidated": 1,
+        "key": true,
+        "mean_r": -1.1547,
+        "mean_r_entered": -1.1547,
+        "probability": {
+          "mean": 0.6,
+          "observed": 0.0,
+          "observed_entered": 0.0,
+          "stated": 1,
+          "stated_entered": 1,
+          "won": 0,
+          "won_entered": 0
+        },
+        "total_r": -1.1547,
+        "with_result": 1,
+        "won": 0
+      }
+    ],
+    "open": 0,
+    "replay": true,
+    "shadows": {
+      "v1_half_t1_be": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 1.05295,
+        "open": 0,
+        "total_r": 2.1059,
+        "with_result": 2
+      },
+      "v2_be_at_1r": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      },
+      "v3_time_stop": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      }
+    },
+    "total": {
+      "cancelled": 0,
+      "count": 2,
+      "entered": 2,
+      "expired": 0,
+      "gaps": 0,
+      "invalidated": 1,
+      "mean_r": 0.3056,
+      "mean_r_entered": 0.3056,
+      "probability": {
+        "mean": 0.5,
+        "observed": 0.5,
+        "observed_entered": 0.5,
+        "stated": 2,
+        "stated_entered": 2,
+        "won": 1,
+        "won_entered": 1
+      },
+      "total_r": 0.6112,
+      "with_result": 2,
+      "won": 1
+    },
+    "truncated": false
+  }
+}

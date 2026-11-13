@@ -330,6 +330,12 @@ older build left waiting in its own queue is moved into the log at the first sta
 newer build, under its own id and with the time of its fire, and sent from there by the same
 rule; the start log says how many. No step is needed on the file in either direction.
 
+A build from before the three stated fields of a setup
+([ADR-0064](/chartgen/decisions/0064-a-setups-record/)) does not show a setup's `features`,
+`probability` and `playbook_version`, and **when it writes that setup, after a revision or a
+status change, the stored record loses them.** The setup's log keeps them, and the newer build
+reads them from the log at start, so they are back after the roll forward. No step is needed.
+
 Before turning it on:
 
 - Treat each listed id as a credential ([below](#a-listed-client-id-is-a-credential)).

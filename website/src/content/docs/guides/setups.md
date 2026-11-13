@@ -183,6 +183,20 @@ the server's own status moves included.
 - Once a setup is filled its levels are fixed.
 - Cancelling a filled setup closes it at the next bar's open and scores it.
 
+## What a setup was made with
+
+When you make a setup you can state three more things ([ADR-0064](/chartgen/decisions/0064-a-setups-record/)):
+
+- `features`: what you measured, as a flat object of at most 16 short entries, for example
+  `{ "example_number": 1.5, "example_flag": true }`.
+- `probability`: your own estimate, from 0 to 1, that it reaches its first target.
+- `playbook_version`: a short label for the rules you followed.
+
+The server gives them no meaning. **They are fixed once the setup is made:** no tool changes
+them, because a record that could be rewritten after the outcome is no record. If one was
+wrong, cancel the setup and make a new one. Keeping a feature's name meaning the same thing
+from one setup to the next is yours to do; change `playbook_version` when it does not.
+
 ## Skips
 
 A decision **not** to trade is worth recording too. `decision: "skip"` stores it with a
@@ -198,6 +212,31 @@ cancelled.
 Per owner: 20 open setups, 500 in total, open setups on 5 symbols, 50 revisions per setup (tags
 alone on a closed setup do not count), 10 changes a minute, and 4 MiB for setups and their logs. Closed setups are kept; at a limit a new
 one is refused and nothing old is dropped. `list_setups` returns the limits.
+
+## Your track record
+
+`get_track_record` counts your closed setups: how many, how they ended, the total and mean
+result in R, and your stated probability beside the share that won. You can filter by
+symbol, direction, decision, `playbook_version` and the time a setup was made, and group by
+one of `playbook_version`, one feature, the probability in tenths, symbol or direction. The
+[reference](/chartgen/reference/mcp/#your-track-record) has the fields.
+
+**It counts and judges nothing.** Read it with care:
+
+- **A small group means little.** Three wins of four is not a rate.
+- Setups that are open at the same time, on the same market, for the same reason are one
+  observation more than they are several.
+- A result with `gap: true` does not cover what the server missed, and a setup with no
+  result is counted but not in the mean.
+- **A setup that was cancelled, ran out or was invalidated before its entry was reached has a result of 0 R.
+  It is in `mean_r` and in the observed share,** and pulls both towards 0. `entered` and
+  `mean_r_entered` count only the setups whose entry was reached, and `observed_entered` is
+  the share that won among those.
+- `shadows` puts the fixed exit variants side by side over the setups that traded, with
+  those whose variant is still open counted apart. **Compare each with its own canonical
+  figures,** not with the total: v1's open positions are the runners after T1, so until they
+  end its closed ones are mostly losers.
+- Skips are in it as well, scored with the server's bracket. Filter with `decision`.
 
 ## When the server was away
 

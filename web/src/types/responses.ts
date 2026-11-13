@@ -967,6 +967,11 @@ export const SetupSchema = SetupLevelsSchema.extend({
   bars_to_exit: z.number().nonnegative().nullable(),
   bars_to_mae: z.number().nonnegative().nullable(),
   bars_to_mfe: z.number().nonnegative().nullable(),
+  // What the agent stated when it made the setup (ADR-0064): fixed from then on, and
+  // absent when it stated none. The server gives them no meaning.
+  features: z.record(z.string(), z.union([z.number(), z.boolean(), z.string()])).optional(),
+  probability: z.number().min(0).max(1).optional(),
+  playbook_version: z.string().optional(),
 });
 export type Setup = z.infer<typeof SetupSchema>;
 
@@ -1005,6 +1010,85 @@ export const SetupsPayloadSchema = z.object({
   setups: z.array(SetupSchema),
 });
 export type SetupsPayload = z.infer<typeof SetupsPayloadSchema>;
+
+// ---------------------------------------------------------------------------
+// Track record (ADR-0064)
+//   Produced by `Setups::track_record` in `src/setup_service.rs` and `track_record`
+//   in `src/setups.rs`: counts and sums over the caller's closed setups. It judges
+//   nothing; a group of a few setups says little.
+// ---------------------------------------------------------------------------
+
+const TrackRecordCountsSchema = z.object({
+  count: z.number().int(),
+  won: z.number().int(),
+  invalidated: z.number().int(),
+  expired: z.number().int(),
+  cancelled: z.number().int(),
+  /** Setups with a result in R. One that expired filled while nobody scored it has none. */
+  with_result: z.number().int(),
+  total_r: z.number(),
+  /** Over `with_result`; null when that is 0. A setup that never traded is in it with 0 R. */
+  mean_r: z.number().nullable(),
+  /** Setups whose entry was reached, and the mean over those of them with a result. */
+  entered: z.number().int(),
+  mean_r_entered: z.number().nullable(),
+  /** Results that do not cover bars the server missed. */
+  gaps: z.number().int(),
+  /** Of the setups that stated a probability: its mean, and how many of them won. */
+  probability: z.object({
+    stated: z.number().int(),
+    mean: z.number().nullable(),
+    won: z.number().int(),
+    observed: z.number().nullable(),
+    /** The same over those whose entry was reached: a setup that never traded cannot win. */
+    stated_entered: z.number().int(),
+    won_entered: z.number().int(),
+    observed_entered: z.number().nullable(),
+  }).strict(),
+}).strict();
+
+/** One fixed exit variant over the closed setups that have one (ADR-0066). */
+const TrackRecordVariantSchema = z.object({
+  closed: z.number().int(),
+  with_result: z.number().int(),
+  total_r: z.number(),
+  /** Over `with_result`; null when that is 0. */
+  mean_r: z.number().nullable(),
+  /**
+   * The canonical result over the same setups, the pair to compare with: v1's open ones
+   * are runners after T1, so its closed set leans to losers until they end.
+   */
+  canonical_total_r: z.number(),
+  canonical_mean_r: z.number().nullable(),
+  /** Variants of closed setups that are still open, which they can be for a while. */
+  open: z.number().int(),
+}).strict();
+
+export const TrackRecordPayloadSchema = z.object({
+  replay: z.boolean(),
+  /** Closed setups counted, and open ones that match the filters and are not. */
+  closed: z.number().int(),
+  open: z.number().int(),
+  /** True when older closed setups were left out. */
+  truncated: z.boolean(),
+  group_by: z.enum(["playbook_version", "feature", "probability", "symbol", "direction"]).nullable(),
+  feature: z.string().nullable(),
+  total: TrackRecordCountsSchema,
+  /** In the order of the keys; null is the group of setups that stated none. */
+  groups: z.array(
+    TrackRecordCountsSchema.extend({
+      // A number is written as a decimal: 1 and 1.0 are the one group `1.0`.
+      key: z.union([z.string(), z.number(), z.boolean()]).nullable(),
+    }),
+  ),
+  /** Per fixed exit variant, over the filled setups among those counted. */
+  shadows: z.object({
+    v1_half_t1_be: TrackRecordVariantSchema,
+    v2_be_at_1r: TrackRecordVariantSchema,
+    v3_time_stop: TrackRecordVariantSchema,
+  }).strict(),
+}).strict();
+export type TrackRecordPayload = z.infer<typeof TrackRecordPayloadSchema>;
 
 // ---------------------------------------------------------------------------
 // GET /admin/overview — `src/server/admin.rs` (ADR-0063). The operator page's

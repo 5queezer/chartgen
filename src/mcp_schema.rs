@@ -457,12 +457,13 @@ pub fn tools_list_result() -> Value {
 
 /// Names of the setup tools (ADR-0059). They answer on the HTTP transport, where a
 /// call has an owner.
-pub const SETUP_TOOLS: [&str; 5] = [
+pub const SETUP_TOOLS: [&str; 6] = [
     "create_setup",
     "revise_setup",
     "get_setup",
     "list_setups",
     "cancel_setup",
+    "get_track_record",
 ];
 
 /// Name of the tool that reads the event log back (ADR-0061).
@@ -490,12 +491,14 @@ pub fn event_tools() -> Vec<Value> {
 /// always include them.
 pub fn setup_tools() -> Vec<Value> {
     use crate::setups::{
-        FEE_BPS_PER_SIDE, MAX_REASON, MAX_TAG, MAX_TAGS, MAX_TARGETS, MAX_THESIS,
-        MIN_RISK_IN_ROUND_TRIP_COSTS, SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR,
-        SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
+        FEE_BPS_PER_SIDE, MAX_FEATURES, MAX_REASON, MAX_RECORD_GROUPS, MAX_STATED_TEXT, MAX_TAG,
+        MAX_TAGS, MAX_TARGETS, MAX_THESIS, MIN_RISK_IN_ROUND_TRIP_COSTS, SKIP_ATR_LENGTH,
+        SKIP_EXPIRY_BARS, SKIP_STOP_ATR, SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
     };
     let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." });
     let time = "unix seconds, unix ms or an ISO 8601 time";
+    // The same number as `TRACK_RECORD_SETUPS` of the service that answers the tool.
+    const TRACK_RECORD: usize = 500;
     let entry = json!({
         "type": "object",
         "description": "The price zone the setup is entered in. The same price twice is a level.",
@@ -534,6 +537,9 @@ pub fn setup_tools() -> Vec<Value> {
                     "targets": targets.clone(),
                     "expires_at": expires_at.clone(),
                     "tags": tags.clone(),
+                    "features": { "type": "object", "maxProperties": MAX_FEATURES, "propertyNames": { "pattern": "^[a-z0-9_]{1,32}$" }, "additionalProperties": { "type": ["number", "boolean", "string"], "maxLength": MAX_STATED_TEXT }, "description": format!("Optional. What you measured when you made this setup, as a flat object of at most {MAX_FEATURES} entries: names of a-z, 0-9 and _, values a number, true or false, or a string of at most {MAX_STATED_TEXT} characters. The server gives them no meaning. Fixed once the setup is made; get_track_record can group by one of them.") },
+                    "probability": { "type": "number", "minimum": 0, "maximum": 1, "description": "Optional. Your own estimate, from 0 to 1, that this setup reaches its first target. Fixed once the setup is made; get_track_record shows it beside what happened." },
+                    "playbook_version": { "type": "string", "maxLength": MAX_STATED_TEXT, "description": format!("Optional. A label of at most {MAX_STATED_TEXT} characters for the rules you followed, so that results can be told apart by it. Fixed once the setup is made.") },
                     "as_of": as_of.clone()
                 },
                 "required": ["symbol", "interval", "direction", "thesis"]
@@ -587,8 +593,26 @@ pub fn setup_tools() -> Vec<Value> {
             "description": "Cancel one of your open setups, with a reason. It counts from the first 1m bar that opens after this call: a setup still watching then ends as cancelled with a result of 0, and a filled one is closed at that bar's open and scored, so a cancel cannot remove a loss. If the bar forming now closes the setup first, that outcome stands. A skip cannot be cancelled. Returns the setup as get_setup does.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "id": id, "reason": reason, "as_of": as_of },
+                "properties": { "id": id, "reason": reason, "as_of": as_of.clone() },
                 "required": ["id", "reason"]
+            }
+        }),
+        json!({
+            "name": "get_track_record",
+            "description": format!("Count your closed setups: how many, how they ended (won, invalidated, expired, cancelled), the total and mean result in R, how many results have a gap, and your stated probability beside what happened. A setup that was cancelled, expired or invalidated before its entry was reached has a result of 0 R and is in mean_r and in the observed share; entered and mean_r_entered count only the setups that were entered, and probability's stated_entered, won_entered and observed_entered give the share over those. shadows counts each fixed exit variant (ADR-0066) over the filled setups among them: closed, their total and mean R, canonical_total_r and canonical_mean_r (the setups' own result over the same setups), and how many are still open. An open v1 is a runner after T1, a winner, so v1's closed ones lean to losers until those end: compare a variant only with its own canonical figures, never with total. Optionally only those of a symbol, a direction, a decision, a playbook_version or made in a time range, and optionally grouped by one thing they were made with. It reports counts and sums and judges nothing: no significance, no ranking. A group of a few setups says little, and setups are not independent trials when they overlap in time or share a cause. Open setups are not counted. At most your newest {TRACK_RECORD} closed setups are read."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Only setups on this symbol." },
+                    "direction": { "type": "string", "enum": ["long", "short"] },
+                    "decision": { "type": "string", "enum": ["take", "skip"], "description": "Only setups you took, or only decisions not to trade." },
+                    "playbook_version": { "type": "string", "maxLength": MAX_STATED_TEXT, "description": "Only setups made with this playbook_version." },
+                    "from": { "type": ["integer", "string"], "description": format!("Only setups made at or after this time, as {time}.") },
+                    "to": { "type": ["integer", "string"], "description": format!("Only setups made before this time, as {time}.") },
+                    "group_by": { "type": "string", "enum": ["playbook_version", "feature", "probability", "symbol", "direction"], "description": format!("Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). A setup that stated none is in the group whose key is null. More than {MAX_RECORD_GROUPS} groups are refused.") },
+                    "feature": { "type": "string", "maxLength": MAX_STATED_TEXT, "description": "With group_by: feature, the name of the feature to group by." },
+                    "as_of": as_of
+                }
             }
         }),
     ]

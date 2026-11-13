@@ -10,6 +10,7 @@ sidebar:
 **Amends:** [ADR-0054](/chartgen/decisions/0054-agent-drawings/) (a setup stores drawings on the
 server) and [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (its limit of 16 watched pairs
 counts the feeds of setups too)
+**Amended by:** [ADR-0064](/chartgen/decisions/0064-a-setups-record/) (a setup can state features, a probability and a playbook version that no tool changes afterwards; `get_track_record` counts closed setups)
 
 ## Context and Problem Statement
 

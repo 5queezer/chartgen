@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import answers from "../../../tests/fixtures/setup_responses.json";
+import record from "../../../tests/fixtures/track_record_responses.json";
 import {
   EventsPayloadSchema,
   ListIndicatorsPayloadSchema,
@@ -8,6 +9,7 @@ import {
   SetupPayloadSchema,
   SetupsPayloadSchema,
   SummaryPayloadSchema,
+  TrackRecordPayloadSchema,
 } from "./responses";
 
 const series = {
@@ -327,3 +329,52 @@ describe("list_events (ADR-0061)", () => {
     ).toThrow();
   });
 });
+
+describe("what a setup was made with, and the track record (ADR-0064)", () => {
+  it("parses a setup that states the three fields, as the server answers it", () => {
+    const setup = SetupPayloadSchema.parse(record.create_setup_stated);
+    expect(setup.probability).toBe(0.6);
+    expect(setup.playbook_version).toBe("v1");
+    expect(setup.features).toEqual({ example_number: 1.5, example_flag: true, example_label: "a" });
+  });
+
+  it("leaves them out of a setup made without them", () => {
+    const setup = SetupPayloadSchema.parse(answers.create_setup);
+    expect(setup.features).toBeUndefined();
+    expect(setup.probability).toBeUndefined();
+    expect(setup.playbook_version).toBeUndefined();
+  });
+
+  it("parses the record, with every field the server sends and no other", () => {
+    const all = TrackRecordPayloadSchema.strict().parse(record.get_track_record);
+    expect(all.closed).toBe(2);
+    expect(all.total.entered).toBeLessThanOrEqual(all.total.count);
+    expect(all.groups).toEqual([]);
+    const grouped = TrackRecordPayloadSchema.strict().parse(record.get_track_record_grouped);
+    expect(grouped.group_by).toBe("feature");
+    expect(grouped.groups.map((g) => g.key)).toEqual([null, true]);
+    expect(grouped.groups.reduce((n, g) => n + g.count, 0)).toBe(grouped.total.count);
+  });
+
+  it("refuses a field the server does not send, at every level of the record", () => {
+    const strict = (change: (r: Record<string, any>) => void) => {
+      const r = structuredClone(record.get_track_record_grouped) as Record<string, any>;
+      change(r);
+      return TrackRecordPayloadSchema.safeParse(r).success;
+    };
+    expect(strict(() => {})).toBe(true);
+    expect(strict((r) => (r.extra = 1))).toBe(false);
+    expect(strict((r) => (r.total.extra = 1))).toBe(false);
+    expect(strict((r) => (r.total.probability.extra = 1))).toBe(false);
+    expect(strict((r) => (r.groups[0].extra = 1))).toBe(false);
+    expect(strict((r) => (r.shadows.extra = 1))).toBe(false);
+    expect(strict((r) => (r.shadows.v1_half_t1_be.extra = 1))).toBe(false);
+  });
+
+  it("refuses a group whose key is not a value a setup can state", () => {
+    const bad = structuredClone(record.get_track_record_grouped) as { groups: { key: unknown }[] };
+    bad.groups[0]!.key = { nested: 1 };
+    expect(() => TrackRecordPayloadSchema.parse(bad)).toThrow();
+  });
+});
+

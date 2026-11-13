@@ -2270,3 +2270,817 @@ async fn the_event_log_is_tidied_where_only_setups_run() {
         "the numbers go on"
     );
 }
+
+// ---- ADR-0064: what a setup was made with, and the record read back ----
+
+/// `long()` with the three fields an agent may state when it makes a setup.
+fn stated() -> Value {
+    let mut args = long();
+    args["features"] = json!({ "example_number": 1.5, "example_flag": true, "example_label": "a" });
+    args["probability"] = json!(0.6);
+    args["playbook_version"] = json!("v1");
+    args
+}
+
+/// The three fields are stored with the setup and shown by every answer, and the first
+/// entry of its log holds them too. The log is what the store keeps from being
+/// rewritten, so what a setup was made with cannot be changed afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_setup_was_made_with_is_stored_shown_and_in_its_first_log_entry() {
+    let (store, dir) = store_at("stated");
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    let features = json!({ "example_flag": true, "example_label": "a", "example_number": 1.5 });
+    for view in [
+        made.clone(),
+        call(&s, "get_setup", json!({ "id": made["id"] }), "owner").unwrap(),
+        call(&s, "list_setups", json!({}), "owner").unwrap()["setups"][0].clone(),
+    ] {
+        assert_eq!(view["features"], features);
+        assert_eq!(view["probability"], 0.6);
+        assert_eq!(view["playbook_version"], "v1");
+    }
+    let first = &made["log"][0];
+    assert_eq!(first["kind"], "created");
+    assert_eq!(
+        first["changes"],
+        json!({
+            "features": { "to": features },
+            "probability": { "to": 0.6 },
+            "playbook_version": { "to": "v1" },
+        })
+    );
+
+    // The store refuses to write that entry again with other values.
+    let id = id_of(&made);
+    let record = store.setups().unwrap().remove(0).0;
+    let altered = first.to_string().replace("0.6", "0.9");
+    let rewrite = persistence::StoredSetup {
+        id: id.clone(),
+        owner: "owner".to_string(),
+        record,
+        revisions: vec![(1, altered)],
+    };
+    let refused = store.save_setups(&[rewrite]).unwrap_err().to_string();
+    assert!(refused.contains("append-only"), "{refused}");
+
+    // A restart reads them back, and a status the server gives leaves them alone.
+    drop(s);
+    let s = live_on(
+        reopen(&dir.db()),
+        hub(),
+        Access::parse(None),
+        Limits::default(),
+        None,
+    );
+    let (t, p) = (first_bar(&made), mid(&made));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    let later = call(&s, "get_setup", json!({ "id": id }), "owner").unwrap();
+    assert_eq!(later["status"], "triggered");
+    assert_eq!(later["features"], features);
+    assert_eq!(
+        (
+            later["probability"].clone(),
+            later["playbook_version"].clone()
+        ),
+        (json!(0.6), json!("v1"))
+    );
+    assert_eq!(later["log"][0], *first);
+}
+
+/// A setup made without them shows none of the three, and its log entry is as it was
+/// before they existed: answers of such setups do not change by a byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_setup_made_without_them_shows_none_of_the_three() {
+    let s = live();
+    let made = created(&s, "owner");
+    let listed = call(&s, "list_setups", json!({}), "owner").unwrap()["setups"][0].clone();
+    for view in [&made, &listed] {
+        for field in ["features", "probability", "playbook_version"] {
+            assert!(view.get(field).is_none(), "{field} in {view}");
+        }
+    }
+    assert_eq!(made["log"][0]["changes"], json!({}));
+    let stored = s.store.setups().unwrap().remove(0).0;
+    assert!(
+        !stored.contains("features")
+            && !stored.contains("probability")
+            && !stored.contains("playbook")
+    );
+}
+
+/// A record that could be rewritten after the outcome is no record: no tool takes the
+/// three fields after the setup was made, open or closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_setup_was_made_with_cannot_be_revised() {
+    let s = live();
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    for (field, value) in [
+        ("features", json!({ "example_number": 2.5 })),
+        ("features", json!(null)),
+        ("probability", json!(0.9)),
+        ("playbook_version", json!("v2")),
+    ] {
+        let mut args = json!({ "id": made["id"], "reason": "example reason", "thesis": "another example thesis" });
+        args[field] = value;
+        let refused = call(&s, "revise_setup", args, "owner").unwrap_err();
+        assert_eq!(errors(&refused), [field], "{refused}");
+        assert!(
+            refused.contains("is fixed when a setup is made"),
+            "{refused}"
+        );
+        let mut args = json!({ "id": made["id"], "reason": "example reason" });
+        args[field] = json!(0.9);
+        let refused = call(&s, "cancel_setup", args, "owner").unwrap_err();
+        assert!(
+            refused.contains("is fixed when a setup is made"),
+            "{refused}"
+        );
+    }
+    // Nothing of those calls was applied, the thesis they carried included.
+    let now = call(&s, "get_setup", json!({ "id": made["id"] }), "owner").unwrap();
+    assert_eq!(now, made);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_three_fields_are_checked_and_bounded() {
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
+    let long_text = "x".repeat(33);
+    let many: serde_json::Map<String, Value> =
+        (0..17).map(|i| (format!("key_{i}"), json!(i))).collect();
+    for (field, bad) in [
+        ("features", json!([1, 2])),
+        ("features", json!("example")),
+        ("features", json!(many)),
+        ("features.Example", json!({ "Example": 1 })),
+        ("features.has space", json!({ "has space": 1 })),
+        ("features.", json!({ "": 1 })),
+        ("features.example", json!({ "example": [1] })),
+        ("features.example", json!({ "example": { "nested": 1 } })),
+        ("features.example", json!({ "example": null })),
+        ("features.example", json!({ "example": long_text })),
+        ("probability", json!(-0.01)),
+        ("probability", json!(1.01)),
+        ("probability", json!("0.5")),
+        ("playbook_version", json!("")),
+        ("playbook_version", json!(long_text)),
+        ("playbook_version", json!(3)),
+    ] {
+        let mut args = long();
+        let top = field.split('.').next().unwrap();
+        args[top] = bad.clone();
+        let refused = call(&s, "create_setup", args, "owner").unwrap_err();
+        assert_eq!(errors(&refused), [field], "{bad}: {refused}");
+    }
+    let key = "k".repeat(33);
+    let mut args = long();
+    args["features"] = json!({ key.clone(): 1 });
+    let refused = call(&s, "create_setup", args, "owner").unwrap_err();
+    assert!(refused.contains("at most 32"), "{refused}");
+    assert!(s.store.setups().unwrap().is_empty(), "nothing was stored");
+
+    // The edges are taken: 16 entries, 32 characters, 0 and 1, and null as not given.
+    let mut full: serde_json::Map<String, Value> =
+        (0..15).map(|i| (format!("key_{i}"), json!(i))).collect();
+    full.insert("k".repeat(32), json!("x".repeat(32)));
+    for (probability, features) in [
+        (json!(0), json!(full)),
+        (json!(1), json!({})),
+        (json!(null), json!(null)),
+    ] {
+        let mut args = long();
+        args["probability"] = probability;
+        args["features"] = features;
+        args["playbook_version"] = json!("x".repeat(32));
+        call(&s, "create_setup", args, "owner").unwrap();
+    }
+}
+
+/// The log's first entry is what says what a setup was made with. A record row that
+/// lost the three fields, as a build from before them writes it, or that holds other
+/// values, is read with the log's values at the next start.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_setup_was_made_with_is_read_from_its_log_at_start() {
+    let (store, dir) = store_at("restated");
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    let plain = created(&s, "owner");
+    drop(s);
+
+    let rewrite = |change: &dyn Fn(&mut Value)| {
+        let row = store.setups().unwrap().into_iter().map(|(row, _)| row);
+        let mut record: Value = row
+            .map(|row| serde_json::from_str::<Value>(&row).unwrap())
+            .find(|r| r["id"] == made["id"])
+            .unwrap();
+        change(&mut record);
+        let row = persistence::StoredSetup {
+            id: id_of(&made),
+            owner: "owner".to_string(),
+            record: record.to_string(),
+            revisions: Vec::new(),
+        };
+        store.save_setups(&[row]).unwrap();
+    };
+    let read = |id: &Value| {
+        let s = live_on(
+            reopen(&dir.db()),
+            hub(),
+            Access::parse(None),
+            Limits::default(),
+            None,
+        );
+        call(&s, "get_setup", json!({ "id": id }), "owner").unwrap()
+    };
+
+    // As an older build stores the setup when it writes it: without the fields.
+    rewrite(&|record| {
+        for field in setups::STATED_FIELDS {
+            record.as_object_mut().unwrap().remove(field);
+        }
+    });
+    assert_eq!(read(&made["id"]), made, "all three are back, from the log");
+    // And a row that says something else does not count.
+    rewrite(&|record| {
+        record["probability"] = json!(0.99);
+        record["playbook_version"] = json!("another");
+        record["features"] = json!({ "example_number": 9 });
+    });
+    assert_eq!(read(&made["id"]), made);
+    // A setup made without them still has none.
+    assert_eq!(read(&plain["id"]), plain);
+}
+
+/// A setup that the bars fill and then take to its target, or through its
+/// invalidation. Returns it as it is afterwards.
+fn closed(s: &Setups, args: Value, owner: &str, win: bool) -> Value {
+    let made = call(s, "create_setup", args, owner).unwrap();
+    let (t, p) = (first_bar(&made), mid(&made));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    let end = match win {
+        true => bar(t + MINUTE_MS, p * 0.976, p * 1.06, p * 0.976, p * 1.05),
+        false => bar(t + MINUTE_MS, p * 0.976, p * 0.976, p * 0.9, p * 0.9),
+    };
+    s.on_bar(&key(), end);
+    let now = call(s, "get_setup", json!({ "id": made["id"] }), owner).unwrap();
+    assert_eq!(
+        now["status"],
+        if win { "won" } else { "invalidated" },
+        "{now}"
+    );
+    now
+}
+
+fn with(mut args: Value, more: Value) -> Value {
+    for (k, v) in more.as_object().unwrap() {
+        args[k] = v.clone();
+    }
+    args
+}
+
+fn keys(record: &Value) -> Vec<Value> {
+    let groups = record["groups"].as_array().unwrap();
+    groups.iter().map(|g| g["key"].clone()).collect()
+}
+
+/// `get_track_record` counts the caller's closed setups, in all and per group, and
+/// shows the stated probability beside what happened. Open setups and other owners'
+/// are not in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
+    let record = |args: Value| call(&s, "get_track_record", args, "owner").unwrap();
+    let nothing = record(json!({}));
+    assert_eq!(
+        (nothing["closed"].clone(), nothing["total"]["count"].clone()),
+        (json!(0), json!(0))
+    );
+    assert!(
+        nothing["total"]["mean_r"].is_null(),
+        "no mean of nothing: {nothing}"
+    );
+    assert!(nothing["total"]["probability"]["observed"].is_null());
+
+    let a = closed(&s, stated(), "owner", true);
+    let b_args = with(
+        long(),
+        json!({ "features": { "example_flag": false }, "probability": 0.25, "playbook_version": "v1" }),
+    );
+    let b = closed(&s, b_args, "owner", false);
+    let c = closed(&s, long(), "owner", true);
+    closed(&s, stated(), "someone-else", true);
+    created(&s, "owner");
+
+    let r = |v: &Value| v["result_r"].as_f64().unwrap();
+    let sum = r(&a) + r(&b) + r(&c);
+    let all = record(json!({}));
+    assert_eq!(
+        (all["closed"].clone(), all["open"].clone()),
+        (json!(3), json!(1))
+    );
+    assert_eq!(all["truncated"], false);
+    assert_eq!(all["groups"], json!([]));
+    assert!(all["group_by"].is_null() && all["feature"].is_null());
+    let total = &all["total"];
+    assert_eq!(
+        (
+            total["count"].clone(),
+            total["won"].clone(),
+            total["invalidated"].clone()
+        ),
+        (json!(3), json!(2), json!(1))
+    );
+    assert_eq!(
+        (total["expired"].clone(), total["cancelled"].clone()),
+        (json!(0), json!(0))
+    );
+    assert_eq!(
+        (total["with_result"].clone(), total["gaps"].clone()),
+        (json!(3), json!(0))
+    );
+    assert!((total["total_r"].as_f64().unwrap() - sum).abs() < 1e-9);
+    assert!((total["mean_r"].as_f64().unwrap() - sum / 3.0).abs() < 1e-9);
+    // Two stated a probability: 0.6 and won, 0.25 and lost. Both were entered.
+    assert_eq!(
+        total["probability"],
+        json!({ "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
+            "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 })
+    );
+
+    let by_version = record(json!({ "group_by": "playbook_version" }));
+    assert_eq!(keys(&by_version), [json!(null), json!("v1")]);
+    assert_eq!(by_version["groups"][0]["count"], 1);
+    assert_eq!(by_version["groups"][1]["count"], 2);
+    assert_eq!(by_version["groups"][1]["won"], 1);
+    assert_eq!(
+        by_version["total"], all["total"],
+        "the total does not depend on the grouping"
+    );
+    assert_eq!(
+        keys(&record(json!({ "group_by": "probability" }))),
+        [json!(null), json!(0.2), json!(0.6)]
+    );
+    let by_flag = record(json!({ "group_by": "feature", "feature": "example_flag" }));
+    assert_eq!(keys(&by_flag), [json!(null), json!(false), json!(true)]);
+    assert_eq!(by_flag["feature"], "example_flag");
+    assert_eq!(
+        keys(&record(
+            json!({ "group_by": "feature", "feature": "no_such" })
+        )),
+        [json!(null)]
+    );
+    assert_eq!(
+        keys(&record(json!({ "group_by": "symbol" }))),
+        [json!("BTCUSDT")]
+    );
+    assert_eq!(
+        keys(&record(json!({ "group_by": "direction" }))),
+        [json!("long")]
+    );
+
+    // Filters.
+    for (filter, count) in [
+        (json!({ "playbook_version": "v1" }), 2),
+        (json!({ "playbook_version": "v2" }), 0),
+        (json!({ "direction": "short" }), 0),
+        (
+            json!({ "direction": "long", "decision": "take", "symbol": "btcusdt" }),
+            3,
+        ),
+        (json!({ "decision": "skip" }), 0),
+        (json!({ "symbol": "ETHUSDT" }), 0),
+        (json!({ "from": "2020-01-01" }), 3),
+        (json!({ "to": "2020-01-01" }), 0),
+        (
+            json!({ "from": a["created_at"], "to": a["created_at"].as_i64().unwrap() + 1 }),
+            1,
+        ),
+    ] {
+        assert_eq!(record(filter.clone())["total"]["count"], count, "{filter}");
+    }
+
+    // What it does not take.
+    for (bad, field) in [
+        (json!({ "group_by": "thesis" }), "group_by"),
+        (json!({ "group_by": "feature" }), "feature"),
+        (json!({ "feature": "example_flag" }), "feature"),
+        (
+            json!({ "group_by": "symbol", "feature": "example_flag" }),
+            "feature",
+        ),
+        (json!({ "direction": "up" }), "direction"),
+        (json!({ "decision": "maybe" }), "decision"),
+        (json!({ "from": "yesterday" }), "from"),
+        (json!({ "status": "won" }), "status"),
+        (
+            json!({ "playbook_version": "x".repeat(33) }),
+            "playbook_version",
+        ),
+    ] {
+        let refused = call(&s, "get_track_record", bad.clone(), "owner").unwrap_err();
+        assert_eq!(errors(&refused), [field], "{bad}: {refused}");
+    }
+    assert_eq!(
+        call(&s, "get_track_record", json!({}), "a-stranger").unwrap()["closed"],
+        0
+    );
+
+    // A grouping with more values than an answer holds is refused, not cut.
+    let one = s.owned("owner", &id_of(&a)).unwrap();
+    let many: Vec<Record> = (0..=setups::MAX_RECORD_GROUPS)
+        .map(|i| {
+            let mut r = one.clone();
+            r.features = Some(serde_json::Map::from_iter([("n".to_string(), json!(i))]));
+            r
+        })
+        .collect();
+    let all_of_them: Vec<&Record> = many.iter().collect();
+    let by = setups::GroupBy::Feature("n".to_string());
+    assert!(setups::track_record(&all_of_them, Some(&by)).is_err());
+    let (total, groups) = setups::track_record(&all_of_them[1..], Some(&by)).unwrap();
+    assert_eq!((total["count"].clone(), groups.len()), (json!(50), 50));
+    assert_eq!(
+        groups[1]["key"], 2.0,
+        "by number, not by text: {}",
+        groups[1]
+    );
+}
+
+/// A result with a gap, an expiry without a result and a cancellation are counted as
+/// what they are: a mean is over the results there are.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_counts_what_has_no_result_without_inventing_one() {
+    let s = live();
+    let cancelled = created(&s, "owner");
+    let cancel = json!({ "id": cancelled["id"], "reason": "example reason" });
+    call(&s, "cancel_setup", cancel, "owner").unwrap();
+    let (t, p) = (first_bar(&cancelled), mid(&cancelled));
+    s.on_bar(&key(), bar(t, p, p, p, p));
+    let won = closed(&s, long(), "owner", true);
+    // One that expired filled while nobody scored it: no result, and a gap.
+    let mut lost = s.owned("owner", &id_of(&won)).unwrap();
+    lost.id = "made-up".to_string();
+    lost.status = Status::Expired;
+    lost.result_r = None;
+    lost.gap = true;
+    let key = ("owner".to_string(), lost.id.clone());
+    let held = Held {
+        record: lost,
+        record_bytes: 0,
+        log_bytes: 0,
+    };
+    s.lock().setups.insert(key, held);
+
+    let total = call(&s, "get_track_record", json!({}), "owner").unwrap()["total"].clone();
+    assert_eq!(
+        (
+            total["count"].clone(),
+            total["won"].clone(),
+            total["expired"].clone(),
+            total["cancelled"].clone()
+        ),
+        (json!(3), json!(1), json!(1), json!(1))
+    );
+    assert_eq!(total["gaps"], 1);
+    let results = total["with_result"].as_u64().unwrap();
+    assert!(results < 3, "the gap has no result: {total}");
+    let mean = total["total_r"].as_f64().unwrap() / results as f64;
+    assert!((total["mean_r"].as_f64().unwrap() - mean).abs() < 1e-9);
+}
+
+/// On a replay server the record is answered as of a time, as every tool there is,
+/// and is the same on every run: it is what an evaluation reads its score from.
+#[tokio::test]
+async fn the_track_record_on_a_replay_is_the_same_on_every_run() {
+    let run = || {
+        crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), |replay| {
+            let s = replaying(replay);
+            let p = replay.quote("BTCUSDT", at_minute(1500)).unwrap().0;
+            for (i, probability) in [0.3, 0.7].into_iter().enumerate() {
+                let args = json!({
+                    "symbol": "BTCUSDT", "interval": "15m", "direction": "long", "thesis": "example",
+                    "entry": { "low": p * 0.99, "high": p * 0.995 }, "invalidation": p * 0.97,
+                    "targets": [p * 1.02], "expires_at": at_minute(1700 + i as i64),
+                    "as_of": at_minute(1500 + i as i64),
+                    "probability": probability, "playbook_version": "v1",
+                    "features": { "example_number": i },
+                });
+                call(&s, "create_setup", args, "agent").unwrap();
+            }
+            let without = call(&s, "get_track_record", json!({}), "agent").unwrap_err();
+            assert!(without.contains("as_of"), "{without}");
+            let early = json!({ "as_of": at_minute(1502), "group_by": "probability" });
+            let early = call(&s, "get_track_record", early, "agent").unwrap();
+            assert_eq!(
+                (early["closed"].clone(), early["open"].clone()),
+                (json!(0), json!(2))
+            );
+            let late = json!({ "as_of": at_minute(2900), "group_by": "probability" });
+            let late = call(&s, "get_track_record", late, "agent").unwrap();
+            assert_eq!(
+                (late["closed"].clone(), late["replay"].clone()),
+                (json!(2), json!(true))
+            );
+            late.to_string()
+        })
+    };
+    assert_eq!(run(), run());
+}
+
+/// The answers that hold what a setup was made with, and the record read back, pinned
+/// in a file the web app's types are tested against, as `setup_responses.json` is. From
+/// a replay over the example fixtures, so the same on every run. To write the file
+/// again after a deliberate change: `CHARTGEN_WRITE_FIXTURES=1 cargo test record_answers`.
+#[tokio::test]
+async fn record_answers_match_the_file_the_web_types_are_tested_against() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let replay = Replay::load(&dir.join("replay")).unwrap();
+    let answers = crate::replay::on(replay, |replay| {
+        let s = replaying(replay);
+        let start = 1_767_225_600_000 + 600 * MINUTE_MS;
+        let at = |minute: i64| start + minute * MINUTE_MS;
+        let ask = |tool: &str, args: Value| call(&s, tool, args, "agent").unwrap();
+        let p = replay.quote("BTCUSDT", at(0)).unwrap().0;
+        let stated = ask(
+            "create_setup",
+            json!({
+                "symbol": "BTCUSDT", "interval": "15m", "direction": "long",
+                "thesis": "example thesis",
+                "entry": { "low": p * 0.997, "high": p * 0.999 }, "invalidation": p * 0.99,
+                "targets": [p * 1.008], "expires_at": at(300), "as_of": at(0),
+                "features": { "example_number": 1.5, "example_flag": true, "example_label": "a" },
+                "probability": 0.6, "playbook_version": "v1",
+            }),
+        );
+        ask(
+            "create_setup",
+            json!({ "symbol": "ETHUSDT", "interval": "15m", "direction": "short",
+                "decision": "skip", "thesis": "example reason", "as_of": at(0),
+                "probability": 0.4 }),
+        );
+        json!({
+            "create_setup_stated": stated,
+            "get_track_record": ask("get_track_record", json!({ "as_of": at(700) })),
+            "get_track_record_grouped": ask(
+                "get_track_record",
+                json!({ "as_of": at(700), "group_by": "feature", "feature": "example_flag" }),
+            ),
+        })
+    });
+    assert_eq!(
+        answers["get_track_record"]["closed"], 2,
+        "both must have closed by then"
+    );
+    let path = dir.join("track_record_responses.json");
+    let text = serde_json::to_string_pretty(&answers).unwrap() + "\n";
+    if std::env::var("CHARTGEN_WRITE_FIXTURES").is_ok() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
+}
+
+/// A setup that was cancelled or ran out before its entry was reached has a result of
+/// 0 R. It is in `mean_r`, which is over every result there is; `entered` and
+/// `mean_r_entered` leave it out, so both readings can be had from one answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_tells_setups_that_were_entered_from_those_that_never_traded() {
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    assert!(base.fill.is_some());
+    // Four that were entered and two that never traded, with results chosen by hand.
+    let made = |entered: bool, status: Status, result: f64, version: &str| {
+        let mut r = base.clone();
+        r.status = status;
+        r.result_r = Some(result);
+        r.playbook_version = Some(version.to_string());
+        if !entered {
+            r.fill = None;
+            r.exit = None;
+        }
+        r
+    };
+    let six = [
+        made(true, Status::Won, 0.984, "v1"),
+        made(true, Status::Invalidated, -1.016, "v1"),
+        made(true, Status::Invalidated, -1.016, "v2"),
+        made(true, Status::Invalidated, -1.016, "v2"),
+        made(false, Status::Expired, 0.0, "v1"),
+        made(false, Status::Cancelled, 0.0, "v2"),
+    ];
+    let all: Vec<&Record> = six.iter().collect();
+    let by = setups::GroupBy::PlaybookVersion;
+    let (total, groups) = setups::track_record(&all, Some(&by)).unwrap();
+    let near = |v: &Value, to: f64| (v.as_f64().unwrap() - to).abs() < 1e-9;
+    assert_eq!(
+        (total["count"].clone(), total["with_result"].clone()),
+        (json!(6), json!(6))
+    );
+    assert!(near(&total["mean_r"], -0.344), "{total}");
+    assert_eq!(total["entered"], 4);
+    assert!(near(&total["mean_r_entered"], -0.516), "{total}");
+    // Per group as well: v1 has two entered of three, v2 two of three.
+    assert_eq!(
+        (groups[0]["key"].clone(), groups[0]["entered"].clone()),
+        (json!("v1"), json!(2))
+    );
+    assert!(
+        near(&groups[0]["mean_r"], (0.984 - 1.016) / 3.0),
+        "{}",
+        groups[0]
+    );
+    assert!(near(&groups[0]["mean_r_entered"], (0.984 - 1.016) / 2.0));
+    assert!(near(&groups[1]["mean_r_entered"], -1.016));
+
+    // Entered, and no result: one that ran out filled while nobody scored it.
+    let mut unscored = made(true, Status::Expired, 0.0, "v1");
+    unscored.result_r = None;
+    unscored.gap = true;
+    let (total, _) = setups::track_record(&[&unscored], None).unwrap();
+    assert_eq!(
+        (total["entered"].clone(), total["with_result"].clone()),
+        (json!(1), json!(0))
+    );
+    assert!(
+        total["mean_r_entered"].is_null(),
+        "no mean of no result: {total}"
+    );
+    // None entered: a count of 0 and no mean.
+    let (total, _) = setups::track_record(&[&six[4], &six[5]], None).unwrap();
+    assert_eq!(total["entered"], 0);
+    assert!(
+        total["mean_r_entered"].is_null() && near(&total["mean_r"], 0.0),
+        "{total}"
+    );
+}
+
+/// The probability's observed share also over the setups that were entered: one that
+/// never traded cannot win, so the share over all mixes the chance of a fill into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_gives_the_observed_share_over_entered_setups_too() {
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    let made = |entered: bool, status: Status, p: Option<f64>| {
+        let mut r = base.clone();
+        r.status = status;
+        r.probability = p;
+        if !entered {
+            r.fill = None;
+            r.exit = None;
+        }
+        r
+    };
+    let four = [
+        made(true, Status::Won, Some(0.6)),
+        made(true, Status::Invalidated, Some(0.6)),
+        made(false, Status::Expired, Some(0.6)),
+        made(true, Status::Won, None),
+    ];
+    let all: Vec<&Record> = four.iter().collect();
+    let (total, _) = setups::track_record(&all, None).unwrap();
+    let p = &total["probability"];
+    // Over the three that stated one: one won. Over the two of those entered: one won.
+    assert_eq!(
+        (p["stated"].clone(), p["won"].clone()),
+        (json!(3), json!(1))
+    );
+    assert!(
+        (p["observed"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9,
+        "{p}"
+    );
+    assert_eq!(
+        (p["stated_entered"].clone(), p["won_entered"].clone()),
+        (json!(2), json!(1))
+    );
+    assert_eq!(p["observed_entered"], 0.5);
+    // None entered: a count of 0 and no share.
+    let (total, _) = setups::track_record(&[&four[2]], None).unwrap();
+    assert_eq!(total["probability"]["stated_entered"], 0);
+    assert!(total["probability"]["observed_entered"].is_null());
+}
+
+/// The fixed exit variants are counted per variant beside the total: the positions
+/// that closed with their results, and those still open.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_counts_each_exit_variant_and_those_still_open() {
+    use chartgen::setups::ShadowStatus;
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    assert!(base.shadow_results.is_some(), "a filled setup has variants");
+    // A setup with its own result and each variant's, None for one still open.
+    let with = |canonical: f64, v1: Option<f64>, v2: f64, v3: Option<f64>| {
+        let mut r = base.clone();
+        r.result_r = Some(canonical);
+        let sh = r.shadow_results.as_mut().unwrap();
+        let set = |shadow: &mut chartgen::setups::Shadow, result: Option<f64>| match result {
+            Some(x) => {
+                shadow.status = ShadowStatus::Won;
+                shadow.result_r = Some(x);
+            }
+            None => {
+                shadow.status = ShadowStatus::Open;
+                shadow.result_r = None;
+            }
+        };
+        set(&mut sh.v1_half_t1_be, v1);
+        set(&mut sh.v2_be_at_1r, Some(v2));
+        set(&mut sh.v3_time_stop, v3);
+        r
+    };
+    let mut never = base.clone();
+    never.fill = None;
+    never.result_r = Some(0.0);
+    never.shadow_results = None;
+    // The winner's v1 is a runner after T1, still open: v1's closed ones are the others.
+    let four = [
+        with(2.0, None, 1.0, Some(1.5)),
+        with(-1.0, Some(-1.0), -1.0, Some(-0.5)),
+        with(-1.0, Some(-1.0), 0.0, None),
+        never,
+    ];
+    let all: Vec<&Record> = four.iter().collect();
+    let v = setups::shadow_record(&all);
+    assert_eq!(
+        v["v1_half_t1_be"],
+        json!({ "closed": 2, "with_result": 2, "total_r": -2.0, "mean_r": -1.0,
+            "canonical_total_r": -2.0, "canonical_mean_r": -1.0, "open": 1 })
+    );
+    assert_eq!(
+        v["v2_be_at_1r"],
+        json!({ "closed": 3, "with_result": 3, "total_r": 0.0, "mean_r": 0.0,
+            "canonical_total_r": 0.0, "canonical_mean_r": 0.0, "open": 0 })
+    );
+    assert_eq!(
+        v["v3_time_stop"],
+        json!({ "closed": 2, "with_result": 2, "total_r": 1.0, "mean_r": 0.5,
+            "canonical_total_r": 1.0, "canonical_mean_r": 0.5, "open": 1 })
+    );
+    // v1 at -1 beside the entered mean of 0 would read as a worse exit; beside the same
+    // setups' canonical -1 it is no different, which is what is known so far.
+    let (total, _) = setups::track_record(&all, None).unwrap();
+    assert_eq!(total["mean_r_entered"], 0.0);
+    // In the answer, beside the total.
+    let answer = call(&s, "get_track_record", json!({}), "owner").unwrap();
+    assert!(
+        answer["shadows"]["v2_be_at_1r"]["closed"].is_u64(),
+        "{answer}"
+    );
+}
+
+/// A feature's number is one value however it was written: 1 and 1.0 are one group.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_groups_a_number_by_its_value_not_by_how_it_was_written() {
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    let with = |value: Value| {
+        let mut r = base.clone();
+        r.features = Some(serde_json::Map::from_iter([("n".to_string(), value)]));
+        r
+    };
+    let four = [
+        with(json!(1)),
+        with(json!(1.0)),
+        with(json!(2)),
+        with(json!("1")),
+    ];
+    let all: Vec<&Record> = four.iter().collect();
+    let by = setups::GroupBy::Feature("n".to_string());
+    let (_, groups) = setups::track_record(&all, Some(&by)).unwrap();
+    let shown: Vec<String> = groups.iter().map(|g| g["key"].to_string()).collect();
+    assert_eq!(
+        shown,
+        ["1.0", "2.0", "\"1\""],
+        "a number as a decimal, a string as it is"
+    );
+    assert_eq!(groups[0]["count"], 2);
+}
+
+/// A call that only reads is not answered in the words of one that stores.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_track_record_does_not_speak_of_storing() {
+    let s = live();
+    let refused = call(
+        &s,
+        "get_track_record",
+        json!({ "group_by": "thesis" }),
+        "owner",
+    )
+    .unwrap_err();
+    assert_eq!(errors(&refused), ["group_by"]);
+    assert!(
+        !refused.contains("stored") && !refused.contains("this setup"),
+        "{refused}"
+    );
+    assert!(refused.contains("nothing was read"), "{refused}");
+}
