@@ -2608,10 +2608,11 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
     );
     assert!((total["total_r"].as_f64().unwrap() - sum).abs() < 1e-9);
     assert!((total["mean_r"].as_f64().unwrap() - sum / 3.0).abs() < 1e-9);
-    // Two stated a probability: 0.6 and won, 0.25 and lost.
+    // Two stated a probability: 0.6 and won, 0.25 and lost. Both were entered.
     assert_eq!(
         total["probability"],
-        json!({ "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 })
+        json!({ "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
+            "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 })
     );
 
     let by_version = record(json!({ "group_by": "playbook_version" }));
@@ -2918,6 +2919,110 @@ async fn the_track_record_tells_setups_that_were_entered_from_those_that_never_t
     assert!(
         total["mean_r_entered"].is_null() && near(&total["mean_r"], 0.0),
         "{total}"
+    );
+}
+
+/// The probability's observed share also over the setups that were entered: one that
+/// never traded cannot win, so the share over all mixes the chance of a fill into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_gives_the_observed_share_over_entered_setups_too() {
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    let made = |entered: bool, status: Status, p: Option<f64>| {
+        let mut r = base.clone();
+        r.status = status;
+        r.probability = p;
+        if !entered {
+            r.fill = None;
+            r.exit = None;
+        }
+        r
+    };
+    let four = [
+        made(true, Status::Won, Some(0.6)),
+        made(true, Status::Invalidated, Some(0.6)),
+        made(false, Status::Expired, Some(0.6)),
+        made(true, Status::Won, None),
+    ];
+    let all: Vec<&Record> = four.iter().collect();
+    let (total, _) = setups::track_record(&all, None).unwrap();
+    let p = &total["probability"];
+    // Over the three that stated one: one won. Over the two of those entered: one won.
+    assert_eq!(
+        (p["stated"].clone(), p["won"].clone()),
+        (json!(3), json!(1))
+    );
+    assert!(
+        (p["observed"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9,
+        "{p}"
+    );
+    assert_eq!(
+        (p["stated_entered"].clone(), p["won_entered"].clone()),
+        (json!(2), json!(1))
+    );
+    assert_eq!(p["observed_entered"], 0.5);
+    // None entered: a count of 0 and no share.
+    let (total, _) = setups::track_record(&[&four[2]], None).unwrap();
+    assert_eq!(total["probability"]["stated_entered"], 0);
+    assert!(total["probability"]["observed_entered"].is_null());
+}
+
+/// The fixed exit variants are counted per variant beside the total: the positions
+/// that closed with their results, and those still open.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_counts_each_exit_variant_and_those_still_open() {
+    use chartgen::setups::ShadowStatus;
+    let s = live();
+    let won = closed(&s, long(), "owner", true);
+    let base = s.owned("owner", &id_of(&won)).unwrap();
+    assert!(base.shadow_results.is_some(), "a filled setup has variants");
+    let with = |v1: Option<f64>, v2: f64, v3: Option<f64>| {
+        let mut r = base.clone();
+        let sh = r.shadow_results.as_mut().unwrap();
+        let set = |shadow: &mut chartgen::setups::Shadow, result: Option<f64>| match result {
+            Some(x) => {
+                shadow.status = ShadowStatus::Won;
+                shadow.result_r = Some(x);
+            }
+            None => {
+                shadow.status = ShadowStatus::Open;
+                shadow.result_r = None;
+            }
+        };
+        set(&mut sh.v1_half_t1_be, v1);
+        set(&mut sh.v2_be_at_1r, Some(v2));
+        set(&mut sh.v3_time_stop, v3);
+        r
+    };
+    let mut never = base.clone();
+    never.fill = None;
+    never.shadow_results = None;
+    let four = [
+        with(Some(1.5), 1.0, Some(0.5)),
+        with(None, -1.0, Some(-0.5)),
+        with(Some(0.5), 0.0, None),
+        never,
+    ];
+    let all: Vec<&Record> = four.iter().collect();
+    let v = setups::shadow_record(&all);
+    assert_eq!(
+        v["v1_half_t1_be"],
+        json!({ "closed": 2, "with_result": 2, "total_r": 2.0, "mean_r": 1.0, "open": 1 })
+    );
+    assert_eq!(
+        v["v2_be_at_1r"],
+        json!({ "closed": 3, "with_result": 3, "total_r": 0.0, "mean_r": 0.0, "open": 0 })
+    );
+    assert_eq!(
+        v["v3_time_stop"],
+        json!({ "closed": 2, "with_result": 2, "total_r": 0.0, "mean_r": 0.0, "open": 1 })
+    );
+    // In the answer, beside the total.
+    let answer = call(&s, "get_track_record", json!({}), "owner").unwrap();
+    assert!(
+        answer["shadows"]["v2_be_at_1r"]["closed"].is_u64(),
+        "{answer}"
     );
 }
 

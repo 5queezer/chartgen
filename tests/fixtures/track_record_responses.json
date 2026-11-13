@@ -1,7 +1,12 @@
 {
   "create_setup_stated": {
     "agent_revisions": 0,
+    "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
     "bracket": "agent",
+    "closest_approach_r": null,
     "costs": {
       "fee_bps_per_side": 5.0,
       "slippage_bps_per_side": 2.0
@@ -50,14 +55,20 @@
         "seq": 1
       }
     ],
+    "mae_at": null,
+    "mae_r": null,
+    "mfe_at": null,
+    "mfe_r": null,
     "pending": [],
     "playbook_version": "v1",
     "probability": 0.6,
     "result_r": null,
     "revisions": 1,
     "scored_through": null,
+    "shadow_results": null,
     "status": "watching",
     "symbol": "BTCUSDT",
+    "tags": [],
     "targets": [
       60738.723359999996
     ],
@@ -70,6 +81,29 @@
     "groups": [],
     "open": 0,
     "replay": true,
+    "shadows": {
+      "v1_half_t1_be": {
+        "closed": 2,
+        "mean_r": 1.05295,
+        "open": 0,
+        "total_r": 2.1059,
+        "with_result": 2
+      },
+      "v2_be_at_1r": {
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      },
+      "v3_time_stop": {
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      }
+    },
     "total": {
       "cancelled": 0,
       "count": 2,
@@ -82,8 +116,11 @@
       "probability": {
         "mean": 0.5,
         "observed": 0.5,
+        "observed_entered": 0.5,
         "stated": 2,
-        "won": 1
+        "stated_entered": 2,
+        "won": 1,
+        "won_entered": 1
       },
       "total_r": 0.6112,
       "with_result": 2,
@@ -109,8 +146,11 @@
         "probability": {
           "mean": 0.4,
           "observed": 1.0,
+          "observed_entered": 1.0,
           "stated": 1,
-          "won": 1
+          "stated_entered": 1,
+          "won": 1,
+          "won_entered": 1
         },
         "total_r": 1.7659,
         "with_result": 1,
@@ -129,8 +169,11 @@
         "probability": {
           "mean": 0.6,
           "observed": 0.0,
+          "observed_entered": 0.0,
           "stated": 1,
-          "won": 0
+          "stated_entered": 1,
+          "won": 0,
+          "won_entered": 0
         },
         "total_r": -1.1547,
         "with_result": 1,
@@ -139,6 +182,29 @@
     ],
     "open": 0,
     "replay": true,
+    "shadows": {
+      "v1_half_t1_be": {
+        "closed": 2,
+        "mean_r": 1.05295,
+        "open": 0,
+        "total_r": 2.1059,
+        "with_result": 2
+      },
+      "v2_be_at_1r": {
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      },
+      "v3_time_stop": {
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      }
+    },
     "total": {
       "cancelled": 0,
       "count": 2,
@@ -151,8 +217,11 @@
       "probability": {
         "mean": 0.5,
         "observed": 0.5,
+        "observed_entered": 0.5,
         "stated": 2,
-        "won": 1
+        "stated_entered": 2,
+        "won": 1,
+        "won_entered": 1
       },
       "total_r": 0.6112,
       "with_result": 2,

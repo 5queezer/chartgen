@@ -1537,7 +1537,7 @@ setups; `can_create` in the list says so.
 | `get_setup` | `id` | The setup with its log |
 | `list_setups` | optional `status`, `symbol`, `tags` (only setups that have all of them), `limit` (default 50, at most 500) | `{enabled, can_create, replay, total, limits, setups: [...]}`, newest first, without logs |
 | `cancel_setup` | `id`, `reason` | The setup with its log |
-| `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature` | `{replay, closed, open, truncated, group_by, feature, total, groups: [...]}` |
+| `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature` | `{replay, closed, open, truncated, group_by, feature, total, groups: [...], shadows}` |
 
 - `symbol`: a Binance symbol. Anything else is refused.
 - `direction`: `long` or `short`. `decision`: `take` (default), or `skip` for a decision not to
@@ -1606,18 +1606,26 @@ many match the filters.
     "count": 3, "won": 2, "invalidated": 1, "expired": 0, "cancelled": 0,
     "with_result": 3, "total_r": 2.1, "mean_r": 0.7,
     "entered": 3, "mean_r_entered": 0.7, "gaps": 0,
-    "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 }
+    "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
+                     "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 }
   },
   "groups": [
     { "key": null, "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
       "with_result": 1, "total_r": 1.6, "mean_r": 1.6,
       "entered": 1, "mean_r_entered": 1.6, "gaps": 0,
-      "probability": { "stated": 0, "mean": null, "won": 0, "observed": null } },
+      "probability": { "stated": 0, "mean": null, "won": 0, "observed": null,
+                       "stated_entered": 0, "won_entered": 0, "observed_entered": null } },
     { "key": "v1", "count": 2, "won": 1, "invalidated": 1, "expired": 0, "cancelled": 0,
       "with_result": 2, "total_r": 0.5, "mean_r": 0.25,
       "entered": 2, "mean_r_entered": 0.25, "gaps": 0,
-      "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 } }
-  ]
+      "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
+                       "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 } }
+  ],
+  "shadows": {
+    "v1_half_t1_be": { "closed": 2, "with_result": 2, "total_r": 2.4, "mean_r": 1.2, "open": 1 },
+    "v2_be_at_1r":   { "closed": 3, "with_result": 3, "total_r": 1.1, "mean_r": 0.37, "open": 0 },
+    "v3_time_stop":  { "closed": 3, "with_result": 3, "total_r": 1.8, "mean_r": 0.6, "open": 0 }
+  }
 }
 ```
 
@@ -1632,7 +1640,13 @@ many match the filters.
   gave.
 - `probability`: of the setups that stated one, how many (`stated`), its `mean`, how many of
   them `won`, and that share (`observed`). The share is over all of them, the ones that
-  never traded included.
+  never traded included, so it mixes in the chance of a fill. `stated_entered`,
+  `won_entered` and `observed_entered` are the same over those whose entry was reached.
+- `shadows`: each [fixed exit variant](/chartgen/guides/setups/#shadow-results) ([ADR-0066](/chartgen/decisions/0066-shadow-exit-variants/)) over the filled
+  setups among those counted, in all and not per group: how many of its positions `closed`,
+  how many of those have a result, their `total_r` and `mean_r`, and how many are still
+  `open`, which a closed setup's variant can be for a while. A setup that never traded has
+  no variants, so these are over fewer setups than `total`.
 - A feature's number is one value however it was written: `1` and `1.0` are one group, and
   a number key is written as a decimal (`1.0`). The string `"1"` is another group.
 - **It counts and judges nothing.** There is no significance and no ranking. A group of a few

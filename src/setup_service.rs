@@ -1186,6 +1186,7 @@ impl Setups {
             "feature": given("feature"),
             "total": total,
             "groups": groups,
+            "shadows": setups::shadow_record(&mine),
         }))
     }
 

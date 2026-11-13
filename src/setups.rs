@@ -1951,6 +1951,10 @@ struct Tally {
     stated: u32,
     stated_sum: f64,
     stated_won: u32,
+    /// Of those that stated a probability, the ones whose entry was reached, and how
+    /// many of those won: the share without the setups that never traded.
+    stated_entered: u32,
+    stated_won_entered: u32,
 }
 
 impl Tally {
@@ -1981,6 +1985,10 @@ impl Tally {
             self.stated += 1;
             self.stated_sum += p;
             self.stated_won += u32::from(r.status == Status::Won);
+            if entered {
+                self.stated_entered += 1;
+                self.stated_won_entered += u32::from(r.status == Status::Won);
+            }
         }
     }
 
@@ -2003,6 +2011,9 @@ impl Tally {
                 "mean": per(self.stated_sum, self.stated),
                 "won": self.stated_won,
                 "observed": per(f64::from(self.stated_won), self.stated),
+                "stated_entered": self.stated_entered,
+                "won_entered": self.stated_won_entered,
+                "observed_entered": per(f64::from(self.stated_won_entered), self.stated_entered),
             },
         })
     }
@@ -2065,6 +2076,53 @@ pub fn track_record(
         })
         .collect();
     Ok((total.json(), groups))
+}
+
+/// The fixed exit variants over `closed` (ADR-0066), per variant: how many of their
+/// positions closed, the total and mean of their results, and how many are still open,
+/// which a closed setup's can be for a while. Only filled setups have variants, so these
+/// are over fewer setups than `total` is.
+pub fn shadow_record(closed: &[&Record]) -> Value {
+    #[derive(Default)]
+    struct Variant {
+        closed: u32,
+        with_result: u32,
+        total_r: f64,
+        open: u32,
+    }
+    let mut v: [Variant; 3] = Default::default();
+    for shadows in closed.iter().filter_map(|r| r.shadow_results.as_ref()) {
+        let each = [
+            &shadows.v1_half_t1_be,
+            &shadows.v2_be_at_1r,
+            &shadows.v3_time_stop,
+        ];
+        for (tally, shadow) in v.iter_mut().zip(each) {
+            if shadow.is_open() {
+                tally.open += 1;
+                continue;
+            }
+            tally.closed += 1;
+            if let Some(r) = shadow.result_r {
+                tally.with_result += 1;
+                tally.total_r += r;
+            }
+        }
+    }
+    let view = |t: &Variant| {
+        json!({
+            "closed": t.closed,
+            "with_result": t.with_result,
+            "total_r": t.total_r,
+            "mean_r": (t.with_result > 0).then(|| t.total_r / f64::from(t.with_result)),
+            "open": t.open,
+        })
+    };
+    json!({
+        "v1_half_t1_be": view(&v[0]),
+        "v2_be_at_1r": view(&v[1]),
+        "v3_time_stop": view(&v[2]),
+    })
 }
 
 #[cfg(test)]

@@ -230,7 +230,10 @@ one of `playbook_version`, one feature, the probability in tenths, symbol or dir
   result is counted but not in the mean.
 - **A setup that was cancelled, ran out or was invalidated before its entry was reached has a result of 0 R.
   It is in `mean_r` and in the observed share,** and pulls both towards 0. `entered` and
-  `mean_r_entered` count only the setups whose entry was reached.
+  `mean_r_entered` count only the setups whose entry was reached, and `observed_entered` is
+  the share that won among those.
+- `shadows` puts the fixed exit variants side by side over the setups that traded, with
+  those whose variant is still open counted apart.
 - Skips are in it as well, scored with the server's bracket. Filter with `decision`.
 
 ## When the server was away

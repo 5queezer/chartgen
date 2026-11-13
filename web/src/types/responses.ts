@@ -1039,7 +1039,22 @@ const TrackRecordCountsSchema = z.object({
     mean: z.number().nullable(),
     won: z.number().int(),
     observed: z.number().nullable(),
+    /** The same over those whose entry was reached: a setup that never traded cannot win. */
+    stated_entered: z.number().int(),
+    won_entered: z.number().int(),
+    observed_entered: z.number().nullable(),
   }),
+});
+
+/** One fixed exit variant over the closed setups that have one (ADR-0066). */
+const TrackRecordVariantSchema = z.object({
+  closed: z.number().int(),
+  with_result: z.number().int(),
+  total_r: z.number(),
+  /** Over `with_result`; null when that is 0. */
+  mean_r: z.number().nullable(),
+  /** Variants of closed setups that are still open, which they can be for a while. */
+  open: z.number().int(),
 });
 
 export const TrackRecordPayloadSchema = z.object({
@@ -1059,6 +1074,12 @@ export const TrackRecordPayloadSchema = z.object({
       key: z.union([z.string(), z.number(), z.boolean()]).nullable(),
     }),
   ),
+  /** Per fixed exit variant, over the filled setups among those counted. */
+  shadows: z.object({
+    v1_half_t1_be: TrackRecordVariantSchema,
+    v2_be_at_1r: TrackRecordVariantSchema,
+    v3_time_stop: TrackRecordVariantSchema,
+  }),
 });
 export type TrackRecordPayload = z.infer<typeof TrackRecordPayloadSchema>;
 
