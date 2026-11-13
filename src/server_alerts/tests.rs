@@ -3366,6 +3366,9 @@ async fn a_wake_up_reaches_the_agents_receiver_signed_with_the_setup_before_the_
     assert_eq!(parsed["type"], "alert.fired");
     assert_eq!(parsed["alert"]["id"], id.as_str());
     assert_eq!(parsed["alert"]["price"], 101.0);
+    // The fire's level, from the logged event; a price alert's has no indicator.
+    assert_eq!(parsed["alert"]["level"], 100.0);
+    assert!(parsed["alert"].get("indicator").is_none());
     assert_eq!(parsed["note"], format!("{PRIVATE} note"));
     assert_eq!(parsed["setup"]["id"], setup.as_str());
     assert_eq!(parsed["setup"]["status"], "watching");
@@ -4532,4 +4535,63 @@ async fn the_dispatch_itself_starts_no_more_than_the_slots_that_are_free() {
         2,
         "one more, not every row that is due"
     );
+}
+
+/// An indicator alert's wake-up is made from its logged event, which keeps what the
+/// fire saw: with compare: close the alert has no level of its own, so the level sent
+/// is the line's value the close crossed, beside the indicator and that value.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_indicator_wake_up_carries_the_line_and_the_level_it_crossed() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("wake-up-indicator");
+    let fake = Arc::new(Fake::default());
+    let mut closes = vec![100.0; 300];
+    closes[299] = 99.0;
+    let bars = history(&closes);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    a.set_agent(agent_at(port, "me"));
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "ma", "params": { "type": "ema", "length": 21 }, "compare": "close",
+        "condition": "crossing_up", "trigger": "once", "notify_agent": true,
+    });
+    let id = create(&a, args, "me").await;
+    until("the bars", || {
+        a.lock()
+            .watches
+            .get(&key("1h"))
+            .is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    a.on_event(&key("1h"), FeedEvent::Bar(bar(t + HOUR, 110.0)));
+    until("the wake-up", || !seen.lock().unwrap().is_empty()).await;
+
+    let raw = seen.lock().unwrap()[0].clone();
+    let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let alert = &body["alert"];
+    assert_eq!(alert["id"], id.as_str());
+    assert_eq!(alert["price"], 110.0);
+    let value = alert["indicator"]["value"].as_f64().unwrap();
+    assert!(value > 99.0 && value < 110.0, "{value}");
+    assert_eq!(
+        alert["level"], value,
+        "the line the close crossed, not null"
+    );
+    assert_eq!(alert["indicator"]["line"], "EMA 21");
+    assert_eq!(alert["indicator"]["compare"], "close");
+    // The log keeps the same, for list_events.
+    let (logged, ..) = store.events_after("me", 0, 10).unwrap();
+    let what: Value = serde_json::from_str(&logged[0].body).unwrap();
+    assert_eq!(what["level"], value);
+    assert_eq!(what["indicator"]["value"], value);
 }

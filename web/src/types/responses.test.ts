@@ -256,6 +256,32 @@ describe("list_events (ADR-0061)", () => {
     delivery: "none",
   };
 
+  it("parses an indicator alert's fire with its line and value", () => {
+    const indicator = {
+      name: "ma",
+      params: { type: "ema", length: 50, source: "close", offset: 0 },
+      line: "EMA 50",
+      compare: "close",
+      value: 64_210.5,
+    };
+    const p = EventsPayloadSchema.parse({
+      events: [{ ...fired, what: { ...fired.what, level: 64_210.5, indicator } }],
+      cursor: 1,
+      more: false,
+      truncated: false,
+    });
+    const what = p.events[0]?.what;
+    expect(what && "indicator" in what ? what.indicator?.line : undefined).toBe("EMA 50");
+    expect(() =>
+      EventsPayloadSchema.parse({
+        events: [{ ...fired, what: { ...fired.what, indicator: { ...indicator, compare: "above" } } }],
+        cursor: 1,
+        more: false,
+        truncated: false,
+      }),
+    ).toThrow();
+  });
+
   it("parses both kinds of event and the paging fields", () => {
     const p = EventsPayloadSchema.parse({
       events: [fired, status],

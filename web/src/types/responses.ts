@@ -613,6 +613,19 @@ export type ChartTickParams = z.infer<typeof ChartTickParamsSchema>;
 //   its URL or secret. `webhook_secret` only appears in the response that made it.
 // ---------------------------------------------------------------------------
 
+/**
+ * An indicator alert's indicator (ADR-0067), as `indicator::view` in
+ * `src/server_alerts/indicator.rs` writes it: in a list, `value` is the line at the last
+ * close read; in a fire's event or wake-up, the line at that close.
+ */
+export const IndicatorViewSchema = z.object({
+  name: z.string(),
+  params: z.record(z.string(), z.unknown()),
+  line: z.string(),
+  compare: z.enum(["level", "close"]),
+  value: z.number().nullable(),
+});
+
 export const ServerAlertSchema = z.object({
   id: z.string(),
   symbol: z.string(),
@@ -662,15 +675,7 @@ export const ServerAlertSchema = z.object({
    * Present only on an alert on an indicator's line at bar closes (ADR-0067). `value` is
    * the line at the last close it read, null until it has read one.
    */
-  indicator: z
-    .object({
-      name: z.string(),
-      params: z.record(z.string(), z.unknown()),
-      line: z.string(),
-      compare: z.enum(["level", "close"]),
-      value: z.number().nullable(),
-    })
-    .optional(),
+  indicator: IndicatorViewSchema.optional(),
 });
 export type ServerAlert = z.infer<typeof ServerAlertSchema>;
 
@@ -1091,10 +1096,13 @@ export const LoggedEventSchema = z.discriminatedUnion("type", [
     type: z.literal("alert.fired"),
     what: z.object({
       price: z.number(),
+      /** The level the fire compared with; with compare: close, the line's value. */
       level: z.number(),
       condition: z.string(),
       bar_time: z.number(),
       fire_count: z.number().int(),
+      /** Only on an indicator alert's fire (ADR-0067). */
+      indicator: IndicatorViewSchema.optional(),
     }),
   }),
   LoggedEventBaseSchema.extend({

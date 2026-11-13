@@ -1483,6 +1483,10 @@ kept, and repeats while `more` is true.**
 - `delivery`: `none` (logged only), `waiting`, `delivered`, `failed` (given up, or refused
   by the receiver), `dropped` (too many were waiting).
 - An event holds no thesis and no note. Read the setup or the alert for those.
+- An `alert.fired` event says what the fire saw: `level` is the level it compared with, and
+  an [indicator alert](#indicator-alerts-on-the-server)'s also has `indicator` with the line's
+  `value` at that close, and with `compare: "close"` that value as `level`. The wake-up is
+  made from the event, so it says the same even if the alert changed meanwhile.
 - The newest 1000 events are kept, for 7 days. **`truncated: true` means events after your
   cursor are gone:** read your setups and alerts as they are instead of relying on the log.
 - Listed where server alerts or setups run. A replay server has no log and refuses the call.
