@@ -7,7 +7,7 @@
 
 import { createSignal } from "solid-js";
 
-import { CONDITION_LABELS } from "../lib/alerts";
+import { CONDITION_LABELS, type AlertCondition } from "../lib/alerts";
 import { pushReport } from "../lib/pushDevice";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
@@ -35,9 +35,24 @@ export function serverAlertStatus(a: ServerAlert): ServerAlertStatus {
   return a.active ? "active" : a.last_triggered_at !== null ? "triggered" : "paused";
 }
 
-/** What the alert watches and when it fires: "crossing 100.00", "RSI less than 25". */
+/** A price alert, which the dialog edits. An indicator alert's level is not a price,
+ * and a bar_close alert has none: those change through the tools (ADR-0067, ADR-0069). */
+export function editsInDialog(
+  a: ServerAlert,
+): a is ServerAlert & { condition: AlertCondition; indicator?: undefined } {
+  return !a.indicator && a.condition !== "bar_close";
+}
+
+/** The label of a server alert's condition: a browser alert's, or "Bar close". */
+export function serverConditionLabel(condition: ServerAlert["condition"]): string {
+  return condition === "bar_close" ? "Bar close" : CONDITION_LABELS[condition];
+}
+
+/** What the alert watches and when it fires: "crossing 100.00", "RSI less than 25",
+ * "4h bar close". */
 export function serverAlertCondition(a: ServerAlert): string {
-  const cond = CONDITION_LABELS[a.condition].toLowerCase();
+  if (a.condition === "bar_close") return `${a.interval} bar close`;
+  const cond = serverConditionLabel(a.condition).toLowerCase();
   const ind = a.indicator;
   if (!ind) return `${cond} ${formatPrice(a.level ?? 0)}`;
   return ind.compare === "close" ? `close ${cond} ${ind.line}` : `${ind.line} ${cond} ${a.level}`;

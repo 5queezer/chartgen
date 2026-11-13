@@ -1180,7 +1180,7 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
 | `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
@@ -1191,7 +1191,9 @@ what your client may do.
   [indicator alerts](#indicator-alerts-on-the-server) can, at bar closes.
 - `condition`: `crossing`, `crossing_up`, `crossing_down`, `greater`, `less`. A crossing
   needs a previous reading, so the first price after creating, resuming, editing or a
-  server restart never fires one. `greater` and `less` can fire on it.
+  server restart never fires one. `greater` and `less` can fire on it. `bar_close` fires at
+  every close of the interval, whatever the price: see [an alert at a bar's
+  close](#an-alert-at-a-bars-close).
 - `trigger`: `once` switches off after firing. `every` stays on; `greater` and `less`
   wait until the price is back on the other side.
 - `evaluate_on`: `live` (default) reads every price update, and `interval` only labels
@@ -1297,6 +1299,32 @@ The [webhook payload](#webhook-payload) and the [wake-up](#waking-your-agent) ca
 `"indicator"` object, with `value` at the close that fired. `level` there is the level the
 alert compares with, or with `compare: "close"` the line's value that the close crossed. A
 price alert's payload has no `indicator` and is unchanged.
+
+#### An alert at a bar's close
+
+`condition: "bar_close"` fires when a bar of the alert's `interval` closes, whatever the price:
+a wake-up at every 4h close, say
+([ADR-0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/)).
+
+```json
+{ "symbol": "BTCUSDT", "interval": "4h", "condition": "bar_close",
+  "trigger": "every", "notify_agent": true }
+```
+
+- `interval` is required, 1h or longer, with a Binance kline stream. `evaluate_on` is `close`;
+  leave it out or send `close`.
+- It takes no `level`, `indicator`, `params`, `line` or `compare`; each is refused. Its `level`
+  is `null` in a list, in the [webhook payload](#webhook-payload) and in the
+  [wake-up](#waking-your-agent), and `price` there is the bar's close.
+- `trigger: "once"` fires at the next close and switches off; `every` fires at each close.
+- A close the server did not see is not fired afterwards: after a restart or an outage it fires
+  at the next close it sees, with that bar's time. It never fires twice for one bar, also when
+  the feed sends a bar again after a restart, and never for a bar that closed before the alert
+  was made.
+- `update_server_alert` changes its `trigger`, `message` and delivery like any alert's. Its
+  `condition` cannot change to another, nor can another alert's change to `bar_close`.
+- It counts in the same limits as any alert. The web app lists it and can pause, resume and
+  delete it, but does not edit it.
 
 A spent alert is deleted 7 days after it fired. An alert is deleted once its owner has had no
 token for 30 days, unless the operator listed that client.

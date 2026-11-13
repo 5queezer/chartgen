@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerAlertChangePayloadSchema, ServerAlertsPayloadSchema } from "../types/responses";
 import type { ServerAlert } from "../types/responses";
-import { newFires, serverAlertError, serverAlertStatus, serverAlertText } from "./serverAlerts";
+import {
+  editsInDialog,
+  newFires,
+  serverAlertError,
+  serverAlertStatus,
+  serverAlertText,
+} from "./serverAlerts";
 
 const alert: ServerAlert = {
   id: "a",
@@ -59,6 +65,18 @@ describe("texts", () => {
     expect(serverAlertText({ ...alert, condition: "crossing_up", level: null, indicator: ema })).toBe(
       "BTCUSDT close crossing up EMA 50",
     );
+    // An alert at every close of its interval, as an agent makes one (ADR-0069).
+    const atClose = { ...alert, interval: "4h", evaluate_on: "close" as const, condition: "bar_close" as const, level: null };
+    expect(serverAlertText(atClose)).toBe("BTCUSDT 4h bar close");
+    expect(ServerAlertsPayloadSchema.parse({ enabled: true, alerts: [atClose] }).alerts[0]?.condition).toBe(
+      "bar_close",
+    );
+    // The dialog edits price alerts only.
+    expect([alert, atClose, { ...alert, condition: "less" as const, indicator: rsi }].map(editsInDialog)).toEqual([
+      true,
+      false,
+      false,
+    ]);
     expect(serverAlertError(new Error("MCP tool error: webhook URL must use https"))).toBe(
       "webhook URL must use https",
     );
