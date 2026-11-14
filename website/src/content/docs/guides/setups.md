@@ -248,8 +248,9 @@ Binance setup, with these differences:
 
 - **Bars.** Yahoo has no live feed, so the server reads a stock's 1m bars from Yahoo once a minute
   while the market is open, regular session only: 09:30 to 16:00 New York, 13:00 on an early
-  close. Pre- and post-market trading does not count. A status moves a minute or two after the
-  price, not up to one minute as on Binance.
+  close. Pre- and post-market trading does not count. A status moves after the price by 1 to 2
+  minutes of polling and settling, plus Yahoo's own lag, which has not been measured yet. On
+  Binance it is up to one minute.
 - **What it takes.** Stocks and ETFs on Nasdaq, NYSE, NYSE American, NYSE Arca and Cboe BZX.
   - An index such as `^GSPC` cannot be traded: use an ETF that tracks it, such as `SPY`.
   - OTC stocks, other exchanges and Yahoo's crypto, FX and futures are refused.
@@ -262,8 +263,9 @@ Binance setup, with these differences:
   - An open past the invalidation exits at that open, as on Binance.
   - An open past the first target exits at that open too, which is the better price. A Binance
     setup exits at the target.
-- **Counting in bars.** These count trading time, not hours on the clock:
-  - a skip's 24 bars, on a 1h chart about 3.7 sessions;
+- **Counting in bars.** These count bars of the session grid, which starts at the open with the
+  session's last bar shorter, not hours on the clock:
+  - a skip's 24 bars, on a 1h chart (7 bars a session) about 3.4 sessions;
   - the time stop of `v3_time_stop`;
   - `bars_to_*`.
 - **Splits and dividends.**
@@ -272,11 +274,18 @@ Binance setup, with these differences:
   - A dividend that goes ex while the position is open is paid to a long and by a short, in the
     result from its exit on.
   - Both are logged as `adjusted` and listed in `adjustments`.
+  - If Yahoo sends a session's first bars far from the last close (below 0.7 or above 1.4 times
+    it) with no split, the server waits for the split for up to half an hour before it takes them
+    as a real gap.
 - **Gaps in the data.** A minute without a trade is not a bar, and nights, weekends and holidays
-  are not gaps. A read that fails is made again. Only bars older than Yahoo's 30 days of 1m
-  history, after a long outage, are a `gap`.
+  are not gaps. A read that fails is made again, and so does one whose setups could not be
+  stored. Only bars older than 29 days, a day short of Yahoo's 1m history, after a long outage,
+  are a `gap`.
 - **Holidays.** The exchange calendar here lists NYSE holidays and early closes through 2028. A
-  stock setup cannot expire later than that.
+  stock setup cannot expire later than that, a skip's bracket included.
+- **ABNB and the like.** A stock whose symbol ends like a Binance quote (ABNB ends in BNB) is
+  taken as a stock when Binance does not list it. Its chart still reads Binance, so such a setup
+  can take neither drawings nor `decision: skip`.
 
 Server alerts still run on Binance symbols only. A stock setup's own status changes wake your
 agent as a Binance setup's do.

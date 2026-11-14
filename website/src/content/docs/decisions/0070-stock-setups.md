@@ -87,6 +87,17 @@ is refused with a hint:
 A symbol is a stock symbol when `detect_source` sends it to Yahoo, so every symbol that was
 accepted before is still read the same way.
 
+**A stock whose symbol ends like a Binance quote.** `detect_source` sends a symbol to Binance
+when it ends in a quote asset such as BNB, so ABNB (Airbnb, Nasdaq) is routed to Binance.
+- When Binance does not list such a symbol, `create_setup` tries the US-stock check before it
+  refuses. If that passes, the setup is a stock setup, and its stored market routes it from then
+  on: polling, restore and the server's watched symbols go by the record, not by the symbol.
+- Its levels were checked with Binance's least risk, which is the stricter one.
+- Charts still route ABNB to Binance, so a stock setup on it can take neither drawings nor
+  `decision: skip`, which read the symbol's bars. That is a known limit of the chart routing,
+  left as it is.
+- A Binance symbol that Binance lists takes exactly the path it took before.
+
 A stock setup's record carries `market: "us_equity"`. A Binance setup has no `market` field, so its
 row and its answers are byte for byte as before.
 
@@ -109,6 +120,13 @@ row and its answers are byte for byte as before.
   is open, and once more after its close.
   - Each read starts at the oldest bar any of the symbol's setups still needs and runs to the newest
     minute that closed at least 60 s earlier. It asks for splits and dividends in the same request.
+  - **What counts as read** is decided after the read, from what came back:
+    - It runs to the end of the newest minute Yahoo sent a row for, null rows included.
+    - If no session minute lies between that and the end asked for, it runs to the end.
+    - It counts only once the setups it moved are stored. A failed write is a failed read, so the
+      next poll reads the same minutes again.
+    - A minute Yahoo has not published yet is therefore read by the next poll, not taken for a
+      minute without a trade.
   - A minute applies only once it is 60 s old, so trades reported late have had a minute to arrive.
     The lag was not measured; see the delay row above.
   - One request covers 7 days. A setup further behind than that catches up one page per poll.
@@ -125,6 +143,17 @@ row and its answers are byte for byte as before.
   A setup's log gets a `gap` entry only for bars older than Yahoo's 1m history (29 days, a day
   short of the limit) that the server could no longer read. That is the same meaning a gap has for
   Binance.
+- **An implausible open is held.** A read is held back, not applied and not counted as read, when
+  both of these hold:
+  - its first bar after the last close scored opens below 0.7 or above 1.4 times that close;
+  - it holds no split.
+
+  The next poll reads it again, and once Yahoo sends the split it is scored in the split's terms.
+  The band takes in every split from 3:2 on (0.67) and every reverse split from 2:3 on (1.5). A
+  5:4 split (0.8) is not caught. After 30 polls of the same first bar, half an hour at one a minute,
+  it is taken as a real gap: scored as it is, at its open, and the server's log says so. A real 40 %
+  gap is scored half an hour late. A split whose event Yahoo sends more than half an hour late is
+  scored as a crash, and that log line is how an operator finds it.
 
 ### Sessions: weekends, holidays, expiry and counts in bars
 
@@ -148,8 +177,11 @@ For a stock setup, these count session time, not 24/7 time:
   - Unfilled, the setup scores 0 as before.
   - Binance setups keep their rule: the first bar that opens at or after the expiry, at its open.
     In a 24/7 market the two rules pick almost the same price, and Binance's rule is not changed.
-- **A skip's expiry** is 24 bars of its interval of session time from now, at most 90 days.
-  - On a 1h chart that is 24 trading hours, about 3.7 sessions, not one day.
+- **A skip's expiry** is at the close of the 24th bar of its interval on the session grid, the
+  bar forming now the first, and at most 90 days away. It is checked against the calendar's last
+  year, as an agent's expiry is.
+  - On a 1h chart, a session has 7 grid bars (09:30 to 15:30, the last a half hour), so 24 bars
+    are about 3.4 sessions, not one day.
   - Bars of a day or longer count in sessions: a day is 1 session, a week 5 and a month 21.
 - **The skip's ATR** comes from Yahoo's own bars of the interval, which are session bars already.
   Its least risk uses the stock costs below.
@@ -158,8 +190,9 @@ For a stock setup, these count session time, not 24/7 time:
   - Intraday bars follow the session grid, like Yahoo's own: they start at the open, and the
     session's last bar is shorter.
   - Day bars and longer count sessions, as above.
-- **`bars_to_fill`, `bars_to_exit`, `bars_to_mae` and `bars_to_mfe`** count session time over the
-  interval, so a night or a weekend is not bars.
+- **`bars_to_fill`, `bars_to_exit`, `bars_to_mae` and `bars_to_mfe`** count bars of the session
+  grid, as the time stop does, to fractions of a bar. The short last bar of a session counts as a
+  whole bar, and a night or a weekend is no bars.
 
 ### Gaps at the open
 
@@ -196,6 +229,14 @@ setup was made, which that setup has not taken yet, the server:
 1. divides every price of the setup by the ratio before it applies the read's bars: the levels,
    the pending levels, the fill, the exit, the last close, and the shadows' stops and exits;
 2. writes an `adjusted` entry to the log, by the server.
+
+Some cases need care:
+- **Pending levels sent at or after the split's time are left as they are.** The agent read them
+  from charts Yahoo had already adjusted.
+- **Catch-up reads.** Yahoo answers in the terms of the latest split even for an old page. So a
+  read of a page that ends more than an hour ago also asks Yahoo's daily chart for the splits from
+  that page's end to now (one more request), and applies them before the page's bars.
+- **An event that comes late** is held, as above.
 
 R, MAE, MFE and the closest approach are ratios and do not move. The drawings stay as the agent
 drew them. A setup made after the split read adjusted prices already, so it is left alone. A
@@ -234,6 +275,10 @@ A replay's fixtures may hold stock symbols. For those:
 - It reads Yahoo's 1m bars of the regular session in 7-day pages, with 2 s between requests.
 - It records the window's dividends.
 - It refuses a window older than Yahoo's 30 days.
+- It refuses a symbol that `create_setup` would refuse, with the same check of Yahoo's metadata.
+- A symbol whose quote suffix is not in `detect_source`'s list, such as BTCEUR or ETHTRY, is now
+  read from Yahoo as a stock. Before, it was read from Binance. A Binance fixture of such a symbol
+  is bucketed on the US session grid.
 - It refuses `--shift-days` for a stock, since a shifted session would land on a holiday or a
   weekend that the calendar knows.
 
@@ -247,10 +292,11 @@ on Binance symbols.
 
 - Good: Hermes can test a stock thesis on paper with the scorer, costs rules and track record it
   has for crypto, and a replay can run it over the last 30 days.
-- Good: a setup's result never comes from a minute that did not trade, a gap that was not one, or
-  a split read as a crash.
-- Bad: a status moves 1 to 2 minutes after the price did: up to 60 s of polling and 60 s of
-  settling. Wake-ups arrive that much later than for Binance.
+- Good: a setup's result never comes from a minute that did not trade or a gap that was not one.
+  A split is not read as a crash unless Yahoo sends its event more than half an hour after the
+  bars; the server's log then says so.
+- Bad: a status moves after the price by 1 to 2 minutes of polling and settling, plus Yahoo's own
+  lag, which has not been measured yet. Wake-ups arrive that much later than for Binance.
 - Bad: the lag of Yahoo's equity 1m data was not measured during a session. The settling margin
   of 60 s is a guess, to be checked on a trading day. A trade reported after a minute has been
   applied does not change that minute's bar here.
@@ -280,7 +326,7 @@ on Binance symbols.
   - an expiry across the weekend that ends at Friday's close;
   - a long stopped by Monday's 7 % gap at the open, at that open;
   - a 1h skip whose bracket comes from session bars (09:30 to 15:30, the last a half hour) and
-    whose expiry is 24 trading hours later.
+    whose expiry is the close of the 24th bar of the session grid.
 
   O's real 1m bars from 2026-10-29 to 2026-10-30 (`tests/fixtures/replay_stocks_dividend/`),
   with its dividend of 0.272, pay a long that was held over the ex-date.

@@ -56,7 +56,10 @@ each gap in real time (the first 20).
     and a stock setup in the replay is paid them;
   - splits are not written: Yahoo's bars are already adjusted for them;
   - a minute without a trade is no bar;
-  - the replay builds a stock's intraday bars from the session's open, as Yahoo does.
+  - the replay builds a stock's intraday bars from the session's open, as Yahoo does;
+  - a symbol `create_setup` would refuse (an index, OTC, another exchange) is refused;
+  - every symbol whose quote is not one `detect_source` knows (USDT, BUSD, BTC, ETH, BNB, USDC,
+    FDUSD) is taken for a stock: BTCEUR or ETHTRY is read from Yahoo, not from Binance.
 - **Gaps.** A minute Binance has no kline for (an outage, or no trade on a small symbol) stays
   missing. The replay builds each longer bar from the minutes it has, and a bar with no minute at
   all is not there, as on Binance. If the window's first minutes are missing, the first bar of
