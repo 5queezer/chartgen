@@ -22,7 +22,7 @@ use crate::mcp::{tool_err, tool_ok};
 /// How long a symbol's context is served before it is read again.
 const FRESH: Duration = Duration::from_secs(60);
 /// How long a read in flight is waited for, and holds others off. Longer than a read
-/// takes: two kline requests and two futures series of at most 20 s each.
+/// takes: three kline requests and two futures series of at most 20 s each.
 const READING: Duration = Duration::from_secs(90);
 /// How long the Fear & Greed index is kept: it moves once a day.
 const FEAR_GREED_FRESH: Duration = Duration::from_secs(600);
