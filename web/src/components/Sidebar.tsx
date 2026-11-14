@@ -1,4 +1,4 @@
-// Right sidebar with TradingView-style icon tabs: Watchlist, Alerts, Data
+// Right sidebar with TradingView-style icon tabs: Watchlist, Alerts, Setups, Data
 // Window and Object Tree. The collapsed state is the watchlist store's, so
 // the rail of tab icons is shown instead of the panel. Clicking the selected
 // tab collapses; clicking a rail icon opens that tab. The tab is kept in localStorage. Switching tabs unmounts the other
@@ -15,13 +15,15 @@ import { setWatchlistCollapsed, watchlistCollapsed } from "../stores/watchlist";
 import { AlertsPanel } from "./AlertsPanel";
 import { DataWindow, type DataWindowProps } from "./DataWindow";
 import { ObjectTree, type ObjectTreeProps } from "./ObjectTree";
+import { SetupsPanel } from "./SetupsPanel";
 import { Watchlist } from "./Watchlist";
 
-const TABS = ["watchlist", "alerts", "data", "tree"] as const;
+const TABS = ["watchlist", "alerts", "setups", "data", "tree"] as const;
 type Tab = (typeof TABS)[number];
 const LABELS: Record<Tab, string> = {
   watchlist: "Watchlist",
   alerts: "Alerts",
+  setups: "Setups",
   data: "Data Window",
   tree: "Object Tree",
 };
@@ -29,6 +31,8 @@ const LABELS: Record<Tab, string> = {
 const ICONS: Record<Tab, string> = {
   watchlist: "M2 4h12M2 8h12M2 12h8",
   alerts: "M8 2a4 4 0 0 0-4 4v3l-1.5 2.5h11L12 9V6a4 4 0 0 0-4-4zM6.5 13.5a1.5 1.5 0 0 0 3 0",
+  // A crosshair on a target: the levels a setup is scored against.
+  setups: "M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M8 4.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7",
   data: "M2 3h12v10H2zM2 6.5h12M6 6.5V13",
   tree: "M3 3h4M6 8h4M6 13h4M4.5 4v9M4.5 8H6M4.5 13H6",
 };
@@ -180,6 +184,9 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         </Show>
         <Show when={tab() === "alerts"}>
           <AlertsPanel />
+        </Show>
+        <Show when={tab() === "setups"}>
+          <SetupsPanel session={props.session} enabled={props.enabled} />
         </Show>
         <Show when={tab() === "data"}>
           <DataWindow {...props.panels} />
