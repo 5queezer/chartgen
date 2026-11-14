@@ -63,7 +63,7 @@ An object, `context`, for one symbol:
 | `symbol`, `at` | the symbol, and when this was read (ms) | |
 | `price` | the last price: the close of the forming 4h bar | `fetch_ohlcv`, 150 bars of 4h |
 | `trend` | `{"4h": …, "1d": …}`, each `up`, `down` or `mixed` | the same bars, and 150 of 1d |
-| `funding_pct` | the latest funding rate, in percent | the `funding_rate` indicator |
+| `funding_pct` | the latest funding rate, in percent | the `funding_rate` indicator, on 150 bars of 1h |
 | `long_short` | `{long, ratio}`: the share of accounts that are long, and long/short | the `long_short` indicator (Binance's global account ratio, 4h period) |
 | `fear_greed` | `{value, label}`, today's index and its band | the `fear_greed` indicator (alternative.me) |
 | `line` | all of it in one line | |
@@ -81,9 +81,13 @@ price and trends. Any part that could not be read is absent, never guessed. **A 
 not in it:** chartgen has no macro calendar. That lives in Hermes's macro-calendar tool, which stays
 where it is.
 
-**Cost.** A context is held per symbol for **one minute**, the index for ten. A cold read is two
+**Funding is read on 1h bars**, not the 4h ones: the indicator lines each rate up with the nearest
+bar open, and a symbol funded every hour has a newer rate than the open of the forming 4h bar.
+
+**Cost.** A context is held per symbol for **one minute**, the index for ten. A cold read is three
 kline requests plus the funding and long/short series, which the indicators already cache and pace
-through the Binance gate.
+through the Binance gate. **Callers that come while a symbol is being read wait for that read**
+rather than start another, also after a wake-up stopped waiting for it.
 
 **In a wake-up.** The body is made when it is sent (ADR-0061), and `context` is made with it. It
 comes **after `change` or `alert` and `note`, before `setup`**, so the thesis stays last. A wake-up
@@ -131,6 +135,7 @@ before the stop.
 - Bad: a wake-up can be up to 5 seconds later than before when the context is not held. Wake-ups are
   minutes apart; their schedule and slots are unchanged.
 - Bad: the context of a wake-up sent on a retry can differ from the first attempt's, as its setup can.
+  The setup in a body is read after the context, so a bar that closed it meanwhile shows.
 - Neutral: `setup.near_stop` events count toward the owner's 1000 kept events and the wake-up limits
   like any other.
 

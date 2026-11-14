@@ -2116,7 +2116,8 @@ impl Record {
             By::Server,
             Kind::NearStop,
             Some(format!(
-                "price went {mae} R against the position, {NEAR_STOP_R} R or more of the way to the invalidation"
+                "price went {} R against the position, {NEAR_STOP_R} R or more of the way to the invalidation",
+                mae.abs()
             )),
             changes,
         ))

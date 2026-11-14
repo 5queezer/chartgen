@@ -1877,6 +1877,11 @@ impl ServerAlerts {
                     Some(symbol) => crate::market_context::within(symbol, CONTEXT_WAIT).await,
                     None => None,
                 };
+                // As it is after the wait, which a bar may have closed it in.
+                let setup = event
+                    .setup_id
+                    .as_deref()
+                    .and_then(|id| self.setup_of(&event.owner, id));
                 let body = wake_up_body(&event, alert.as_ref(), setup.as_ref(), context.as_ref());
                 let secret = Some(agent.secret());
                 let slots = [self.agent_slots.as_ref()];

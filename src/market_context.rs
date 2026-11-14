@@ -8,7 +8,7 @@
 //! macro calendar.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::{Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use chartgen::data::OhlcvData;
@@ -21,6 +21,9 @@ use crate::mcp::{tool_err, tool_ok};
 
 /// How long a symbol's context is served before it is read again.
 const FRESH: Duration = Duration::from_secs(60);
+/// How long a read in flight is waited for, and holds others off. Longer than a read
+/// takes: two kline requests and two futures series of at most 20 s each.
+const READING: Duration = Duration::from_secs(90);
 /// How long the Fear & Greed index is kept: it moves once a day.
 const FEAR_GREED_FRESH: Duration = Duration::from_secs(600);
 /// Bars read of each interval: enough for the slow EMA to settle.
@@ -31,7 +34,24 @@ const SLOW: usize = 50;
 /// Most symbols one `get_market_context` call takes.
 pub const MAX_SYMBOLS: usize = 10;
 
-static HELD: LazyLock<Mutex<HashMap<String, (Instant, Value)>>> = LazyLock::new(Mutex::default);
+/// A symbol's context: being read since then, or read then.
+enum Held {
+    Reading(Instant),
+    Read(Instant, Value),
+}
+
+impl Held {
+    fn current(&self) -> bool {
+        match self {
+            Held::Reading(since) => since.elapsed() < READING,
+            Held::Read(at, _) => at.elapsed() < FRESH,
+        }
+    }
+}
+
+static HELD: LazyLock<Mutex<HashMap<String, Held>>> = LazyLock::new(Mutex::default);
+/// Told when a read ends.
+static READ: Condvar = Condvar::new();
 /// When the index was last read, and what it was then.
 static FEAR_GREED: Mutex<Option<(Instant, Option<f64>)>> = Mutex::new(None);
 
@@ -40,17 +60,34 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The context of `symbol`, as held if it is fresh. Blocking: a read can take seconds.
-/// A symbol whose bars cannot be read answers `{symbol, error}`.
+/// A symbol whose bars cannot be read answers `{symbol, error}`. Callers that come while
+/// a symbol is being read wait for that read rather than start another.
 pub fn of(symbol: &str) -> Value {
-    if let Some((at, held)) = lock(&HELD).get(symbol) {
-        if at.elapsed() < FRESH {
-            return held.clone();
+    let mut held = lock(&HELD);
+    loop {
+        match held.get(symbol) {
+            Some(Held::Read(at, context)) if at.elapsed() < FRESH => return context.clone(),
+            Some(h @ Held::Reading(_)) if h.current() => {
+                held = READ
+                    .wait_timeout(held, READING)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            _ => break,
         }
     }
+    held.insert(symbol.to_string(), Held::Reading(Instant::now()));
+    drop(held);
+    #[cfg(test)]
+    tests::count_read(symbol);
     let context = read(symbol, source());
     let mut held = lock(&HELD);
-    held.retain(|_, (at, _)| at.elapsed() < FRESH);
-    held.insert(symbol.to_string(), (Instant::now(), context.clone()));
+    held.retain(|_, h| h.current());
+    held.insert(
+        symbol.to_string(),
+        Held::Read(Instant::now(), context.clone()),
+    );
+    READ.notify_all();
     context
 }
 
@@ -98,7 +135,11 @@ fn read(symbol: &str, source: DataSource) -> Value {
     // has neither, and so leaves them out.
     let futures = source == DataSource::Live || chartgen::data::sample_source();
     if futures && fetch::detect_source(symbol) == "binance" {
-        if let Some(rate) = last(&indicator("funding_rate", &four).bars.first().map(|b| &b.y)) {
+        // On 1h bars: the indicator lines a rate up with the nearest bar open, and a
+        // symbol funded every hour has a newer rate than the 4h bar's open.
+        let hourly = bars(source, symbol, "1h").ok();
+        let funding = hourly.as_ref().map(|h| indicator("funding_rate", h));
+        if let Some(rate) = last(&funding.as_ref().and_then(|f| f.bars.first()).map(|b| &b.y)) {
             v.insert("funding_pct".into(), json!(round(rate, 4)));
         }
         let ls = indicator("long_short", &four);
@@ -274,6 +315,28 @@ mod tests {
     use super::*;
     use chartgen::data::Bar;
 
+    static READS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Mutex::default);
+
+    pub(super) fn count_read(symbol: &str) {
+        *lock(&READS).entry(symbol.to_string()).or_default() += 1;
+    }
+
+    /// Callers at once, for a symbol nobody holds, share one read.
+    #[test]
+    fn callers_at_once_share_one_read() {
+        let symbol = "SHAREDREADUSDT";
+        let start = std::sync::Barrier::new(8);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    start.wait();
+                    of(symbol)
+                });
+            }
+        });
+        assert_eq!(lock(&READS).get(symbol), Some(&1));
+    }
+
     fn data(closes: &[f64]) -> OhlcvData {
         OhlcvData {
             bars: closes
@@ -308,10 +371,10 @@ mod tests {
         assert_eq!(trend_of(&data(&rising[..SLOW - 1])), None);
     }
 
-    /// The futures parts are checked on a server with the sample source, where their
-    /// sample series are on; a unit test leaves them out rather than reach Binance.
+    /// A unit test leaves the futures series out rather than reach Binance, unless
+    /// `CHARTGEN_DATA_SOURCE=sample` turns their sample series on. Never the index.
     #[test]
-    fn a_unit_test_reads_the_price_and_the_trends_and_no_futures_series() {
+    fn a_unit_test_reads_the_price_and_the_trends_and_no_live_series() {
         for symbol in ["BTCUSDT", "AAPL"] {
             let v = read(symbol, source());
             assert!(v["price"].as_f64().is_some(), "{v}");
@@ -319,9 +382,11 @@ mod tests {
                 v["trend"]["4h"].is_string() && v["trend"]["1d"].is_string(),
                 "{v}"
             );
-            for part in ["funding_pct", "long_short", "fear_greed"] {
-                assert!(v.get(part).is_none(), "{part}: {v}");
+            let futures = symbol == "BTCUSDT" && chartgen::data::sample_source();
+            for part in ["funding_pct", "long_short"] {
+                assert_eq!(v.get(part).is_some(), futures, "{part}: {v}");
             }
+            assert!(v.get("fear_greed").is_none(), "{v}");
             let line = v["line"].as_str().unwrap();
             assert!(
                 line.starts_with(&format!("{symbol} ")) && line.contains(" | trend 4h "),

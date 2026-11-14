@@ -328,12 +328,16 @@ reports.
 (`setup.near_stop`, [ADR-0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/)): at
 the first 1m bar that takes `mae_r` to -0.8 or below while it stays open. The setup then shows
 `near_stop_at`, and its log a `near_stop` entry. It is said once, however often the price comes
-back; a bar that stops it out says so with its status instead.
+back; a bar that stops it out says so with its status instead. **After the server was away, a
+warning written together with the stop that followed it is logged and not sent:** the stop's
+wake-up comes, the warning only in [`list_events`](/chartgen/reference/mcp/#reading-back-what-happened).
 
-Every wake-up also carries `context`, the symbol's market when it is sent: price, trend on 4h
+A wake-up can also carry `context`, the symbol's market when it is sent: price, trend on 4h
 and 1d, funding, the long/short split and Fear & Greed, as
-[`get_market_context`](/chartgen/reference/mcp/#get_market_context) answers it. Whether a macro
-blackout is on is not in it.
+[`get_market_context`](/chartgen/reference/mcp/#get_market_context) answers it. **It is absent
+when it was not held from the last minute and could not be read within 5 seconds**, or when the
+symbol's bars cannot be read, so do not rely on it being there. Whether a macro blackout is on is
+not in it.
 
 ## Replay
 

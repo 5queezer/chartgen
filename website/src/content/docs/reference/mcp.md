@@ -960,7 +960,8 @@ takes them. One entry per distinct symbol, in request order:
 - `trend` per interval, of 150 bars with the forming one: `up` when the price is above the
   20-bar EMA and that EMA is above the 50-bar EMA, `down` when both are the other way round,
   `mixed` otherwise.
-- `funding_pct`: the latest funding rate, in percent, as the `funding_rate` indicator reads it.
+- `funding_pct`: the latest funding rate, in percent, as the `funding_rate` indicator reads it
+  on 1h bars.
 - `long_short`: the share of Binance accounts that are long, and `ratio` long/short, as the
   `long_short` indicator reads them (4h period).
 - `fear_greed`: today's crypto Fear & Greed index (alternative.me) and its band: `extreme fear`
@@ -970,7 +971,8 @@ takes them. One entry per distinct symbol, in request order:
 Funding, long/short and the index are for Binance symbols only; a stock has its price and
 trends. A part that could not be read is absent. A symbol whose bars cannot be read gets
 `{symbol, error}` and never fails the call. Each symbol is read at most once a minute, the
-index once in ten minutes; within that, every caller gets the held answer. There is no macro
+index once in ten minutes; within that, every caller gets the held answer, and callers that
+come during a read wait for it. There is no macro
 calendar here, so whether a macro blackout is on is not part of it. A replay server refuses
 the tool.
 
