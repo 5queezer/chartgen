@@ -9,6 +9,7 @@ import {
   parseRecord,
   parseRecords,
   pointTimestamp,
+  replaceDrawings,
   sanitizeStyles,
   saveDrawings,
   serialize,
@@ -281,6 +282,19 @@ describe("storage", () => {
     const full = Array.from({ length: MAX_DRAWINGS }, (_, i) => ({ ...line, points: [{ timestamp: i, value: i }] }));
     saveDrawings("ETHUSDT", full);
     expect(importDrawings("ETHUSDT", [{ ...line, points: [{ timestamp: -1, value: 1 }] }])).toBe(0);
+  });
+
+  it("replaces the drawings an earlier import put under the same prefix (ADR-0071)", () => {
+    const own = { ...good, id: "mine" } as DrawingRecord;
+    const box = (id: string, t: number) =>
+      ({ id, name: "cgShort", points: [{ timestamp: t, value: 3 }, { timestamp: t + 60, value: 2 }, { timestamp: t + 60, value: 4 }], lock: false, visible: true }) as DrawingRecord;
+    saveDrawings("BTCUSDT", [own, box("setup-a-bracket", 1), box("setup-b-bracket", 1)]);
+    expect(replaceDrawings("BTCUSDT", "setup-a-", [box("setup-a-bracket", 2)])).toBe(1);
+    expect(loadDrawings("BTCUSDT").map((r) => [r.id, r.points[0]!.timestamp])).toEqual([
+      ["mine", good.points[0]!.timestamp],
+      ["setup-b-bracket", 1],
+      ["setup-a-bracket", 2],
+    ]);
   });
 
   it("survives corrupt JSON", () => {

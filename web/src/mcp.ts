@@ -15,7 +15,10 @@ import type {
   GenerateChartInput,
   GetFootprintInput,
   GetQuotesInput,
+  GetSetupInput,
+  GetTrackRecordInput,
   GetTpoInput,
+  ListSetupsInput,
   SearchSymbolsInput,
   SubscribeChartInput,
   SubscribePushInput,
@@ -37,6 +40,9 @@ import {
   RegisteredIndicatorPayloadSchema,
   SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
+  SetupPayloadSchema,
+  SetupsPayloadSchema,
+  TrackRecordPayloadSchema,
   ServerAlertChangePayloadSchema,
   ServerAlertsPayloadSchema,
   SubscribeChartPayloadSchema,
@@ -55,6 +61,9 @@ import {
   type ScriptRejection,
   type SearchSymbolsPayload,
   type SeriesPayload,
+  type SetupPayload,
+  type SetupsPayload,
+  type TrackRecordPayload,
   type ServerAlertChangePayload,
   type ServerAlertsPayload,
   type SubscribeChartPayload,
@@ -160,6 +169,12 @@ export interface McpSession {
   callSubscribePush: (args: SubscribePushInput) => Promise<SubscribePushPayload>;
   /** Invoke `unsubscribe_push`. */
   callUnsubscribePush: (args: UnsubscribePushInput) => Promise<UnsubscribePushPayload>;
+  /** Invoke `list_setups` (ADR-0059): the caller's setups; says so when the server keeps none. */
+  callListSetups: (args: ListSetupsInput) => Promise<SetupsPayload>;
+  /** Invoke `get_setup`: one of the caller's setups with its log. */
+  callGetSetup: (args: GetSetupInput) => Promise<SetupPayload>;
+  /** Invoke `get_track_record` (ADR-0064): counts over the caller's closed setups. */
+  callGetTrackRecord: (args: GetTrackRecordInput) => Promise<TrackRecordPayload>;
   /** The names `tools/list` reports; the scripting tools are there only when enabled. */
   callListToolNames: () => Promise<string[]>;
   /** Invoke `list_my_indicators` (ADR-0025): the caller's scripts. */
@@ -464,6 +479,27 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return UnsubscribePushPayloadSchema.parse(json);
+    },
+    async callListSetups(args) {
+      const json = await callToolWithAuthRetry(
+        "list_setups",
+        args as unknown as Record<string, unknown>,
+      );
+      return SetupsPayloadSchema.parse(json);
+    },
+    async callGetSetup(args) {
+      const json = await callToolWithAuthRetry(
+        "get_setup",
+        args as unknown as Record<string, unknown>,
+      );
+      return SetupPayloadSchema.parse(json);
+    },
+    async callGetTrackRecord(args) {
+      const json = await callToolWithAuthRetry(
+        "get_track_record",
+        args as unknown as Record<string, unknown>,
+      );
+      return TrackRecordPayloadSchema.parse(json);
     },
     callListToolNames() {
       return withAuthRetry(async (conn) => {

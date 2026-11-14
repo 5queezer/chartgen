@@ -15,8 +15,8 @@ transport, where a call has an owner. A headless agent
 needs [durable tokens](/chartgen/reference/oauth/#refresh-tokens) for them: a setup belongs to
 the owner its token resolves to, which with sign-in off is the OAuth client, so an agent whose
 token does not outlive a restart loses sight of its setups until someone authorizes it again. The tools
-are in the [MCP reference](/chartgen/reference/mcp/#setups-chartgen_setups1). The web app does
-not show setups yet.
+are in the [MCP reference](/chartgen/reference/mcp/#setups-chartgen_setups1). The web app's
+[Setups tab](/chartgen/guides/web/#setups) lists them.
 
 ## A setup
 

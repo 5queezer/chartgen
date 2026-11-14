@@ -846,9 +846,9 @@ entries are dropped.
 
 ## Sidebar and price alerts
 
-The right sidebar has four icon tabs, **Watchlist**, **Alerts**, **Data
+The right sidebar has five icon tabs, **Watchlist**, **Alerts**, **Setups**, **Data
 Window** and **Object Tree**; the tab you last used is remembered. Click the
-selected tab again to collapse the sidebar into a narrow rail of the four icons
+selected tab again to collapse the sidebar into a narrow rail of the five icons
 (the Alerts icon shows the number of active alerts). Click an icon in the rail
 to open the sidebar on that tab. The collapsed state is remembered. On a narrow
 screen the sidebar is a sheet closed with **×**. The Alerts tab shows the number of
@@ -998,6 +998,34 @@ Only price alerts are drawn as lines on the chart. With several chartgen tabs
 open, one evaluates the alerts and the Alerts tab of the others says so. An
 indicator or sloped drawing alert depends on that tab's chart: while it shows
 something else, the others read *inactive: open BTCUSDT 1h in the other tab*.
+
+### Setups
+
+The **Setups** tab lists the [setups](/chartgen/guides/setups/) your agent made under your sign-in,
+the ones the server scores on paper ([ADR-0071](/chartgen/decisions/0071-setups-panel/)). It reads
+them with the same tools the agent uses, so it shows yours only.
+
+- **Order and filter.** Open setups (watching or triggered) come first, newest first, then closed
+  ones, the most recently ended first. **Open**, **Closed** and **All** filter them, each with its
+  count; your choice is remembered.
+- **A row:**
+  - symbol, interval, direction, `skip` for a decision not to trade, the status, and the result in
+    R once closed;
+  - below, the entry zone (or the fill price once filled), the stop, the first target and the
+    expiry;
+  - the tags;
+  - hover a row for its thesis.
+- **Won below 0 R.** A setup marked `won` with a result below 0 R reached its first target, but
+  the fill was at or past it, so the costs of getting in and out were more than the move. Its row
+  says so in red. The status stays `won`: that is what the agent reads.
+- **Totals.** **Taken** and **Skipped** each show the closed setups, how many won, the total and
+  mean R, and how many are open, as the server's `get_track_record` counts them.
+- **Click a row** to open its symbol at its interval with its drawings. A skip also gets the
+  server's bracket as a long or short position: from the fill (or from when it was made) to its
+  expiry while open, or to where it ended, with the target and stop it is scored against. The
+  drawings join the symbol's own, as a shared link's do; opening the setup again replaces what
+  it drew before, so a setup that moved on shows once, as it is now.
+- The tab asks again every minute while it shows. A server without setups says so.
 
 ### Data Window
 

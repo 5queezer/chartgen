@@ -41,7 +41,8 @@ const CHARTGEN_DB = join(tmpdir(), `chartgen-e2e-${CHARTGEN_PORT}.db`);
 const ALERTS_CHARTGEN_PORT = CHARTGEN_PORT - 2_000;
 const ALERTS_WEB_PORT = WEB_PORT - 2_000;
 const ALERTS_DB = join(tmpdir(), `chartgen-e2e-${ALERTS_CHARTGEN_PORT}.db`);
-const ALERTS_SPECS = /(server-alerts|alerts|alerts-sources|alerts-push)\.spec\.ts$/;
+// The setups panel (ADR-0071) runs on this server too: it keeps setups.
+const ALERTS_SPECS = /(server-alerts|alerts|alerts-sources|alerts-push|setups-panel)\.spec\.ts$/;
 // The webhook receiver of server-alerts.spec.ts. The server only accepts this
 // local origin because it runs on the sample source.
 const WEBHOOK_PORT = CHARTGEN_PORT - 1_000;
@@ -83,7 +84,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: [/(server-alerts|alerts-push)\.spec\.ts$/, SCRIPTING_SPECS, SIGNIN_SPECS],
+      testIgnore: [/(server-alerts|alerts-push|setups-panel)\.spec\.ts$/, SCRIPTING_SPECS, SIGNIN_SPECS],
       use: { ...devices["Desktop Chrome"] },
     },
     {
@@ -133,6 +134,7 @@ export default defineConfig({
         CHARTGEN_DB: ALERTS_DB,
         CHARTGEN_SERVER_ALERTS: "1",
         CHARTGEN_SERVER_ALERT_CLIENTS: "*",
+        CHARTGEN_SETUPS: "1",
         // Off even if the developer's shell turns scripting on.
         CHARTGEN_SCRIPTING: "0",
         CHARTGEN_WEBHOOK_TEST_ORIGIN: `http://127.0.0.1:${WEBHOOK_PORT}`,
