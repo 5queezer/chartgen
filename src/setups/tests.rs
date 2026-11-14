@@ -1752,3 +1752,320 @@ fn a_record_filled_before_shadows_loads_and_gets_none() {
     shadow_walk(&mut watching, &[]);
     assert!(watching.shadow_results.is_some());
 }
+
+// Stock setups (ADR-0070). Times are New York's, around the weekend of 2026-11-07.
+
+fn ny(day: u32, hour: u32, minute: u32) -> i64 {
+    use chrono::TimeZone;
+    chrono_tz::America::New_York
+        .with_ymd_and_hms(2026, 11, day, hour, minute, 0)
+        .single()
+        .unwrap()
+        .timestamp_millis()
+}
+
+fn at(time: i64, open: f64, high: f64, low: f64, close: f64) -> MinuteBar {
+    MinuteBar {
+        time,
+        open,
+        high,
+        low,
+        close,
+    }
+}
+
+/// A long on a stock at 180 to 181, wrong at 176, made on Friday at 14:00, as the
+/// service makes it; and its twin on a 24/7 symbol.
+fn stock_long(targets: Value, expires_at: i64) -> (Record, Record) {
+    let args = json!({
+        "symbol": "NVDA", "interval": "1h", "direction": "long", "thesis": "example thesis",
+        "entry": { "low": 180.0, "high": 181.0 }, "invalidation": 176.0,
+        "targets": targets, "expires_at": expires_at,
+    });
+    let made = ny(6, 14, 0);
+    let make = |market: Option<Market>| {
+        let mut problems = Vec::new();
+        let draft = Draft::parse_for(&args, market, made, &mut problems).unwrap();
+        let levels = draft.levels.clone().unwrap();
+        let (mut r, _) = Record::new("s".into(), "o", "NVDA".into(), draft, levels, vec![], made);
+        r.market = market;
+        r.costs = market.map_or_else(Costs::default, Market::costs);
+        r
+    };
+    (make(Some(Market::UsEquity)), make(None))
+}
+
+/// Friday's bars: a fill at 180.5 at 15:00, and the session's last minute closing at
+/// 182.5.
+fn friday() -> [MinuteBar; 2] {
+    [
+        at(ny(6, 15, 0), 180.5, 181.0, 180.0, 180.6),
+        at(ny(6, 15, 59), 182.0, 183.0, 181.5, 182.5),
+    ]
+}
+
+#[test]
+fn a_stock_setup_expiring_on_a_weekend_ends_at_fridays_close() {
+    let (mut stock, mut crypto) = stock_long(json!([190.0]), ny(7, 12, 0));
+    // Monday opens far below the stop.
+    let monday = at(ny(9, 9, 30), 172.0, 173.0, 171.0, 172.5);
+    for b in friday().iter().chain([&monday]) {
+        stock.apply_bar(b);
+        crypto.apply_bar(b);
+    }
+    assert_eq!(stock.status, Status::Expired);
+    let friday_close = Mark {
+        price: 182.5,
+        bar_time: ny(6, 15, 59),
+    };
+    assert_eq!(stock.exit, Some(friday_close));
+    assert_eq!(stock.result_r, Some(stock.score(180.5, 182.5)));
+    assert!(stock.result_r.unwrap() > 0.0);
+    // The status entry is logged at the expiry.
+    let log = stock.expire_by(i64::MAX);
+    assert!(log.is_empty(), "closed already");
+    // A 24/7 setup expires at the first bar at or after the expiry, at its open.
+    assert_eq!(crypto.status, Status::Expired);
+    assert_eq!(crypto.exit.map(|m| m.price), Some(172.0));
+
+    // With no bar after the expiry, the server ends it once it has read past it.
+    let (mut quiet, _) = stock_long(json!([190.0]), ny(7, 12, 0));
+    walk(&mut quiet, &friday());
+    assert!(quiet.expire_by(ny(7, 11, 59)).is_empty());
+    let log = quiet.expire_by(ny(7, 12, 0));
+    assert_eq!(log[0].at, ny(7, 12, 0));
+    assert_eq!(quiet.status, Status::Expired);
+    assert_eq!(quiet.exit, Some(friday_close));
+    // So do its shadows, at the same close.
+    for s in all(&quiet) {
+        assert_eq!((s.status, s.exits[0].price), (ShadowStatus::Expired, 182.5));
+    }
+}
+
+#[test]
+fn a_stock_setup_ends_at_the_last_close_before_its_expiry_within_a_session() {
+    let (mut r, _) = stock_long(json!([190.0]), ny(6, 15, 30));
+    walk(
+        &mut r,
+        &[friday()[0], at(ny(6, 15, 29), 181.0, 181.2, 180.9, 181.1)],
+    );
+    assert_eq!(r.status, Status::Triggered);
+    // The 15:30 bar closes after the expiry: the 15:29 close counts.
+    r.apply_bar(&at(ny(6, 15, 30), 181.1, 185.0, 181.0, 184.0));
+    assert_eq!(r.status, Status::Expired);
+    assert_eq!(
+        r.exit.map(|m| (m.price, m.bar_time)),
+        Some((181.1, ny(6, 15, 29)))
+    );
+}
+
+#[test]
+fn an_unfilled_stock_setup_expires_at_zero_and_new_levels_count_in_a_closed_market() {
+    let (mut r, _) = stock_long(json!([190.0]), ny(7, 12, 0));
+    // Revised on Saturday morning, before the expiry: there is no bar to wait for.
+    let mut later = r.levels.clone();
+    later.expires_at = ny(10, 16, 0);
+    r.revise(
+        None,
+        None,
+        None,
+        Some(later),
+        "more time".into(),
+        ny(7, 10, 0),
+    )
+    .unwrap();
+    assert!(r.expire_by(ny(7, 13, 0)).is_empty());
+    assert_eq!(r.status, Status::Watching);
+    let (mut unrevised, _) = stock_long(json!([190.0]), ny(7, 12, 0));
+    unrevised.expire_by(ny(7, 13, 0));
+    assert_eq!(
+        (unrevised.status, unrevised.result_r, unrevised.exit),
+        (Status::Expired, Some(0.0), None)
+    );
+}
+
+#[test]
+fn a_stock_target_gapped_past_exits_at_the_open_and_a_binance_one_at_the_target() {
+    let (mut stock, mut crypto) = stock_long(json!([186.0, 195.0]), ny(20, 16, 0));
+    let monday = at(ny(9, 9, 30), 190.0, 191.0, 189.0, 190.5);
+    for r in [&mut stock, &mut crypto] {
+        walk(r, &friday());
+        r.apply_bar(&monday);
+        assert_eq!(r.status, Status::Won);
+    }
+    assert_eq!(stock.exit.map(|m| m.price), Some(190.0));
+    assert_eq!(crypto.exit.map(|m| m.price), Some(186.0));
+    assert_eq!(
+        stock.mfe_r,
+        crypto
+            .mfe_r
+            .map(|_| ((190.0 - 180.5) / 4.5 * 10_000.0_f64).round() / 10_000.0)
+    );
+    // The shadows take their targets at the gap's open too: T1 for v2 and v3, and
+    // v1's half at T1.
+    let s = shadows(&stock);
+    assert_eq!(s.v2_be_at_1r.exits[0].price, 190.0);
+    assert_eq!(s.v3_time_stop.exits[0].price, 190.0);
+    assert_eq!(s.v1_half_t1_be.exits[0].price, 190.0);
+    let c = shadows(&crypto);
+    assert_eq!(c.v2_be_at_1r.exits[0].price, 186.0);
+    assert_eq!(c.v1_half_t1_be.exits[0].price, 186.0);
+}
+
+#[test]
+fn a_stock_setup_has_its_own_costs_and_least_risk() {
+    // 30 bps of risk: under Binance's 42 bps floor, over the stocks' 24 bps.
+    let args = with(
+        with(long_args(), "entry", json!({ "low": 100.0, "high": 100.5 })),
+        "invalidation",
+        json!(99.7),
+    );
+    let mut problems = Vec::new();
+    assert!(Draft::parse(&args, T0, &mut problems).is_none());
+    assert_eq!(fields(&problems), ["invalidation"]);
+    let mut problems = Vec::new();
+    assert!(Draft::parse_for(&args, Some(Market::UsEquity), T0, &mut problems).is_some());
+    assert_eq!(problems, vec![]);
+    let costs = Market::UsEquity.costs();
+    assert_eq!(
+        (costs.fee_bps_per_side, costs.slippage_bps_per_side),
+        (1.0, 3.0)
+    );
+    assert!((costs.round_trip() - 0.0008).abs() < 1e-12);
+}
+
+#[test]
+fn a_split_divides_every_price_once_and_the_result_in_r_does_not_move() {
+    let (mut split, _) = stock_long(json!([186.0, 195.0]), ny(20, 16, 0));
+    let (mut plain, _) = stock_long(json!([186.0, 195.0]), ny(20, 16, 0));
+    walk(&mut split, &friday());
+    walk(&mut plain, &friday());
+    let action = Adjustment::Split {
+        at: ny(9, 9, 30),
+        ratio: 10.0,
+    };
+    let entry = split.adjust(action).unwrap();
+    assert_eq!(entry.kind, Kind::Adjusted);
+    assert!(entry.reason.as_deref().unwrap().contains("divided by 10"));
+    assert!(split.adjust(action).is_none(), "once");
+    assert_eq!(split.levels.invalidation, 17.6);
+    assert_eq!(split.levels.targets, [18.6, 19.5]);
+    assert_eq!(split.fill.map(|m| m.price), Some(18.05));
+    assert_eq!(split.last_close.map(|m| m.price), Some(18.25));
+    assert_eq!(shadows(&split).v1_half_t1_be.stop, 17.6);
+    // The same day in the old terms and in the new.
+    split.apply_bar(&at(ny(9, 9, 30), 18.3, 18.7, 18.2, 18.6));
+    plain.apply_bar(&at(ny(9, 9, 30), 183.0, 187.0, 182.0, 186.0));
+    assert_eq!(split.status, Status::Won);
+    assert_eq!(split.result_r, plain.result_r);
+    // A split from before the setup was made: its prices were in the new terms.
+    let (mut late, _) = stock_long(json!([190.0]), ny(20, 16, 0));
+    let earlier = Adjustment::Split {
+        at: ny(6, 9, 30),
+        ratio: 10.0,
+    };
+    assert!(late.adjust(earlier).is_none());
+    // A Binance setup takes none.
+    let (_, mut crypto) = stock_long(json!([190.0]), ny(20, 16, 0));
+    assert!(crypto.adjust(action).is_none());
+}
+
+#[test]
+fn a_dividend_is_paid_to_a_long_and_by_a_short_from_the_exit_on() {
+    let ex = ny(9, 9, 30);
+    let dividend = Adjustment::Dividend {
+        at: ex,
+        amount: 0.5,
+    };
+    let (mut long, _) = stock_long(json!([186.0]), ny(20, 16, 0));
+    // Not filled yet: nothing to pay.
+    assert!(long.adjust(dividend).is_none());
+    walk(&mut long, &friday());
+    assert_eq!(long.adjust(dividend).unwrap().kind, Kind::Adjusted);
+    long.apply_bar(&at(ex, 183.0, 187.0, 182.0, 186.0));
+    assert_eq!(long.status, Status::Won);
+    let costs = (180.5 + 186.0) * long.costs.round_trip() / 2.0 / 4.5;
+    let paid = ((186.0 - 180.5 + 0.5) / 4.5 - costs) * 10_000.0;
+    assert_eq!(long.result_r, Some(paid.round() / 10_000.0));
+    // Exited before the ex-date: not paid.
+    assert_eq!(
+        long.score_at(180.5, 186.0, ex - 1),
+        long.score(180.5, 186.0)
+    );
+    assert!(long.score_at(180.5, 186.0, ex) > long.score(180.5, 186.0));
+
+    let mut short = create(short_args());
+    short.market = Some(Market::UsEquity);
+    short.apply_bar(&bar(1, 100.5, 101.0, 100.2, 100.6));
+    assert_eq!(short.status, Status::Triggered);
+    let at = T0 + 5 * MIN;
+    short
+        .adjust(Adjustment::Dividend { at, amount: 0.3 })
+        .unwrap();
+    let fill = short.fill.unwrap().price;
+    assert!(short.score_at(fill, 99.0, at) < short.score_at(fill, 99.0, at - 1));
+}
+
+#[test]
+fn a_stock_setups_time_stop_and_durations_count_session_time() {
+    let (mut r, _) = stock_long(json!([190.0]), ny(20, 16, 0));
+    walk(&mut r, &friday());
+    // The fill at 15:00 is in Friday's 14:30 bar; 12 bars on is Tuesday's 12:30 bar.
+    assert_eq!(shadows(&r).v3_time_stop.time_stop_at, Some(ny(10, 13, 30)));
+    r.apply_bar(&at(ny(9, 9, 59), 182.0, 191.0, 181.0, 190.5));
+    assert_eq!(r.status, Status::Won);
+    // Made at 14:00 and filled at 15:00; out at 09:59 on Monday: an hour on Friday and
+    // 29 minutes on Monday.
+    let durations = r.durations();
+    assert_eq!(durations.bars_to_fill, Some(1.0));
+    assert_eq!(durations.bars_to_exit, Some(1.48));
+}
+
+#[test]
+fn a_skip_on_a_stock_runs_out_after_its_bars_of_session_time() {
+    use chrono::TimeZone;
+    let wednesday = chrono_tz::America::New_York
+        .with_ymd_and_hms(2026, 11, 25, 15, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp_millis();
+    let (levels, rule) = stock_skip_bracket(
+        Market::UsEquity,
+        Direction::Long,
+        &hourly(40),
+        "1h",
+        wednesday,
+    )
+    .unwrap();
+    assert_eq!(rule, Bracket::Atr);
+    let next_wednesday_close = chrono_tz::America::New_York
+        .with_ymd_and_hms(2026, 12, 2, 16, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(levels.expires_at, next_wednesday_close);
+    // On a weekly chart, at most 90 days, as for Binance.
+    let (levels, _) = stock_skip_bracket(
+        Market::UsEquity,
+        Direction::Long,
+        &hourly(40),
+        "1w",
+        wednesday,
+    )
+    .unwrap();
+    assert_eq!(levels.expires_at, wednesday + MAX_EXPIRY_MS);
+}
+
+#[test]
+fn a_binance_record_is_written_without_the_stock_fields() {
+    let r = create(long_args());
+    let text = serde_json::to_string(&r).unwrap();
+    for field in ["market", "last_close", "adjustments"] {
+        assert!(!text.contains(field), "{field} in {text}");
+    }
+    let (stock, _) = stock_long(json!([190.0]), ny(20, 16, 0));
+    let view = stock.view();
+    assert_eq!(view["market"], "us_equity");
+    let back: Record = serde_json::from_str(&serde_json::to_string(&stock).unwrap()).unwrap();
+    assert_eq!(back, stock);
+}

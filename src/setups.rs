@@ -10,6 +10,9 @@ use serde_json::{json, Map, Value};
 use crate::data::Bar;
 use crate::drawings;
 
+mod market;
+pub use market::{Market, STOCK_FEE_BPS_PER_SIDE, STOCK_SLIPPAGE_BPS_PER_SIDE};
+
 /// The cost assumption copied onto each setup, in basis points per side.
 pub const FEE_BPS_PER_SIDE: f64 = 5.0;
 pub const SLIPPAGE_BPS_PER_SIDE: f64 = 2.0;
@@ -249,6 +252,17 @@ pub struct Record {
     pub probability: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playbook_version: Option<String>,
+    /// A stock setup's market (ADR-0070); not written for a Binance setup, which trades
+    /// around the clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market: Option<Market>,
+    /// A stock setup's newest 1m close scored: where it ends when its expiry falls in a
+    /// stretch with no bar, such as a weekend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_close: Option<Mark>,
+    /// The splits and dividends applied to a stock setup, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adjustments: Vec<Adjustment>,
 }
 
 /// How a shadow variant ended, or that it has not.
@@ -377,6 +391,33 @@ pub enum Kind {
     Voided,
     /// Bars the server did not see.
     Gap,
+    /// A split or a dividend of a stock setup's stock (ADR-0070).
+    Adjusted,
+}
+
+/// A corporate action applied to a stock setup (ADR-0070). `at` is when it took effect:
+/// the session open of the split's day or the dividend's ex-date, ms.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Adjustment {
+    /// Every price divided by `ratio` (a 10:1 split is 10).
+    Split { at: i64, ratio: f64 },
+    /// Per share: paid to a long and by a short whose position was open at `at`.
+    Dividend { at: i64, amount: f64 },
+}
+
+impl Adjustment {
+    pub fn at(&self) -> i64 {
+        match self {
+            Adjustment::Split { at, .. } | Adjustment::Dividend { at, .. } => *at,
+        }
+    }
+
+    /// The same action, whatever its amount has become since: a dividend is rescaled by
+    /// a later split.
+    fn same(&self, other: &Adjustment) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other) && self.at() == other.at()
+    }
 }
 
 /// One entry of a setup's log. Entries are only ever added.
@@ -918,6 +959,33 @@ pub fn skip_bracket(
     interval_secs: i64,
     now_ms: i64,
 ) -> Result<(Levels, Bracket), Problem> {
+    let expires_at = now_ms + (SKIP_EXPIRY_BARS * interval_secs * 1000).min(MAX_EXPIRY_MS);
+    bracket(direction, bars, &Costs::default(), expires_at)
+}
+
+/// A skip on a stock (ADR-0070): the same bracket, with the stock costs' least risk, and
+/// an expiry after `SKIP_EXPIRY_BARS` bars of its interval of session time.
+pub fn stock_skip_bracket(
+    market: Market,
+    direction: Direction,
+    bars: &[Bar],
+    interval: &str,
+    now_ms: i64,
+) -> Result<(Levels, Bracket), Problem> {
+    let iv = crate::interval::Interval::parse(interval).map_err(|e| Problem::new("interval", e))?;
+    let expires_at = market
+        .skip_expiry(&iv, now_ms, SKIP_EXPIRY_BARS)
+        .unwrap_or(i64::MAX)
+        .min(now_ms + MAX_EXPIRY_MS);
+    bracket(direction, bars, &market.costs(), expires_at)
+}
+
+fn bracket(
+    direction: Direction,
+    bars: &[Bar],
+    costs: &Costs,
+    expires_at: i64,
+) -> Result<(Levels, Bracket), Problem> {
     let atr = crate::orderflow::atr(bars, SKIP_ATR_LENGTH).filter(|a| a.is_finite() && *a > 0.0);
     let (Some(atr), Some(last)) = (atr, bars.last()) else {
         return Err(Problem::new(
@@ -931,7 +999,7 @@ pub fn skip_bracket(
     };
     let sign = direction.sign();
     // Closer than the least risk, a skip would be scored on costs alone.
-    let floor = Costs::default().least_risk(last.close);
+    let floor = costs.least_risk(last.close);
     let (risk, rule) = match SKIP_STOP_ATR * atr {
         by_atr if by_atr >= floor => (by_atr, Bracket::Atr),
         _ => (floor, Bracket::Floor),
@@ -950,7 +1018,7 @@ pub fn skip_bracket(
         },
         invalidation,
         targets: vec![last.close + sign * risk * SKIP_TARGET_ATR / SKIP_STOP_ATR],
-        expires_at: now_ms + (SKIP_EXPIRY_BARS * interval_secs * 1000).min(MAX_EXPIRY_MS),
+        expires_at,
     };
     Ok((levels, rule))
 }
@@ -1048,6 +1116,17 @@ impl Draft {
     /// Read a `create_setup` call. Every problem goes to `problems`; a draft comes back
     /// only when there was none.
     pub fn parse(args: &Value, now_ms: i64, problems: &mut Vec<Problem>) -> Option<Draft> {
+        Self::parse_for(args, None, now_ms, problems)
+    }
+
+    /// `parse` for a setup on `market`, whose costs set the least risk (ADR-0070).
+    pub fn parse_for(
+        args: &Value,
+        market: Option<Market>,
+        now_ms: i64,
+        problems: &mut Vec<Problem>,
+    ) -> Option<Draft> {
+        let costs = market.map_or_else(Costs::default, Market::costs);
         let before = problems.len();
         check_fields(args, &CREATE_FIELDS, problems);
         let symbol = text(args, "symbol", 40, problems);
@@ -1080,7 +1159,7 @@ impl Draft {
                 }
                 None
             }
-            _ => parse_levels(args, None, direction, &Costs::default(), now_ms, problems),
+            _ => parse_levels(args, None, direction, &costs, now_ms, problems),
         };
         let features = features(args, problems);
         let probability = probability(args, problems);
@@ -1172,6 +1251,9 @@ impl Record {
             features: draft.features,
             probability: draft.probability,
             playbook_version: draft.playbook_version,
+            market: None,
+            last_close: None,
+            adjustments: Vec::new(),
         };
         // What was stated goes into the log's first entry: the log is append-only in
         // the store, so this is the copy that cannot be rewritten after the outcome.
@@ -1362,16 +1444,32 @@ impl Record {
         Ok(self.log(now_ms, By::Agent, Kind::Cancelled, Some(reason), Map::new()))
     }
 
-    /// R of a filled setup closed at `exit`: the move in units of the risk taken at the
-    /// fill, less the assumed fee and slippage on both sides.
-    fn score(&self, fill: f64, exit: f64) -> f64 {
+    /// R of a filled setup closed at `exit` in the bar that opened at `exit_at`: the move
+    /// in units of the risk taken at the fill, less the assumed fee and slippage on both
+    /// sides. A stock's dividends that went ex by then count as part of the move: paid to
+    /// a long, by a short.
+    fn score_at(&self, fill: f64, exit: f64, exit_at: i64) -> f64 {
         let risk = (fill - self.levels.invalidation).abs();
         if risk <= 0.0 {
             return 0.0;
         }
-        let gross = self.direction.sign() * (exit - fill) / risk;
+        let paid: f64 = self
+            .adjustments
+            .iter()
+            .filter_map(|a| match a {
+                Adjustment::Dividend { at, amount } if *at <= exit_at => Some(amount),
+                _ => None,
+            })
+            .sum();
+        let gross = self.direction.sign() * (exit - fill + paid) / risk;
         let cost = (fill + exit) * self.costs.round_trip() / 2.0 / risk;
         ((gross - cost) * 10_000.0).round() / 10_000.0
+    }
+
+    /// `score_at` with no dividend counted.
+    #[cfg(test)]
+    fn score(&self, fill: f64, exit: f64) -> f64 {
+        self.score_at(fill, exit, i64::MIN)
     }
 
     /// Widen the excursions by a price the position went `against` and one it went
@@ -1445,6 +1543,10 @@ impl Record {
             true => SHADOW_TIME_STOP_BARS.0,
             false => SHADOW_TIME_STOP_BARS.1,
         };
+        // A stock's bars are on its session grid (ADR-0070).
+        if let Some(market) = self.market {
+            return market.bar_close_after(&iv, fill_time, i64::from(n));
+        }
         let mut t = iv.grid_start(fill_time.div_euclid(1000));
         for _ in 0..=n {
             t = iv.grid_end(t);
@@ -1471,7 +1573,7 @@ impl Record {
         let r: f64 = s
             .exits
             .iter()
-            .map(|e| e.fraction * self.score(fill.price, e.price))
+            .map(|e| e.fraction * self.score_at(fill.price, e.price, e.bar_time))
             .sum();
         // + 0.0 makes a -0 from rounding a break-even exit read as 0.
         s.result_r = Some((r * 10_000.0).round() / 10_000.0 + 0.0);
@@ -1537,7 +1639,7 @@ impl Record {
                 Variant::HalfAtT1 => {
                     if s.exits.is_empty() && reached(t1) {
                         s.exits.push(ShadowExit {
-                            price: t1,
+                            price: self.target_exit(bar, t1),
                             fraction: SHADOW_PARTIAL_AT_T1,
                             bar_time: bar.time,
                         });
@@ -1550,19 +1652,22 @@ impl Record {
                     }
                     // T2 may come in the bar that took T1: price passed T1 to reach it.
                     if !s.exits.is_empty() && t2.is_some_and(reached) {
-                        self.settle(s, ShadowStatus::Won, t2, bar.time);
+                        let exit = t2.map(|t2| self.target_exit(bar, t2));
+                        self.settle(s, ShadowStatus::Won, exit, bar.time);
                     }
                 }
                 Variant::BeAt1R => {
                     if reached(t1) {
-                        self.settle(s, ShadowStatus::Won, Some(t1), bar.time);
+                        let exit = self.target_exit(bar, t1);
+                        self.settle(s, ShadowStatus::Won, Some(exit), bar.time);
                     } else if s.stop == self.levels.invalidation && r(with) >= SHADOW_BE_AT_R {
                         s.stop = be;
                     }
                 }
                 Variant::TimeStop => {
                     if reached(t1) {
-                        self.settle(s, ShadowStatus::Won, Some(t1), bar.time);
+                        let exit = self.target_exit(bar, t1);
+                        self.settle(s, ShadowStatus::Won, Some(exit), bar.time);
                     } else if let Some(at) = s.time_stop_at {
                         // The 1m bar that closes the judged bar, or the first after it
                         // when that one was not seen.
@@ -1580,18 +1685,24 @@ impl Record {
     }
 
     fn close(&mut self, status: Status, exit: Option<f64>, bar: &MinuteBar) -> Revision {
+        let exit = exit.map(|price| Mark {
+            price,
+            bar_time: bar.time,
+        });
+        self.close_at(status, exit, bar.time)
+    }
+
+    /// Close the setup at `exit`, logged at `at`.
+    fn close_at(&mut self, status: Status, exit: Option<Mark>, at: i64) -> Revision {
         let from = self.status;
         self.status = status;
         let mut changes = Map::new();
         changed(&mut changes, "status", json!(from), json!(status));
         self.result_r = Some(match (self.fill, exit) {
             (Some(fill), Some(exit)) => {
-                self.exit = Some(Mark {
-                    price: exit,
-                    bar_time: bar.time,
-                });
+                self.exit = Some(exit);
                 changes.insert("exit".into(), json!({ "from": null, "to": self.exit }));
-                self.score(fill.price, exit)
+                self.score_at(fill.price, exit.price, exit.bar_time)
             }
             _ => 0.0,
         });
@@ -1600,7 +1711,7 @@ impl Record {
             json!({ "from": null, "to": self.result_r }),
         );
         let dropped = std::mem::take(&mut self.pending);
-        let closed = self.log(bar.time, By::Server, Kind::Status, None, changes);
+        let closed = self.log(at, By::Server, Kind::Status, None, changes);
         if dropped.is_empty() {
             return closed;
         }
@@ -1614,15 +1725,188 @@ impl Record {
         }
     }
 
+    /// Whether a bar moves this setup: it is scoring, and the bar opened after it was
+    /// created and after the last bar applied.
+    fn takes(&self, bar: &MinuteBar) -> bool {
+        self.is_scoring()
+            && bar.time >= self.created_at
+            && self.scored_through.is_none_or(|t| bar.time > t)
+    }
+
     /// Apply one closed 1m bar. Returns the log entries it caused. A bar that is not
     /// newer than the last one applied, or that opened before the setup was created,
     /// changes nothing: the feed replays bars after a reconnect.
+    ///
+    /// A stock setup (ADR-0070) ends at the last 1m close at or before its expiry, so a
+    /// bar that closes after the expiry ends it at the close before, which may be
+    /// Friday's for an expiry on a weekend.
     pub fn apply_bar(&mut self, bar: &MinuteBar) -> Vec<Revision> {
-        let mut out = Vec::new();
-        if !self.is_scoring()
-            || bar.time < self.created_at
-            || self.scored_through.is_some_and(|t| bar.time <= t)
+        if self.market.is_none() {
+            return self.step(bar);
+        }
+        if !self.takes(bar) {
+            return Vec::new();
+        }
+        if bar.time + MINUTE_MS > self.expiry_for(bar.time) {
+            return self.expire_at_last_close(bar.time);
+        }
+        let out = self.step(bar);
+        self.last_close = Some(Mark {
+            price: bar.close,
+            bar_time: bar.time,
+        });
+        out
+    }
+
+    /// A stock setup whose expiry the server has read past, with every bar that closed by
+    /// `through` applied: no bar closed after the expiry, so it ends at the last close it
+    /// had. A Binance setup expires on its bars only.
+    pub fn expire_by(&mut self, through: i64) -> Vec<Revision> {
+        if self.market.is_none() || !self.is_scoring() || self.expiry_for(through) > through {
+            return Vec::new();
+        }
+        self.expire_at_last_close(through)
+    }
+
+    /// The expiry in force for a bar that opens at `t`: a watching setup's new levels
+    /// count from the first bar at or after they were sent.
+    fn expiry_for(&self, t: i64) -> i64 {
+        self.due_levels(t)
+            .map_or(self.levels.expires_at, |l| l.expires_at)
+    }
+
+    fn due_levels(&self, t: i64) -> Option<&Levels> {
+        if self.status != Status::Watching {
+            return None;
+        }
+        self.pending.iter().rev().find_map(|p| match p {
+            Pending::Levels { at, levels } if *at <= t => Some(levels),
+            _ => None,
+        })
+    }
+
+    /// End a stock setup at its expiry: the levels sent before `t` take effect first, and
+    /// a filled one exits at its last close, its open shadows with it. Unfilled, it
+    /// scores 0. Logged at the expiry.
+    fn expire_at_last_close(&mut self, t: i64) -> Vec<Revision> {
+        if let Some(levels) = self.due_levels(t).cloned() {
+            self.levels = levels;
+            self.pending.retain(|p| p.at() > t);
+        }
+        let at = self.levels.expires_at;
+        let exit = self.fill.and(self.last_close);
+        let price = exit.map(|m| m.price);
+        self.end_shadows(
+            ShadowStatus::Expired,
+            price,
+            exit.map_or(at, |m| m.bar_time),
+        );
+        if !self.status.is_open() {
+            return Vec::new();
+        }
+        vec![self.close_at(Status::Expired, exit, at)]
+    }
+
+    /// Where a bar that reaches `target` takes a position out: at the target, or for a
+    /// stock at the open when the bar opened past it, as a resting limit fills at a gap
+    /// (ADR-0070). Binance setups keep the target.
+    fn target_exit(&self, bar: &MinuteBar, target: f64) -> f64 {
+        let past = self.direction.sign() * (bar.open - target) > 0.0;
+        match self.market.is_some() && past {
+            true => bar.open,
+            false => target,
+        }
+    }
+
+    /// A split or a dividend of a stock setup's stock (ADR-0070), once. A split dated
+    /// after the setup was made divides every price of it by its ratio: Yahoo's bars are
+    /// in the new terms from then on, older ones included. A dividend is kept when the
+    /// position was open on its ex-date, to count in the result from the exit on.
+    /// Returns the log entry when it changed the setup.
+    pub fn adjust(&mut self, action: Adjustment) -> Option<Revision> {
+        if self.market.is_none()
+            || !self.is_scoring()
+            || self.adjustments.iter().any(|a| a.same(&action))
         {
+            return None;
+        }
+        let before = json!(self.adjustments);
+        let mut changes = Map::new();
+        let reason = match action {
+            Adjustment::Split { at, ratio } => {
+                if at <= self.created_at || !ratio.is_finite() || ratio <= 0.0 || ratio == 1.0 {
+                    return None;
+                }
+                let (levels, fill) = (self.levels.clone(), self.fill);
+                self.scale(ratio);
+                level_changes(&mut changes, &levels, &self.levels);
+                changed(&mut changes, "fill", json!(fill), json!(self.fill));
+                format!(
+                    "a split of {} for 1 took effect at {}: every price of this setup is divided by {}",
+                    show(ratio),
+                    drawings::iso(at),
+                    show(ratio)
+                )
+            }
+            Adjustment::Dividend { at, amount } => {
+                let held = self.fill.is_some_and(|f| f.bar_time < at);
+                if !held || !amount.is_finite() || amount <= 0.0 {
+                    return None;
+                }
+                format!(
+                    "a dividend of {} per share went ex at {}: a long is paid it and a short pays it, from its exit on",
+                    show(amount),
+                    drawings::iso(at)
+                )
+            }
+        };
+        self.adjustments.push(action);
+        changed(&mut changes, "adjustments", before, json!(self.adjustments));
+        Some(self.log(
+            action.at(),
+            By::Server,
+            Kind::Adjusted,
+            Some(reason),
+            changes,
+        ))
+    }
+
+    /// Divide every price of the setup by `ratio`. Results in R do not change.
+    fn scale(&mut self, ratio: f64) {
+        let levels = |l: &mut Levels| {
+            l.entry.low /= ratio;
+            l.entry.high /= ratio;
+            l.invalidation /= ratio;
+            l.targets.iter_mut().for_each(|t| *t /= ratio);
+        };
+        levels(&mut self.levels);
+        for pending in &mut self.pending {
+            if let Pending::Levels { levels: l, .. } = pending {
+                levels(l);
+            }
+        }
+        for mark in [&mut self.fill, &mut self.exit, &mut self.last_close]
+            .into_iter()
+            .flatten()
+        {
+            mark.price /= ratio;
+        }
+        if let Some(shadows) = &mut self.shadow_results {
+            for (_, s) in shadows.each_mut() {
+                s.stop /= ratio;
+                s.exits.iter_mut().for_each(|e| e.price /= ratio);
+            }
+        }
+        for a in &mut self.adjustments {
+            if let Adjustment::Dividend { amount, .. } = a {
+                *amount /= ratio;
+            }
+        }
+    }
+
+    fn step(&mut self, bar: &MinuteBar) -> Vec<Revision> {
+        let mut out = Vec::new();
+        if !self.takes(bar) {
             return out;
         }
         let first = self.scored_through.is_none();
@@ -1777,8 +2061,9 @@ impl Record {
                     Direction::Short => bar.open <= target,
                 };
                 let against = if opened_past { bar.open } else { against };
-                self.excursion(against, target, bar.time);
-                out.push(self.close(Status::Won, Some(target), bar));
+                let exit = self.target_exit(bar, target);
+                self.excursion(against, exit, bar.time);
+                out.push(self.close(Status::Won, Some(exit), bar));
             } else {
                 self.excursion(against, with, bar.time);
             }
@@ -1858,8 +2143,16 @@ impl Record {
         else {
             return Durations::default();
         };
+        // A stock's bars hold session time only (ADR-0070).
+        let session = self
+            .market
+            .zip(crate::interval::Interval::parse(&self.interval).ok());
         let bars = |from: i64, to: i64| {
-            ((to - from) as f64 / (secs * 1000) as f64 * 100.0).round() / 100.0
+            let (elapsed, per) = match session {
+                Some((market, iv)) => (market.session_ms_between(from, to), Market::bar_ms(&iv)),
+                None => (to - from, secs * 1000),
+            };
+            (elapsed as f64 / per as f64 * 100.0).round() / 100.0
         };
         let last = match (self.exit, self.status) {
             (Some(exit), _) => Some(exit.bar_time),

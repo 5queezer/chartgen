@@ -180,6 +180,26 @@ fn listed(table: &[(i32, u32, u32)], d: NaiveDate) -> bool {
     table.contains(&(d.year(), d.month(), d.day()))
 }
 
+/// The last year `US_HOLIDAYS` and `US_EARLY_CLOSES` hold.
+pub const US_CALENDAR_LAST_YEAR: i32 = 2028;
+
+/// The regular session of the US exchanges on `d`, New York time: 09:30 to 16:00, to
+/// 13:00 on an early close, and none on a weekend or a holiday. Past
+/// `US_CALENDAR_LAST_YEAR` only weekends are known.
+pub fn us_session(d: NaiveDate) -> Option<(NaiveTime, NaiveTime)> {
+    use chrono::Weekday;
+    if matches!(d.weekday(), Weekday::Sat | Weekday::Sun) || listed(&US_HOLIDAYS, d) {
+        return None;
+    }
+    let session = Session {
+        tz: chrono_tz::America::New_York,
+        open: NaiveTime::from_hms_opt(9, 30, 0)?,
+        close: NaiveTime::from_hms_opt(16, 0, 0)?,
+        us_calendar: true,
+    };
+    Some((session.open, session.close_on(d)))
+}
+
 /// An exchange's regular session, read from the data source's metadata.
 /// Times are the exchange's own, so its DST changes need no special case.
 #[derive(Clone, Copy, Debug, PartialEq)]
