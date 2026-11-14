@@ -31,6 +31,13 @@ const BARS: usize = 150;
 /// The EMAs a trend is read from.
 const FAST: usize = 20;
 const SLOW: usize = 50;
+/// How long ago the newest 4h bar of a Binance symbol, which trades around the clock,
+/// may have opened: the forming bar opened within 4 h, and one bar more is allowed.
+/// Older, nothing has traded for a whole bar, as on a delisted symbol whose last bars
+/// Binance still serves.
+const STALE_AROUND_THE_CLOCK: Duration = Duration::from_secs(8 * 3600);
+/// The same for a market with sessions, which is shut over weekends and holidays.
+const STALE_IN_SESSIONS: Duration = Duration::from_secs(7 * 86_400);
 /// Most symbols one `get_market_context` call takes.
 pub const MAX_SYMBOLS: usize = 10;
 
@@ -116,6 +123,9 @@ fn read(symbol: &str, source: DataSource) -> Value {
         Ok(data) => data,
         Err(e) => return json!({ "symbol": symbol, "error": e }),
     };
+    if let Some(e) = stale(symbol, &four, fetch::now_ms()) {
+        return json!({ "symbol": symbol, "error": e });
+    }
     let day = bars(source, symbol, "1d").ok();
     let mut v = Map::new();
     v.insert("symbol".into(), json!(symbol));
@@ -161,6 +171,22 @@ fn read(symbol: &str, source: DataSource) -> Value {
     let line = line(&v);
     v.insert("line".into(), json!(line));
     Value::Object(v)
+}
+
+/// Why bars whose newest opened long ago are no market to describe, if they are: a
+/// price from then is not the price now (ADR-0073).
+fn stale(symbol: &str, data: &OhlcvData, now_ms: i64) -> Option<String> {
+    let opened = data.bars.last()?.date.parse::<i64>().ok()? * 1000;
+    let limit = match fetch::detect_source(symbol) {
+        "binance" => STALE_AROUND_THE_CLOCK,
+        _ => STALE_IN_SESSIONS,
+    };
+    (now_ms - opened > limit.as_millis() as i64).then(|| {
+        format!(
+            "no bar since {}: not trading",
+            chartgen::drawings::iso(opened)
+        )
+    })
 }
 
 fn bars(source: DataSource, symbol: &str, interval: &str) -> Result<OhlcvData, String> {
@@ -416,6 +442,35 @@ mod tests {
         assert_eq!(price(1774.774), 1774.77);
         assert_eq!(price(0.51234567), 0.512346);
         assert_eq!(price(0.000012345678), 0.0000123457);
+    }
+
+    /// A delisted symbol's last bars are still served: they are not a price now.
+    #[test]
+    fn a_symbol_whose_last_bar_is_old_answers_an_error() {
+        let v = read("STALEUSDT", DataSource::Unavailable);
+        assert_eq!(v["symbol"], "STALEUSDT", "{v}");
+        let error = v["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("no bar since 2024-02-1") && error.ends_with(": not trading"),
+            "{v}"
+        );
+        assert!(v.get("price").is_none(), "{v}");
+    }
+
+    #[test]
+    fn stale_is_a_whole_bar_without_trade_or_a_week_without_a_session() {
+        let opened = |hours_ago: i64| {
+            let mut d = data(&[1.0]);
+            d.bars[0].date = (1_800_000_000 - hours_ago * 3600).to_string();
+            d
+        };
+        let now = 1_800_000_000_000;
+        assert_eq!(stale("BTCUSDT", &opened(4), now), None);
+        assert_eq!(stale("BTCUSDT", &opened(8), now), None);
+        assert!(stale("BTCUSDT", &opened(9), now).is_some());
+        // A stock's weekend and a holiday after it.
+        assert_eq!(stale("AAPL", &opened(4 * 24), now), None);
+        assert!(stale("AAPL", &opened(8 * 24), now).is_some());
     }
 
     #[test]

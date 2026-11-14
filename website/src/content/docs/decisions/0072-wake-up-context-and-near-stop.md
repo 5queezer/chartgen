@@ -5,7 +5,7 @@ sidebar:
   order: 72
 ---
 
-**Status:** Accepted
+**Status:** Accepted; amended by [ADR-0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) (a symbol that is not trading answers an error, not a context)
 **Date:** 2026-11-14
 **Amends:** [ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) (a wake-up's body gains
 `context`; a third kind of event, `setup.near_stop`), [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)
