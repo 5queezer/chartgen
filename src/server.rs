@@ -1376,8 +1376,11 @@ fn accepts_event_stream(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|accept| {
             accept.split(',').any(|range| {
-                let media = range.split(';').next().unwrap_or("").trim();
+                let mut parts = range.split(';');
+                let media = parts.next().unwrap_or("").trim();
+                // `q=0` says the client does not take it.
                 media.eq_ignore_ascii_case("text/event-stream")
+                    && !parts.any(|p| is_q_zero(p.trim()))
             })
         })
 }
@@ -1421,11 +1424,11 @@ async fn tell_of_changed_tools(
     if known || !streams || !json || answer.status() != StatusCode::OK || initialize {
         return answer;
     }
-    know_session(&id);
     let (mut parts, body) = answer.into_parts();
     let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+    know_session(&id);
     let changed = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
     let mut events =
         format!("event: message\ndata: {changed}\n\nevent: message\ndata: ").into_bytes();
@@ -2799,6 +2802,9 @@ mod tests {
         let (_, kind, _, _) =
             post_mcp(&app, "application/json", Some("json-only-before"), LIST).await;
         assert_eq!(kind, "application/json");
+        let refused = "application/json, text/event-stream;q=0";
+        let (_, kind, _, _) = post_mcp(&app, refused, Some("q-zero-before"), LIST).await;
+        assert_eq!(kind, "application/json", "q=0 refuses the event stream");
         // Nor is an `initialize` that carries an old id wrapped: it lists afresh anyway.
         let (_, kind, _, _) = post_mcp(&app, STREAMS, Some("init-with-old-id"), INIT).await;
         assert_eq!(kind, "application/json");

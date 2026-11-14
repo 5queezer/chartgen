@@ -61,9 +61,9 @@ The connector uses a single endpoint — `/mcp` — in two modes:
 request, the server echoes it back unchanged. An `initialize` request without
 one gets a freshly minted id, which spec-compliant clients then send on every
 request, including `GET /mcp`. chartgen's tool calls are stateless (auth is
-per-request via the Bearer token). The only state keyed on the session is
-chart push: `subscribe_chart` pushes over the SSE stream opened with the same
-token and session id. A POST made only of notifications or responses (one, or a
+per-request via the Bearer token). The state keyed on the session is chart push,
+`subscribe_chart` pushing over the SSE stream opened with the same token and session
+id, and which sessions the server gave out since it started (below). A POST made only of notifications or responses (one, or a
 batch), such as `notifications/initialized` or `notifications/cancelled`, is
 answered with `202 Accepted` and no body.
 
@@ -72,11 +72,13 @@ answered with `202 Accepted` and no body.
 advertises `capabilities.tools.listChanged: true`. The server keeps the session ids it gave
 out since it started. The first POST with an id it did not give out, which was given out
 before a restart (by a build with other tools, maybe), is answered as an event stream when
-its `Accept` takes `text/event-stream`: first
+its `Accept` takes `text/event-stream` (not with `q=0`): first
 `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`, then the answer itself, each
 as an `event: message`. Once per session; the next POSTs get JSON again. A client then reads
 `tools/list` again. An `initialize`, an answer that is not `200`, and a client that takes only
-JSON are answered as before.
+JSON are answered as before. **A script that sends a session id should send
+`Accept: application/json` only, or read every event of a stream:** after a restart, one
+answer of its session comes as two events, the notice first.
 
 `POST /` and `POST /message` are retained as deprecated aliases of `POST /mcp`, and
 `GET /sse` is retained as an alias of `GET /mcp`, for backwards compatibility

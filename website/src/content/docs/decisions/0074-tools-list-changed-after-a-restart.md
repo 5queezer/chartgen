@@ -7,9 +7,13 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-15
-**Amends:** [ADR-0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) (a POST can be
-answered as an event stream), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (the
-server keeps the session ids it gave out)
+**Amends:** [ADR-0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) (carries out
+its "negotiate response mode (JSON body vs SSE stream) based on the incoming `Accept` header" for
+one case: the first POST of a session from before a restart; every other POST stays JSON),
+[ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (besides scoping chart push, a session
+id is now remembered: the server keeps the ids it gave out since it started). Neither decision is
+replaced: no earlier ADR says a POST is always answered as JSON, or that the server keeps no
+session state.
 
 ## Context and Problem Statement
 
