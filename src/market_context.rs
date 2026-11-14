@@ -174,7 +174,7 @@ fn read(symbol: &str, source: DataSource) -> Value {
 }
 
 /// Why bars whose newest opened long ago are no market to describe, if they are: a
-/// price from then is not the price now.
+/// price from then is not the price now (ADR-0073).
 fn stale(symbol: &str, data: &OhlcvData, now_ms: i64) -> Option<String> {
     let opened = data.bars.last()?.date.parse::<i64>().ok()? * 1000;
     let limit = match fetch::detect_source(symbol) {

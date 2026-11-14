@@ -970,7 +970,8 @@ takes them. One entry per distinct symbol, in request order:
 
 Funding, long/short and the index are for Binance symbols only; a stock has its price and
 trends. A part that could not be read is absent. A symbol whose bars cannot be read gets
-`{symbol, error}` and never fails the call. **So does one that is not trading:** Binance still
+`{symbol, error}` and never fails the call. **So does one that is not trading**
+([ADR-0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/)): Binance still
 serves a delisted symbol's last bars, which are no price now. A Binance symbol whose newest
 4h bar opened more than 8 hours ago, or a stock, ETF or index whose newest bar is more than 7
 days old, answers `{"symbol": "XMRUSDT", "error": "no bar since 2024-02-20T00:00:00Z: not

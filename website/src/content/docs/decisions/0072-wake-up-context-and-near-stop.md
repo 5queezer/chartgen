@@ -5,7 +5,7 @@ sidebar:
   order: 72
 ---
 
-**Status:** Accepted
+**Status:** Accepted; amended by [ADR-0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) (a symbol that is not trading answers an error, not a context)
 **Date:** 2026-11-14
 **Amends:** [ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) (a wake-up's body gains
 `context`; a third kind of event, `setup.near_stop`), [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)
@@ -77,11 +77,7 @@ bars let the 50-bar EMA settle. It is a description of the chart, not a signal.
 `greed`, else `extreme greed`, the bands the Fear & Greed panel colours by.
 
 **What is left out.** Funding, long/short and the index are for Binance symbols only; a stock has its
-price and trends. **A symbol that is not trading has no context**, only an error: Binance still
-serves a delisted symbol's last bars (XMRUSDT's end in February 2024), and they are no price now.
-Not trading is a Binance symbol whose newest 4h bar opened more than 8 hours ago, a whole bar
-without a trade, or any other symbol whose newest bar is more than 7 days old, which a weekend and
-a holiday stay within. Any part that could not be read is absent, never guessed. **A macro blackout is
+price and trends. Any part that could not be read is absent, never guessed. **A macro blackout is
 not in it:** chartgen has no macro calendar. That lives in Hermes's macro-calendar tool, which stays
 where it is.
 

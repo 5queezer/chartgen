@@ -98,4 +98,5 @@ one and link both ways.
 | [0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) | An alert at a bar's close | Accepted | 2026-11-13 |
 | [0070](/chartgen/decisions/0070-stock-setups/) | Setups on US stocks, scored on Yahoo's 1m bars | Accepted | 2026-11-14 |
 | [0071](/chartgen/decisions/0071-setups-panel/) | A Setups panel in the web app | Accepted | 2026-11-14 |
-| [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) | A wake-up carries the market around it, and a take near its stop wakes the agent | Accepted | 2026-11-14 |
+| [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) | A wake-up carries the market around it, and a take near its stop wakes the agent | Accepted; amended by [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | 2026-11-14 |
+| [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | A symbol that is not trading has no market context | Accepted | 2026-11-14 |
