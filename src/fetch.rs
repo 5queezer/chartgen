@@ -1860,8 +1860,8 @@ pub struct StockMinutes {
 /// The 1m bars of `symbol`'s regular session that closed in [`from_ms`, `to_ms`], with
 /// the splits and dividends of that window. One request, live; the caller keeps the
 /// window inside Yahoo's 7-day page and 30-day history. Yahoo answers every bar in the
-/// terms of the latest split, so a read of an older page also brings the splits from
-/// its end up to now (a second request): its bars are in their terms.
+/// terms of the latest split, so a read of a page that ends before the latest session's
+/// open also brings the splits from its end up to now (a second request).
 pub fn fetch_stock_minutes(
     source: DataSource,
     symbol: &str,
@@ -1890,7 +1890,10 @@ pub fn fetch_stock_minutes(
                 .map_err(|e| format!("Failed to parse Yahoo response: {e}"))?;
             let read = parse_stock_minutes(&body)?;
             let mut adjustments = read.adjustments;
-            if to_ms < now_ms() - CATCH_UP_SPLITS_AFTER_MS {
+            // A page that ends before the latest session's open may miss a split at that
+            // open, or after it, whatever its age: its bars are in today's terms.
+            let latest_open = Market::UsEquity.latest_open(now_ms()).unwrap_or(i64::MIN);
+            if to_ms <= latest_open {
                 adjustments.extend(fetch_stock_splits(symbol, to_ms, now_ms())?);
             }
             Ok(StockMinutes {
@@ -1921,10 +1924,6 @@ pub fn fetch_stock_minutes(
         DataSource::Unavailable => Err("upstream unavailable".into()),
     }
 }
-
-/// How old a page's end must be for a read of it to ask for the splits since: a read of
-/// the last hour is close enough to now that a split since would be in its own events.
-const CATCH_UP_SPLITS_AFTER_MS: i64 = 3_600_000;
 
 /// The splits of `symbol` that took effect from `from_ms` to `to_ms`, from Yahoo's
 /// daily chart: one request.
@@ -1984,7 +1983,12 @@ fn parse_stock_minutes(body: &serde_json::Value) -> Result<StockMinutes, String>
     if let Some(times) = result.get("timestamp").and_then(|t| t.as_array()) {
         let price = |name: &str, i: usize| column(name)?.get(i)?.as_f64();
         for (i, t) in times.iter().enumerate() {
-            if let Some(minute) = t.as_i64().filter(|t| t % 60 == 0) {
+            // A minute of the session only: the 16:00 row of the close must not count
+            // a late 15:59 as answered.
+            if let Some(minute) = t
+                .as_i64()
+                .filter(|t| t % 60 == 0 && Market::UsEquity.in_session(t * 1000))
+            {
                 out.reached = out.reached.max(Some((minute + 60) * 1000));
             }
             let (Some(t), Some(open), Some(high), Some(low), Some(close)) = (
@@ -2892,6 +2896,9 @@ mod tests {
             [open, open + 60, open + 23_280, open + 23_340, open + 23_400]
         );
         assert!(read.adjustments.is_empty());
+        // Answered through the end of 15:59: the 16:00 row of the close is not a minute
+        // of the session, so it cannot count a late 15:59 as answered.
+        assert_eq!(read.reached, Some((open + 23_400) * 1000));
         // The 16:00 row is a price, not a minute of the session, and so is a last-price
         // row stamped inside a minute, as Yahoo sends one while the minute forms.
         let mut rows = read.bars.clone();

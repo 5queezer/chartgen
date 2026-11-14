@@ -62,6 +62,25 @@ impl Market {
             .filter(move |(_, close)| *close > t)
     }
 
+    /// The open (ms) of the latest session that opened at or before `t`: the one
+    /// holding `t`, or the last one before it.
+    pub fn latest_open(self, t: i64) -> Option<i64> {
+        let day = new_york(t)?;
+        (0..SEARCH_DAYS)
+            .filter_map(|k| day.checked_sub_days(chrono::Days::new(k as u64)))
+            .filter_map(|d| self.session_on(d))
+            .map(|(open, _)| open)
+            .find(|open| *open <= t)
+    }
+
+    /// When a setup that expired at `expires_at` has had a whole session since: the
+    /// close of the first session that opens at or after it.
+    pub fn session_after(self, expires_at: i64) -> Option<i64> {
+        self.sessions_from(expires_at)
+            .find(|(open, _)| *open >= expires_at)
+            .map(|(_, close)| close)
+    }
+
     /// Whether `t` (ms) lies inside a session.
     pub fn in_session(self, t: i64) -> bool {
         self.sessions_from(t)
@@ -334,6 +353,33 @@ mod tests {
         let day = Interval::parse("1D").unwrap();
         let days = US.bars_between(&day, ny(2026, 11, 25, 12, 45), ny(2026, 11, 27, 13, 0));
         assert!((days - 1.5).abs() < 1e-9, "{days}");
+    }
+
+    #[test]
+    fn the_latest_open_and_a_whole_session_after_a_time() {
+        // Saturday: Friday's open. Monday 10:00: Monday's. Monday 09:00: Friday's.
+        assert_eq!(
+            US.latest_open(ny(2026, 11, 7, 12, 0)),
+            Some(ny(2026, 11, 6, 9, 30))
+        );
+        assert_eq!(
+            US.latest_open(ny(2026, 11, 9, 10, 0)),
+            Some(ny(2026, 11, 9, 9, 30))
+        );
+        assert_eq!(
+            US.latest_open(ny(2026, 11, 9, 9, 0)),
+            Some(ny(2026, 11, 6, 9, 30))
+        );
+        // An expiry on Friday at 15:55 has had a whole session at Monday's close; one
+        // on Wednesday before Thanksgiving at Friday's 13:00 close.
+        assert_eq!(
+            US.session_after(ny(2026, 11, 6, 15, 55)),
+            Some(ny(2026, 11, 9, 16, 0))
+        );
+        assert_eq!(
+            US.session_after(ny(2026, 11, 25, 12, 0)),
+            Some(ny(2026, 11, 27, 13, 0))
+        );
     }
 
     #[test]

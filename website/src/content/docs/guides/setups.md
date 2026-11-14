@@ -279,13 +279,15 @@ Binance setup, with these differences:
     as a real gap.
 - **Gaps in the data.** A minute without a trade is not a bar, and nights, weekends and holidays
   are not gaps. A read that fails is made again, and so does one whose setups could not be
-  stored. Only bars older than 29 days, a day short of Yahoo's 1m history, after a long outage,
+  stored. A past stretch Yahoo answered nothing for is a `gap`. Only bars older than 29 days, a day short of Yahoo's 1m history, after a long outage,
   are a `gap`.
 - **Holidays.** The exchange calendar here lists NYSE holidays and early closes through 2028. A
   stock setup cannot expire later than that, a skip's bracket included.
-- **ABNB and the like.** A stock whose symbol ends like a Binance quote (ABNB ends in BNB) is
-  taken as a stock when Binance does not list it. Its chart still reads Binance, so such a setup
-  can take neither drawings nor `decision: skip`.
+- **ABNB and the like.** A US stock whose ticker ends like a Binance quote asset (ABNB ends in
+  BNB) is read from Binance, by charts and setups alike, so setups refuse it. The error says so.
+- **A symbol Yahoo stops answering.** If it is delisted, or halted with no data, its setups end
+  as `expired` with `gap: true` a whole session after their expiry: at 0 R if never filled, and
+  with no result if filled.
 
 Server alerts still run on Binance symbols only. A stock setup's own status changes wake your
 agent as a Binance setup's do.

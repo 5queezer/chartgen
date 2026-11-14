@@ -3738,28 +3738,143 @@ impl PushSource for WithoutAbnb {
 }
 
 #[tokio::test]
-async fn a_stock_whose_symbol_ends_like_a_binance_quote_is_made_as_a_stock() {
+async fn a_us_stock_whose_ticker_ends_like_a_binance_quote_is_refused_with_a_hint() {
     let hub = ChartHub::new(Arc::new(WithoutAbnb), HubLimits::default());
-    let s = live_on(
-        mem(),
-        hub.clone(),
-        Access::parse(None),
-        Limits::default(),
-        None,
-    );
-    // ABNB ends in BNB, so its quote suffix sends it to Binance, which does not list it.
+    let s = live_on(mem(), hub, Access::parse(None), Limits::default(), None);
+    // ABNB ends in BNB, so it is read from Binance, which does not list it.
     assert_eq!(fetch::market_of("ABNB"), None);
-    let first = call(&s, "create_setup", long_on("ABNB"), "owner").unwrap();
-    assert_eq!(first["market"], "us_equity");
-    assert_eq!(first["costs"]["fee_bps_per_side"], 1.0);
-    // Polled, with no Binance feed; and a second setup on it is a stock's too.
-    assert_eq!(hub.in_use().2, 0);
-    let second = call(&s, "create_setup", long_on("ABNB"), "owner").unwrap();
-    assert_eq!(second["market"], "us_equity");
-    assert!(s.lock().watches[&("ABNB".to_string(), "1m".to_string())]
-        ._lease
-        .is_none());
-    // A Binance symbol Binance lists is a Binance setup as before.
+    let text = call(&s, "create_setup", long_on("ABNB"), "owner").unwrap_err();
+    assert!(
+        text.starts_with("Cannot watch ABNB: Invalid symbol. If ABNB is a US stock"),
+        "{text}"
+    );
+    assert!(text.contains("setups do not take it yet"), "{text}");
+    assert!(s.store.setups().unwrap().is_empty());
+    // A Binance symbol Binance lists is made as before.
     let crypto = call(&s, "create_setup", long(), "owner").unwrap();
     assert!(crypto.get("market").is_none());
+}
+
+// Round 2 (ADR-0070): a symbol Yahoo stops answering, a page it answered nothing for, and
+// a late split before any close was scored.
+
+#[tokio::test]
+async fn a_stock_setup_whose_symbol_yahoo_no_longer_answers_expires_a_session_after() {
+    // A delisted symbol: every read fails, as Yahoo's 404 does.
+    let s = stock_service(DataSource::Unavailable);
+    let id = nvda_long(&s, ny(6, 15, 55));
+    assert!(poll_at(&s, ny(9, 15, 0)).is_err());
+    assert_eq!(
+        nvda_setup(&s, &id)["status"],
+        "watching",
+        "Monday's session is not over"
+    );
+    assert!(poll_at(&s, ny(9, 16, 1)).is_err());
+    let ended = nvda_setup(&s, &id);
+    assert_eq!(ended["status"], "expired");
+    assert_eq!(ended["result_r"], 0.0);
+    assert_eq!(ended["gap"], true);
+    assert_eq!(kinds(&ended), ["created", "gap", "status"]);
+    assert!(ended["log"][2]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("could not be read"));
+}
+
+#[tokio::test]
+async fn a_filled_stock_setup_yahoo_answers_nothing_for_expires_with_no_invented_exit() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(9, 12, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        assert_eq!(nvda_setup(&s, &id)["status"], "triggered");
+        // A halt: Yahoo answers 200 with no row for the session that is open.
+        let silent = fetch::StockMinutes::default();
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(9, 15, 0), ny(9, 15, 1))
+            .unwrap();
+        assert_eq!(nvda_setup(&s, &id)["status"], "triggered");
+        assert_eq!(
+            s.lock().stock_reads["NVDA"],
+            ny(9, 9, 30),
+            "the open session waits"
+        );
+        // A whole session after the expiry (Tuesday's close), still nothing.
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(10, 15, 0), ny(10, 16, 1))
+            .unwrap();
+        let ended = nvda_setup(&s, &id);
+        assert_eq!(ended["status"], "expired");
+        assert_eq!(
+            (ended["exit"].clone(), ended["result_r"].clone()),
+            (Value::Null, Value::Null)
+        );
+        assert_eq!(ended["gap"], true);
+    });
+}
+
+#[tokio::test]
+async fn a_past_page_yahoo_answered_nothing_for_is_read_past_as_a_gap() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(20, 16, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        // Monday's session is over by Tuesday 10:00, and Yahoo answered no row for it.
+        let silent = fetch::StockMinutes::default();
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(10, 9, 30), ny(10, 10, 0))
+            .unwrap();
+        assert_eq!(s.lock().stock_reads["NVDA"], ny(10, 9, 30));
+        let gapped = nvda_setup(&s, &id);
+        assert_eq!(kinds(&gapped), ["created", "status", "gap"]);
+        assert_eq!(
+            gapped["log"][2]["changes"]["not_scored"],
+            json!({ "from": ny(6, 16, 4), "to": ny(10, 9, 30) })
+        );
+        assert_eq!(gapped["status"], "triggered");
+    });
+}
+
+#[tokio::test]
+async fn a_late_split_is_held_for_a_setup_with_no_close_scored_yet() {
+    crate::replay::on(nvda_minutes(&[], 0), |_| {
+        let s = live_reading_chosen_bars();
+        // Made on Saturday: no bar scored before Monday's split.
+        let id = crate::replay::at(Some(ny(7, 12, 0)), || {
+            let args = json!({
+                "symbol": "NVDA", "interval": "1h", "direction": "long",
+                "thesis": "example thesis", "entry": { "low": 99.0, "high": 100.0 },
+                "invalidation": 97.0, "targets": [106.0], "expires_at": ny(20, 16, 0),
+            });
+            id_of(&call(&s, "create_setup", args, "owner").unwrap())
+        });
+        assert_eq!(nvda_setup(&s, &id)["last_close"], Value::Null);
+        let monday = ny(9, 9, 30);
+        let (from, to, now) = (ny(7, 12, 0), ny(9, 9, 35), ny(9, 9, 36));
+        s.apply_read(
+            "NVDA",
+            &nvda_read(monday, 5, 10.1, Vec::new()),
+            from,
+            to,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            nvda_setup(&s, &id)["status"],
+            "watching",
+            "held, not invalidated"
+        );
+        let split = setups::Adjustment::Split {
+            at: monday,
+            ratio: 10.0,
+        };
+        s.apply_read(
+            "NVDA",
+            &nvda_read(monday, 5, 10.1, vec![split]),
+            from,
+            to,
+            now,
+        )
+        .unwrap();
+        let scored = nvda_setup(&s, &id);
+        assert_eq!(scored["status"], "watching");
+        assert_eq!(scored["invalidation"], 9.7);
+    });
 }

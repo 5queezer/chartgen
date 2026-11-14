@@ -4,7 +4,7 @@
 //! keeps are a gap.
 
 use super::*;
-use chartgen::setups::{Adjustment, Market};
+use chartgen::setups::{Adjustment, Mark, Market};
 
 /// How often a stock symbol is read.
 const POLL_EVERY: Duration = Duration::from_secs(60);
@@ -117,13 +117,46 @@ impl Setups {
         let from = needed.max(read_before.unwrap_or(i64::MIN)).max(reach);
         let to = through.min(from.saturating_add(PAGE_MS)).max(from);
         let read = match Market::UsEquity.session_ms_between(from, to) > 0 {
-            true => fetch::fetch_stock_minutes(self.source, symbol, from, to)?,
+            true => match fetch::fetch_stock_minutes(self.source, symbol, from, to) {
+                Ok(read) => read,
+                Err(e) => {
+                    // A delisted symbol answers 404 for good.
+                    self.expire_unread(symbol, now);
+                    return Err(e);
+                }
+            },
             false => fetch::StockMinutes {
                 reached: Some(to),
                 ..Default::default()
             },
         };
         self.apply_read(symbol, &read, from, to, now)
+    }
+
+    /// End `symbol`'s stock setups that ran out a whole session ago while Yahoo failed
+    /// or answered for no minute, as `expire_unscored` ends those of an owner off the
+    /// operator's list: a gap in the log, 0 R if never filled, and no invented exit if
+    /// filled. A setup Yahoo answers for expires on its bars.
+    fn expire_unread(&self, symbol: &str, now: i64) {
+        let mut st = self.lock();
+        let due = |r: &Record| {
+            Market::UsEquity
+                .session_after(r.levels.expires_at)
+                .is_some_and(|whole| now > whole)
+        };
+        let changed: Vec<(Record, Vec<Revision>)> = self
+            .stock_setups(&st, symbol)
+            .filter(|r| due(r))
+            .map(|r| {
+                let mut record = r.clone();
+                let log = record.expire_unread(now);
+                (record, log)
+            })
+            .filter(|(_, log)| !log.is_empty())
+            .collect();
+        if !changed.is_empty() && self.write(&mut st, changed).is_ok() {
+            self.sync_feeds(&mut st);
+        }
     }
 
     /// The stock setups of `symbol` being scored.
@@ -151,7 +184,20 @@ impl Setups {
         now: i64,
     ) -> Result<(), String> {
         let reach = (now - REACH_MS).div_euclid(MINUTE_MS) * MINUTE_MS;
-        let through = covered(read, from, to);
+        // Yahoo answered for no minute. For a page whose sessions are over, nothing was
+        // seen there and nothing will be: it is read past, and logged as a gap. For the
+        // session that is open, the minutes may not be published yet.
+        let silent = read.reached.is_none() && read.bars.is_empty();
+        let over = Market::UsEquity
+            .latest_open(now)
+            .is_some_and(|open| to <= open);
+        if silent && !over {
+            self.expire_unread(symbol, now);
+        }
+        let through = match silent && over {
+            true => to,
+            false => covered(read, from, to),
+        };
         let mut st = self.lock();
         let read_before = st.stock_reads.get(symbol).copied();
         if self.held(&mut st, symbol, read) {
@@ -166,6 +212,10 @@ impl Setups {
             if next < reach && Market::UsEquity.session_ms_between(next, reach) > 0 {
                 log.push(record.note_gap(next, reach, now));
             }
+            let next = record.next_bar_time().max(next);
+            if silent && over && next < to && Market::UsEquity.session_ms_between(next, to) > 0 {
+                log.push(record.note_gap(next, to, now));
+            }
             log.extend(score(&mut record, read, through));
             if record != before {
                 changed.push((record, log));
@@ -179,14 +229,25 @@ impl Setups {
         Ok(())
     }
 
-    /// Whether to hold `read` back: its first bar after the last close scored opens
-    /// outside `PLAUSIBLE` of it, and it holds no split. After `HOLD_POLLS` polls of the
+    /// Whether to hold `read` back: its first bar after the last close scored (or, with
+    /// none, the newest setup's entry) opens outside `PLAUSIBLE` of it, and it holds no
+    /// split. After `HOLD_POLLS` polls of the
     /// same bar it is taken as a real gap, and the log says so.
     fn held(&self, st: &mut State, symbol: &str, read: &fetch::StockMinutes) -> bool {
+        // The newest close scored; with none yet, the entry zone's middle of the newest
+        // setup, from when it was made: a setup made over a weekend is protected too.
         let last = self
             .stock_setups(st, symbol)
             .filter_map(|r| r.last_close)
-            .max_by_key(|m| m.bar_time);
+            .max_by_key(|m| m.bar_time)
+            .or_else(|| {
+                self.stock_setups(st, symbol)
+                    .max_by_key(|r| r.created_at)
+                    .map(|r| Mark {
+                        price: (r.levels.entry.low + r.levels.entry.high) / 2.0,
+                        bar_time: r.created_at - 1,
+                    })
+            });
         let first = last.and_then(|last| {
             read.bars
                 .iter()

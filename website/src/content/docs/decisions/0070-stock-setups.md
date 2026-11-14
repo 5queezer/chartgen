@@ -87,16 +87,16 @@ is refused with a hint:
 A symbol is a stock symbol when `detect_source` sends it to Yahoo, so every symbol that was
 accepted before is still read the same way.
 
-**A stock whose symbol ends like a Binance quote.** `detect_source` sends a symbol to Binance
-when it ends in a quote asset such as BNB, so ABNB (Airbnb, Nasdaq) is routed to Binance.
-- When Binance does not list such a symbol, `create_setup` tries the US-stock check before it
-  refuses. If that passes, the setup is a stock setup, and its stored market routes it from then
-  on: polling, restore and the server's watched symbols go by the record, not by the symbol.
-- Its levels were checked with Binance's least risk, which is the stricter one.
-- Charts still route ABNB to Binance, so a stock setup on it can take neither drawings nor
-  `decision: skip`, which read the symbol's bars. That is a known limit of the chart routing,
-  left as it is.
-- A Binance symbol that Binance lists takes exactly the path it took before.
+**Known limit: a stock whose ticker ends like a Binance quote is not supported.**
+`detect_source` sends a symbol to Binance when it ends in a quote asset (USDT, BUSD, BTC, ETH,
+BNB, USDC, FDUSD), so ABNB (Airbnb, Nasdaq) is read from Binance, by charts as well as setups.
+- `create_setup` refuses it as before: Binance does not list it. The error now says that a US
+  stock with such a ticker is not supported yet.
+- A fallback to the stock check was built and taken out again. Charts, the fixture builder, the
+  least-risk check and a rollback's restore all route by the symbol, so a setup that only
+  creation took for a stock would be half supported, which is worse than a clear refusal.
+- Fixing it means deciding the source by something other than the suffix, project-wide. That is
+  a change of its own.
 
 A stock setup's record carries `market: "us_equity"`. A Binance setup has no `market` field, so its
 row and its answers are byte for byte as before.
@@ -127,6 +127,11 @@ row and its answers are byte for byte as before.
       next poll reads the same minutes again.
     - A minute Yahoo has not published yet is therefore read by the next poll, not taken for a
       minute without a trade.
+    - Only minutes of the session count as answered: the 16:00 row of the close does not.
+    - **A page Yahoo answered no minute for** is read past once its sessions are over: its end is
+      at or before the latest session's open. Each setup's log gets a `gap` over it, which is
+      honest because nothing was seen there and nothing will be. For the session that is open,
+      the page waits: its minutes may not be published yet.
   - A minute applies only once it is 60 s old, so trades reported late have had a minute to arrive.
     The lag was not measured; see the delay row above.
   - One request covers 7 days. A setup further behind than that catches up one page per poll.
@@ -140,13 +145,29 @@ row and its answers are byte for byte as before.
   - a minute Yahoo sends as null, which had no trade;
   - nights, weekends and holidays.
 
-  A setup's log gets a `gap` entry only for bars older than Yahoo's 1m history (29 days, a day
-  short of the limit) that the server could no longer read. That is the same meaning a gap has for
-  Binance.
+  A setup's log gets a `gap` entry only for bars that will not come:
+  - bars older than Yahoo's 1m history (29 days, a day short of the limit) that the server could
+    no longer read, which is the same meaning a gap has for Binance;
+  - and a past page Yahoo answered no minute for, as above.
+- **A symbol Yahoo stops answering.** When a read fails (a delisted symbol gets a 404 for good) or
+  Yahoo answers no minute for the session that is open (a long halt), the symbol's setups that
+  expired a whole session ago are ended as an owner's are when it is taken off the operator's
+  list:
+  - a `gap` over what was not read;
+  - `expired` at 0 R if never filled, and with no result if filled, since no exit price is
+    invented.
+
+  "A whole session ago" means after the close of the first session that opens at or after the
+  expiry. A setup Yahoo still answers for expires on its bars, and a catch-up that makes progress
+  is never cut short.
 - **An implausible open is held.** A read is held back, not applied and not counted as read, when
   both of these hold:
   - its first bar after the last close scored opens below 0.7 or above 1.4 times that close;
   - it holds no split.
+
+  When no setup on the symbol has scored a close yet, as for one made over a weekend before a
+  Monday split, the reference is the middle of the newest setup's entry zone, from when it was
+  made. An entry zone far from the price can then hold a real open for the half hour below.
 
   The next poll reads it again, and once Yahoo sends the split it is scored in the split's terms.
   The band takes in every split from 3:2 on (0.67) and every reverse split from 2:3 on (1.5). A
@@ -234,8 +255,9 @@ Some cases need care:
 - **Pending levels sent at or after the split's time are left as they are.** The agent read them
   from charts Yahoo had already adjusted.
 - **Catch-up reads.** Yahoo answers in the terms of the latest split even for an old page. So a
-  read of a page that ends more than an hour ago also asks Yahoo's daily chart for the splits from
-  that page's end to now (one more request), and applies them before the page's bars.
+  read of a page that ends at or before the latest session's open, however recently, also asks
+  Yahoo's daily chart for the splits from that page's end to now (one more request), and applies
+  them before the page's bars. A page ending at 09:29 before a 09:30 split is covered.
 - **An event that comes late** is held, as above.
 
 R, MAE, MFE and the closest approach are ratios and do not move. The drawings stay as the agent
@@ -277,8 +299,12 @@ A replay's fixtures may hold stock symbols. For those:
 - It refuses a window older than Yahoo's 30 days.
 - It refuses a symbol that `create_setup` would refuse, with the same check of Yahoo's metadata.
 - A symbol whose quote suffix is not in `detect_source`'s list, such as BTCEUR or ETHTRY, is now
-  read from Yahoo as a stock. Before, it was read from Binance. A Binance fixture of such a symbol
-  is bucketed on the US session grid.
+  read from Yahoo as a stock. Before, it was read from Binance. So:
+  - the builder refuses such a Binance pair, since Yahoo's metadata does not make it a US stock;
+  - **an existing Binance fixture of such a symbol is replayed on the US session grid**: its
+    intraday bars are bucketed from 09:30 New York, and its setups are scored as stock setups.
+
+  This was accepted: Binance pairs outside that list were never taken by `create_setup`.
 - It refuses `--shift-days` for a stock, since a shifted session would land on a holiday or a
   weekend that the calendar knows.
 
@@ -304,6 +330,13 @@ on Binance symbols.
   still Binance only.
 - Bad: up to 16 Yahoo requests a minute from the server's IP, on top of what charts read. Yahoo's
   limit is undocumented, and none was met at these rates.
+- Residual: when Yahoo adjusts a split's history is not measured. The split is taken as
+  happening at its session open. If Yahoo adjusts before that, overnight or pre-market, a setup
+  made or revised in those hours, read from charts already in the new terms, is divided by the
+  ratio a second time. That happens only for a create or revision on a stock in the hours before
+  its split.
+- Residual: a US stock whose ticker ends like a Binance quote, such as ABNB, is not supported (see
+  Markets).
 
 ## Testing
 

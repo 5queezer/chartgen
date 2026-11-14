@@ -2102,6 +2102,22 @@ impl Record {
     /// was not scored is in the log and `gap` is set. Closed with a shadow still open,
     /// only the shadows end so; the setup's own result and `gap` stay as they were.
     pub fn expire_unscored(&mut self, now_ms: i64) -> Vec<Revision> {
+        self.expire_unscored_because(
+            now_ms,
+            "expired while its owner was not on the operator's list, so it was not scored",
+        )
+    }
+
+    /// `expire_unscored` for a stock setup whose bars could not be read (ADR-0070): Yahoo
+    /// failed, or answered for no minute, past its expiry.
+    pub fn expire_unread(&mut self, now_ms: i64) -> Vec<Revision> {
+        self.expire_unscored_because(
+            now_ms,
+            "expired while its bars could not be read, so it was not scored to its end",
+        )
+    }
+
+    fn expire_unscored_because(&mut self, now_ms: i64, reason: &str) -> Vec<Revision> {
         if !self.is_scoring() || now_ms < self.levels.expires_at {
             return Vec::new();
         }
@@ -2121,7 +2137,6 @@ impl Record {
             "result_r".into(),
             json!({ "from": null, "to": self.result_r }),
         );
-        let reason = "expired while its owner was not on the operator's list, so it was not scored";
         let closed = self.log(
             now_ms,
             By::Server,
