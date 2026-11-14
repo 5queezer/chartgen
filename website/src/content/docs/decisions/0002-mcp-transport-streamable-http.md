@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-04-19
+**Amended by:** [ADR-0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/) (the first POST of a session from before a restart is answered as an event stream that carries `notifications/tools/list_changed`)
 
 ## Context and Problem Statement
 

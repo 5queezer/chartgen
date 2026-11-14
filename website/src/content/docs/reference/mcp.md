@@ -67,6 +67,17 @@ token and session id. A POST made only of notifications or responses (one, or a
 batch), such as `notifications/initialized` or `notifications/cancelled`, is
 answered with `202 Accepted` and no body.
 
+**After a restart, a client hears that the tools may have changed**
+([ADR-0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/)). `initialize`
+advertises `capabilities.tools.listChanged: true`. The server keeps the session ids it gave
+out since it started. The first POST with an id it did not give out, which was given out
+before a restart (by a build with other tools, maybe), is answered as an event stream when
+its `Accept` takes `text/event-stream`: first
+`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`, then the answer itself, each
+as an `event: message`. Once per session; the next POSTs get JSON again. A client then reads
+`tools/list` again. An `initialize`, an answer that is not `200`, and a client that takes only
+JSON are answered as before.
+
 `POST /` and `POST /message` are retained as deprecated aliases of `POST /mcp`, and
 `GET /sse` is retained as an alias of `GET /mcp`, for backwards compatibility
 with existing Claude.ai connector deployments that predate Streamable HTTP or

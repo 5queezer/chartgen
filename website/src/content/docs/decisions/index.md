@@ -30,7 +30,7 @@ one and link both ways.
 | # | Title | Status | Date |
 |---|---|---|---|
 | [0001](/chartgen/decisions/0001-record-architecture-decisions/) | Record architecture decisions | Accepted | 2026-04-19 |
-| [0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) | MCP transport: Streamable HTTP 2025-03-26 | Accepted | 2026-04-19 |
+| [0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) | MCP transport: Streamable HTTP 2025-03-26 | Accepted; amended by [0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/) | 2026-04-19 |
 | [0003](/chartgen/decisions/0003-web-frontend-stack/) | Web frontend stack: SolidJS + TanStack Query + Kobalte + Tailwind v4 | Accepted | 2026-04-19 |
 | [0004](/chartgen/decisions/0004-mcp-type-safety/) | Type safety: codegen from MCP schemas + Zod at boundary | Accepted | 2026-04-19 |
 | [0005](/chartgen/decisions/0005-client-indicator-state/) | Client-side indicator state with localStorage persistence | Accepted | 2026-04-20 |
@@ -48,7 +48,7 @@ one and link both ways.
 | [0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) | Pine v5 semantics for indicator math | Accepted | 2026-11-05 |
 | [0019](/chartgen/decisions/0019-chart-settings/) | Chart settings: per-theme overrides over the palette | Accepted | 2026-11-05 |
 | [0020](/chartgen/decisions/0020-client-side-price-alerts/) | Client-side price alerts | Accepted | 2026-11-05 |
-| [0021](/chartgen/decisions/0021-realtime-chart-push/) | Real-time chart push over the MCP SSE stream | Accepted | 2026-11-05 |
+| [0021](/chartgen/decisions/0021-realtime-chart-push/) | Real-time chart push over the MCP SSE stream | Accepted; amended by [0043](/chartgen/decisions/0043-multi-chart-grid/), [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) and [0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/) | 2026-11-05 |
 | [0022](/chartgen/decisions/0022-compare-symbols/) | Compare symbols | Accepted | 2026-11-05 |
 | [0023](/chartgen/decisions/0023-bar-replay/) | Bar replay: client slice, server recompute of repainting indicators | Accepted | 2026-11-05 |
 | [0024](/chartgen/decisions/0024-starlark-script-runtime/) | Starlark as the script runtime for user indicators | Accepted | 2026-11-05 |
@@ -100,3 +100,4 @@ one and link both ways.
 | [0071](/chartgen/decisions/0071-setups-panel/) | A Setups panel in the web app | Accepted | 2026-11-14 |
 | [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) | A wake-up carries the market around it, and a take near its stop wakes the agent | Accepted; amended by [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | 2026-11-14 |
 | [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | A symbol that is not trading has no market context | Accepted | 2026-11-14 |
+| [0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/) | After a restart, a client hears that the tools may have changed | Accepted | 2026-11-15 |

@@ -111,7 +111,8 @@ fn handle_initialize(id: Option<Value>) -> Value {
         "result": {
             "protocolVersion": "2025-03-26",
             "capabilities": {
-                "tools": {},
+                // Over HTTP a client hears of changed tools after a restart (ADR-0074).
+                "tools": { "listChanged": true },
                 "prompts": {}
             },
             "serverInfo": {
