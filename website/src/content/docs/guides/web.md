@@ -1021,9 +1021,10 @@ them with the same tools the agent uses, so it shows yours only.
 - **Totals.** **Taken** and **Skipped** each show the closed setups, how many won, the total and
   mean R, and how many are open, as the server's `get_track_record` counts them.
 - **Click a row** to open its symbol at its interval with its drawings. A skip also gets the
-  server's bracket as a long or short position: from the fill (or from when it was made) to the
-  exit (or the expiry), with the target and stop it is scored against. The drawings join the
-  symbol's own, as a shared link's do; opening the setup again adds none twice.
+  server's bracket as a long or short position: from the fill (or from when it was made) to its
+  expiry while open, or to where it ended, with the target and stop it is scored against. The
+  drawings join the symbol's own, as a shared link's do; opening the setup again replaces what
+  it drew before, so a setup that moved on shows once, as it is now.
 - The tab asks again every minute while it shows. A server without setups says so.
 
 ### Data Window

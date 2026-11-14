@@ -37,8 +37,9 @@ says the first target was reached, which is what `won` means for the agent.
   - `list_setups` (limit 500) for the list;
   - `get_track_record` with `decision: take`, and again with `skip`, for the totals;
   - `get_setup` when a row is clicked.
-  - Polling: when the tab opens, then every 60 s while it shows, since setups move on closed 1m
-    bars. Nothing is kept in storage.
+  - Polling: as soon as the app is signed in with the tab open (also after a reload with the
+    tab remembered), then every 60 s while it shows, since setups move on closed 1m bars.
+    Nothing is kept in storage.
   - On a server without setups, `list_setups` answers `enabled: false` and the tab says so.
   - No tool schema changes. `mcp.ts` gains three calls, validated with the existing Zod schemas.
 - **Sort and filter.**
@@ -59,13 +60,17 @@ says the first target was reached, which is what `won` means for the agent.
 - **Click.**
   - The chart switches to the setup's symbol and interval.
   - The setup's stored drawings, which `generate_chart` resolved with times and prices, join the
-    symbol's drawings as the user's own, as an `open_url` link's do (ADR-0054). One already there
-    is not added twice. A chart already on the symbol reloads its drawings.
+    symbol's drawings as the user's own, as an `open_url` link's do (ADR-0054). They get ids of
+    the setup's own, `setup-<id>-<n>`, and a click first removes the symbol's drawings with that
+    prefix: a setup that moved on since the last click, filled or revised, is drawn once, as it
+    is now. A chart already on the symbol reloads its drawings.
   - **For a skip, the server's bracket is drawn as a `cgLong` or `cgShort` position**, from the
     levels the server scores:
     - its left edge and entry: from the fill, or, unfilled, from when the skip was made, at its
       entry level;
-    - its right edge: the exit, else the expiry;
+    - its right edge: the expiry while it is open; once closed, its exit, else the last bar
+      scored; at least one bar of its interval from the left edge, so a skip stopped in its fill
+      bar, or invalidated at its first, is a box of one bar;
     - its target and stop: T1 and the invalidation.
   - A take gets only its own drawings. Its levels are the agent's, and the agent draws what it
     means.
@@ -90,8 +95,8 @@ says the first target was reached, which is what `won` means for the agent.
 - Good: the person sees every setup, its levels and the track record without asking Hermes, and
   one click shows a setup on its chart.
 - Good: the panel holds no scoring logic. It shows what the tools answer.
-- Bad: each click adds the setup's drawings to the symbol's drawings for good. Opening many
-  setups on one symbol fills its chart; the Object Tree removes them.
+- Bad: a setup's drawings stay on its symbol after a click, one set per setup opened. Opening
+  many setups on one symbol fills its chart; the Object Tree removes them.
 - Bad: a skip's position box spans to the expiry while it is open, which on a long expiry is
   past the chart's last bar.
 - Bad: three tool calls a minute while the tab is open.

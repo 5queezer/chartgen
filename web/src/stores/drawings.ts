@@ -503,6 +503,21 @@ export function saveDrawings(
 const sameness = (r: DrawingRecord) => JSON.stringify([r.name, r.points, r.extendData ?? null]);
 
 /**
+ * Put `records` in place of the symbol's stored drawings whose id starts with `prefix`:
+ * a setup opened again replaces what it drew before (ADR-0071). How many were put, or
+ * null when they could not be saved.
+ */
+export function replaceDrawings(
+  symbol: string,
+  prefix: string,
+  records: readonly DrawingRecord[],
+): number | null {
+  const kept = loadDrawings(symbol).filter((r) => !r.id?.startsWith(prefix));
+  const fresh = records.slice(0, Math.max(0, MAX_DRAWINGS - kept.length));
+  return saveDrawings(symbol, [...kept, ...fresh]) ? fresh.length : null;
+}
+
+/**
  * Add a share link's drawings (ADR-0054) to a symbol's stored ones, as
  * drawings of the user's own: any already there are skipped, and none go past
  * MAX_DRAWINGS. How many were added, or null when they could not be saved.

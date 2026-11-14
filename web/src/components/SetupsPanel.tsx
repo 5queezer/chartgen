@@ -3,7 +3,17 @@
 // record's totals for takes and skips. Clicking a row opens its chart with its drawings,
 // and a skip's bracket. Read only: setups are made and changed by the agent's tools.
 
-import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import {
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+  type JSX,
+} from "solid-js";
 
 import {
   SETUP_FILTERS,
@@ -73,8 +83,9 @@ export function SetupsPanel(props: { session: McpSession; enabled: boolean }): J
   const refresh = () => {
     if (props.enabled) void refreshSetups(props.session);
   };
+  // As soon as the session is ready: the tab may be open, remembered, before it is.
+  createEffect(on(() => props.enabled, (enabled) => enabled && refresh()));
   onMount(() => {
-    refresh();
     const timer = window.setInterval(refresh, REFRESH_MS);
     onCleanup(() => window.clearInterval(timer));
   });

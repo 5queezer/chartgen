@@ -4,12 +4,12 @@
 
 import { createSignal } from "solid-js";
 
-import { setupDrawings } from "../lib/setups";
+import { setupDrawingPrefix, setupDrawings } from "../lib/setups";
 import { parseTimeframe } from "../lib/timeframe";
 import type { McpSession } from "../mcp";
 import { showToast } from "../services/alertEngine";
 import type { Setup, TrackRecordPayload } from "../types/responses";
-import { announceDrawings, importDrawings } from "./drawings";
+import { announceDrawings, replaceDrawings } from "./drawings";
 import { setSymbol, setTimeframe, symbol } from "./layout";
 
 /** The most `list_setups` returns at once. */
@@ -67,8 +67,9 @@ export async function refreshSetups(session: McpSession): Promise<void> {
 /**
  * Open a setup on the chart: its symbol at its interval, with its drawings and, for a skip,
  * the server's bracket. They join the symbol's drawings as the user's own, as a link's do
- * (ADR-0054); one already there is not added twice. The setup is read again first, so the
- * chart shows it as the server has it now.
+ * (ADR-0054), under ids of the setup's own, and replace what an earlier click drew: a setup
+ * that moved on is shown once, as it is now. The setup is read again first, so the chart
+ * shows it as the server has it now.
  */
 export async function openSetup(session: McpSession, id: string): Promise<void> {
   let setup: Setup;
@@ -79,13 +80,13 @@ export async function openSetup(session: McpSession, id: string): Promise<void> 
     return;
   }
   const records = setupDrawings(setup);
-  const added = records.length > 0 ? importDrawings(setup.symbol, records) : 0;
-  if (added === null) showToast("The setup's drawings could not be saved");
+  const put = replaceDrawings(setup.symbol, setupDrawingPrefix(setup.id), records);
+  if (put === null) showToast("The setup's drawings could not be saved");
   const switching = setup.symbol !== symbol();
   setSymbol(setup.symbol);
   const interval = parseTimeframe(setup.interval);
   if (interval !== null) setTimeframe(interval);
   // A chart already on the symbol loads the drawings again (ADR-0043); one switching to it
   // reads them as it loads.
-  if (!switching && added !== null && added > 0) announceDrawings(setup.symbol, -1);
+  if (!switching && put !== null) announceDrawings(setup.symbol, -1);
 }

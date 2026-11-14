@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, gotoApp, openSidebarTab } from "./fixtures/app";
+import { test, expect, gotoApp, openSidebarTab, reloadApp } from "./fixtures/app";
 
 /** One of the answers the server's tests write (src/setup_service/tests.rs). */
 const fixture = (name: string): Record<string, unknown> =>
@@ -114,6 +114,10 @@ test.describe("setups panel", () => {
 
     await openSidebarTab(page, "Setups");
     await expect(rows(page)).toHaveCount(2);
+    // Reloaded with the tab remembered, the list is read as soon as the app has signed in,
+    // not at the next minute's refresh.
+    await reloadApp(page);
+    await expect(rows(page)).toHaveCount(2, { timeout: 15_000 });
     await expect(row(page, theirs.id)).toHaveCount(0);
     // The newest first.
     await expect(rows(page).first()).toHaveAttribute("data-setup-id", String(skip.id));
@@ -176,11 +180,20 @@ test.describe("setups panel", () => {
     const lossWin = list.setups.find((s) => s.status === "won")!;
     lossWin.result_r = -0.12;
     const takes = structuredClone(record.get_track_record) as Json;
+    // get_setup of the skip: unfilled the first time it is opened, filled and closed after.
+    const before = { ...(structuredClone(answers.create_setup_skip) as Json), id: lossWin.id };
+    const reads = [before, lossWin];
     await page.route("**/mcp", async (route) => {
       const body = route.request().postDataJSON() as { id?: unknown; params?: { name?: string; arguments?: Json } } | null;
       const name = body?.params?.name;
       const payload =
-        name === "list_setups" ? list : name === "get_track_record" ? takes : null;
+        name === "list_setups"
+          ? list
+          : name === "get_track_record"
+            ? takes
+            : name === "get_setup"
+              ? (reads.shift() ?? lossWin)
+              : null;
       if (payload === null) return route.fallback();
       await route.fulfill({
         json: { jsonrpc: "2.0", id: body?.id, result: { content: [{ type: "text", text: JSON.stringify(payload) }] } },
@@ -207,6 +220,24 @@ test.describe("setups panel", () => {
     await expect(page.locator("[data-role=totals-take] [data-role=total-r]")).toHaveText(
       `${r < 0 ? "−" : r > 0 ? "+" : ""}${Math.abs(r).toFixed(2)}R`,
     );
+
+    // Opened before and after it moved on, the skip is drawn once, as it is now.
+    await row(page, lossWin.id).click();
+    await expect.poll(async () => (await storedDrawings(page, "ETHUSDT")).length).toBe(1);
+    await row(page, lossWin.id).click();
+    const fill = lossWin.fill as { bar_time: number; price: number };
+    await expect
+      .poll(() => storedDrawings(page, "ETHUSDT"))
+      .toEqual([
+        expect.objectContaining({
+          name: "cgShort",
+          points: [
+            expect.objectContaining({ timestamp: fill.bar_time, value: fill.price }),
+            expect.anything(),
+            expect.anything(),
+          ],
+        }),
+      ]);
 
     await group.getByRole("button", { name: /^Open/ }).click();
     await expect(rows(page)).toHaveCount(0);

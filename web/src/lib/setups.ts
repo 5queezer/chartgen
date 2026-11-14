@@ -4,6 +4,8 @@
 
 import { parseRecord, type DrawingRecord } from "../stores/drawings";
 import type { Setup } from "../types/responses";
+import { barCloseMs } from "./countdown";
+import { parseTimeframe } from "./timeframe";
 
 export const SETUP_FILTERS = ["open", "closed", "all"] as const;
 export type SetupFilter = (typeof SETUP_FILTERS)[number];
@@ -57,9 +59,23 @@ export function formatR(r: number | null | undefined): string {
   return `${r < 0 ? "−" : r > 0 ? "+" : ""}${text}R`;
 }
 
+/**
+ * The id prefix of the drawings a setup puts on the chart (`setup-<id>-<n>`, within a
+ * drawing id's 64 characters): opening it again replaces them instead of adding more.
+ */
+export const setupDrawingPrefix = (id: string): string => `setup-${id}-`;
+
+/** One bar of the setup's interval, in ms; a minute where the interval is unknown. */
+function barMs(s: Setup): number {
+  const tf = parseTimeframe(s.interval);
+  const close = tf === null ? null : barCloseMs(0, tf);
+  return close !== null && close > 0 ? close : 60_000;
+}
+
 /** A stored drawing (ADR-0054, as `generate_chart` resolved it) as one of the user's own. */
-function asRecord(d: Setup["drawings"][number]): DrawingRecord | null {
+function asRecord(d: Setup["drawings"][number], id: string): DrawingRecord | null {
   return parseRecord({
+    id,
     name: d.tool,
     points: d.points.map((p) => ({ timestamp: p.timestamp, value: p.price })),
     style: d.style,
@@ -71,16 +87,19 @@ function asRecord(d: Setup["drawings"][number]): DrawingRecord | null {
 
 /**
  * The server's bracket of a skip as a long or short position: from its fill (or, unfilled,
- * from when it was made, at its entry level) to its exit (or its expiry), with the target
+ * from when it was made, at its entry level) to its expiry while open, and once closed to
+ * its exit or the last bar scored, at least one bar of its interval wide; with the target
  * and the invalidation the server scores it with.
  */
-export function bracketDrawing(s: Setup): DrawingRecord | null {
+export function bracketDrawing(s: Setup, id = `${setupDrawingPrefix(s.id)}bracket`): DrawingRecord | null {
   const target = s.targets[0];
   if (target === undefined) return null;
   const left = s.fill?.bar_time ?? s.created_at;
-  const right = s.exit && s.exit.bar_time > left ? s.exit.bar_time : s.expires_at;
+  const end = isOpen(s) ? s.expires_at : (s.exit?.bar_time ?? s.scored_through ?? s.expires_at);
+  const right = end > left ? end : left + barMs(s);
   const entry = s.fill?.price ?? s.entry.low;
   return parseRecord({
+    id,
     name: s.direction === "long" ? "cgLong" : "cgShort",
     points: [
       { timestamp: left, value: entry },
@@ -92,9 +111,13 @@ export function bracketDrawing(s: Setup): DrawingRecord | null {
   });
 }
 
-/** What a click puts on the chart: the setup's stored drawings, and a skip's bracket. */
+/**
+ * What a click puts on the chart: the setup's stored drawings, and a skip's bracket, each
+ * with an id of `setupDrawingPrefix`.
+ */
 export function setupDrawings(s: Setup): DrawingRecord[] {
-  const stored = s.drawings.map(asRecord);
-  const bracket = s.decision === "skip" ? [bracketDrawing(s)] : [];
+  const prefix = setupDrawingPrefix(s.id);
+  const stored = s.drawings.map((d, n) => asRecord(d, `${prefix}${n}`));
+  const bracket = s.decision === "skip" ? [bracketDrawing(s, `${prefix}bracket`)] : [];
   return [...stored, ...bracket].filter((r): r is DrawingRecord => r !== null);
 }

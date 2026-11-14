@@ -79,6 +79,7 @@ describe("what a click draws", () => {
     expect(rest).toEqual([]);
     const stored = open.drawings[0]!;
     expect(line).toEqual({
+      id: "setup-setup-000008-0",
       name: "horizontalStraightLine",
       points: [{ timestamp: stored.points[0]!.timestamp, value: stored.points[0]!.price }],
       lock: false,
@@ -90,6 +91,7 @@ describe("what a click draws", () => {
     const skip = byId("setup-000002");
     expect(setupDrawings(skip)).toEqual([bracketDrawing(skip)]);
     expect(bracketDrawing(skip)).toEqual({
+      id: "setup-setup-000002-bracket",
       name: "cgShort",
       points: [
         { timestamp: skip.fill!.bar_time, value: skip.fill!.price },
@@ -116,5 +118,37 @@ describe("what a click draws", () => {
   it("leaves out a stored drawing the web app does not know", () => {
     const odd = { ...open, drawings: [{ ...open.drawings[0]!, tool: "noSuchTool" }] };
     expect(setupDrawings(odd)).toEqual([]);
+  });
+});
+
+describe("a closed skip's bracket", () => {
+  const skip = byId("setup-000002");
+  const fifteen = 15 * 60_000;
+
+  it("ends at its exit, one bar wide when it was stopped in its fill bar", () => {
+    const stopped = { ...skip, status: "invalidated" as const, exit: { ...skip.fill!, price: skip.invalidation } };
+    const points = bracketDrawing(stopped)!.points;
+    expect(points.map((p) => p.timestamp)).toEqual([
+      skip.fill!.bar_time,
+      skip.fill!.bar_time + fifteen,
+      skip.fill!.bar_time + fifteen,
+    ]);
+  });
+
+  it("ends at its last bar when it closed unfilled, one bar wide at the least", () => {
+    const made = SetupPayloadSchema.parse(answers.create_setup_skip);
+    const firstBar = made.created_at;
+    const unfilled = { ...made, status: "invalidated" as const, scored_through: firstBar };
+    expect(bracketDrawing(unfilled)!.points[1]!.timestamp).toBe(made.created_at + fifteen);
+    const later = { ...unfilled, scored_through: firstBar + 5 * fifteen };
+    expect(bracketDrawing(later)!.points[1]!.timestamp).toBe(firstBar + 5 * fifteen);
+    // Open, it runs to its expiry.
+    expect(bracketDrawing(made)!.points[1]!.timestamp).toBe(made.expires_at);
+  });
+
+  it("gives every drawing of a setup an id of its own prefix", () => {
+    const twice = { ...open, drawings: [open.drawings[0]!, open.drawings[0]!] };
+    expect(setupDrawings(twice).map((r) => r.id)).toEqual(["setup-setup-000008-0", "setup-setup-000008-1"]);
+    expect("setup-0b6f6f0e-1c2d-4e5f-8a9b-0c1d2e3f4a5b-bracket".length).toBeLessThanOrEqual(64);
   });
 });
