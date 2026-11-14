@@ -547,6 +547,41 @@ export const QuotesPayloadSchema = z.object({
 export type QuotesPayload = z.infer<typeof QuotesPayloadSchema>;
 
 // ---------------------------------------------------------------------------
+// get_market_context (ADR-0072)
+//   Produced by `read` in `src/market_context.rs`; a wake-up's `context` is the same
+//   object. A part that could not be read is absent; the futures parts and the index
+//   are for Binance symbols only. `{symbol, error}` when the symbol's bars fail.
+// ---------------------------------------------------------------------------
+
+export const MarketTrendSchema = z.enum(["up", "down", "mixed"]);
+
+export const MarketContextSchema = z.object({
+  symbol: z.string(),
+  /** When it was read, ms. Held for a minute. */
+  at: z.number(),
+  price: z.number().optional(),
+  trend: z.object({ "4h": MarketTrendSchema.optional(), "1d": MarketTrendSchema.optional() }),
+  /** The latest funding rate, in percent. */
+  funding_pct: z.number().optional(),
+  /** The share of Binance accounts that are long, and long/short. */
+  long_short: z.object({ long: z.number(), ratio: z.number().optional() }).optional(),
+  fear_greed: z
+    .object({
+      value: z.number().int(),
+      label: z.enum(["extreme fear", "fear", "neutral", "greed", "extreme greed"]),
+    })
+    .optional(),
+  /** All of it in one line. */
+  line: z.string(),
+});
+export type MarketContext = z.infer<typeof MarketContextSchema>;
+
+export const MarketContextPayloadSchema = z.object({
+  contexts: z.array(z.union([MarketContextSchema, QuoteErrorSchema])),
+});
+export type MarketContextPayload = z.infer<typeof MarketContextPayloadSchema>;
+
+// ---------------------------------------------------------------------------
 // search_symbols — `search_symbols` in `src/mcp.rs` / `src/search.rs`.
 //   Ranked results (exact symbol, prefix, contains, name match). `warnings`
 //   is present only when one source failed and its results are missing.
@@ -987,6 +1022,9 @@ export const SetupSchema = SetupLevelsSchema.extend({
   market: z.literal("us_equity").optional(),
   last_close: SetupMarkSchema.optional(),
   adjustments: z.array(SetupAdjustmentSchema).optional(),
+  // Open time (ms) of the 1m bar in which a filled take first went 0.8 R against it and
+  // stayed open (ADR-0072). Absent until then, and on skips.
+  near_stop_at: z.number().optional(),
 });
 export type Setup = z.infer<typeof SetupSchema>;
 
@@ -995,7 +1033,16 @@ export const SetupRevisionSchema = z.object({
   seq: z.number().int(),
   at: z.number(),
   by: z.enum(["agent", "server"]),
-  kind: z.enum(["created", "revised", "cancelled", "status", "voided", "gap", "adjusted"]),
+  kind: z.enum([
+    "created",
+    "revised",
+    "cancelled",
+    "status",
+    "voided",
+    "gap",
+    "adjusted",
+    "near_stop",
+  ]),
   reason: z.string().nullable(),
   changes: z.record(z.string(), z.object({ from: z.unknown(), to: z.unknown() })),
 });
@@ -1166,7 +1213,7 @@ export type OperatorOverview = z.infer<typeof OperatorOverviewSchema>;
 //   Produced by `answer` and `view` in `src/event_log.rs`. `what` is the event's
 //   stored body: written by `fire_event` in `src/server_alerts.rs` for
 //   `alert.fired` and by `status_events` in `src/setup_service.rs` for
-//   `setup.status`. It never holds a thesis or a note.
+//   `setup.status` and `setup.near_stop`. It never holds a thesis or a note.
 // ---------------------------------------------------------------------------
 
 /** `none`: logged only. `dropped`: too many were waiting. `failed`: given up. */
@@ -1220,6 +1267,15 @@ export const LoggedEventSchema = z.discriminatedUnion("type", [
       to: SetupStatusSchema,
       gap: z.boolean(),
       result_r: z.number().nullable().optional(),
+    }),
+  }),
+  LoggedEventBaseSchema.extend({
+    /** A filled take went 0.8 R against it, once per setup (ADR-0072). */
+    type: z.literal("setup.near_stop"),
+    what: z.object({
+      /** How far against it the bar went, in R before costs: -0.8 or below. */
+      mae_r: z.number(),
+      gap: z.boolean(),
     }),
   }),
 ]);

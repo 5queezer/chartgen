@@ -1873,7 +1873,16 @@ impl ServerAlerts {
             .and_then(|id| self.setup_of(&event.owner, id));
         let outcome = match self.agent_of(&event.owner) {
             Some(agent) => {
-                let body = wake_up_body(&event, alert.as_ref(), setup.as_ref());
+                let context = match wake_up_symbol(&event, setup.as_ref()) {
+                    Some(symbol) => crate::market_context::within(symbol, CONTEXT_WAIT).await,
+                    None => None,
+                };
+                // As it is after the wait, which a bar may have closed it in.
+                let setup = event
+                    .setup_id
+                    .as_deref()
+                    .and_then(|id| self.setup_of(&event.owner, id));
+                let body = wake_up_body(&event, alert.as_ref(), setup.as_ref(), context.as_ref());
                 let secret = Some(agent.secret());
                 let slots = [self.agent_slots.as_ref()];
                 let (target, policy, timing) = (&agent.target, &self.policy, &self.timing);
@@ -2691,6 +2700,9 @@ struct WakeUp<'a> {
     /// The alert's `message`: the agent's word to itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<&'a str>,
+    /// The symbol's market when the body is made (ADR-0072).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     setup: Option<SetupNow<'a>>,
 }
@@ -2731,6 +2743,9 @@ struct SetupNow<'a> {
     mae_at: Option<i64>,
     mfe_at: Option<i64>,
     closest_approach_r: Option<f64>,
+    /// Once a take went near its stop (ADR-0072).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    near_stop_at: Option<i64>,
     #[serde(flatten)]
     durations: chartgen::setups::Durations,
     shadow_results: Option<&'a chartgen::setups::Shadows>,
@@ -2743,13 +2758,15 @@ struct SetupNow<'a> {
 
 /// The body of a wake-up, from a logged event. The order of its fields is this order,
 /// by construction: what tells the agent which event this is and where its setup
-/// stands comes first, the alert's note after it, and the thesis, the longest part,
-/// last. A receiver that shows only the beginning of a body still shows those. The
-/// event says what happened and when; the setup is shown as it is now.
+/// stands comes first, the alert's note and the market's context after it, and the
+/// thesis, the longest part, last. A receiver that shows only the beginning of a body
+/// still shows those. The event says what happened and when; the setup and the context
+/// are shown as they are now.
 fn wake_up_body(
     event: &LoggedEvent,
     alert: Option<&Record>,
     setup: Option<&chartgen::setups::Record>,
+    context: Option<&Value>,
 ) -> String {
     let happened: Value = serde_json::from_str(&event.body).unwrap_or_default();
     let fired = event.kind == "alert.fired";
@@ -2772,6 +2789,7 @@ fn wake_up_body(
                 mae_at: s.mae_at,
                 mfe_at: s.mfe_at,
                 closest_approach_r: s.closest_approach_r,
+                near_stop_at: s.near_stop_at,
                 durations: s.durations(),
                 shadow_results: s.shadow_results.as_ref(),
                 tags: &s.tags,
@@ -2807,6 +2825,7 @@ fn wake_up_body(
                 }),
             change: (!fired).then_some(&happened),
             note: alert.filter(|_| fired).and_then(|a| a.message.as_deref()),
+            context,
             setup,
         };
         serde_json::to_string(&body).unwrap_or_default()
@@ -2823,6 +2842,19 @@ fn wake_up_body(
         }
     }
     make(fits)
+}
+
+/// How long a wake-up waits for its market context (ADR-0072). Mostly it is held from
+/// the last minute; one that is not in time is left out of this attempt.
+const CONTEXT_WAIT: Duration = Duration::from_secs(5);
+
+/// The symbol a wake-up is about: the fired alert's, else its setup's.
+fn wake_up_symbol(event: &LoggedEvent, setup: Option<&chartgen::setups::Record>) -> Option<String> {
+    let happened: Value = serde_json::from_str(&event.body).unwrap_or_default();
+    happened["symbol"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| setup.map(|s| s.symbol.clone()))
 }
 
 /// A bar's open time, in seconds.

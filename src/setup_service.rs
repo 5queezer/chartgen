@@ -496,6 +496,10 @@ impl Setups {
     /// A change the server made to a setup the agent took is also a wake-up, if the
     /// operator configured a receiver for that owner. A cancellation is the agent's own
     /// act, and nobody waits on a skip: those are logged and wake nobody.
+    ///
+    /// So is a take that went near its stop (ADR-0072), while it is still open when
+    /// this is written. After the server was away, a stop in the same write says more
+    /// than the warning before it, which is then only logged.
     fn status_events(&self, changed: &[(Record, Vec<Revision>)]) -> Vec<NewEvent> {
         if self.replay.is_some() {
             return Vec::new();
@@ -504,6 +508,23 @@ impl Setups {
         for (record, log) in changed {
             let wakes = self.alerts.as_ref().is_some_and(|a| a.wakes(&record.owner));
             for entry in log {
+                if entry.kind == setups::Kind::NearStop {
+                    events.push(NewEvent {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        owner: record.owner.clone(),
+                        kind: "setup.near_stop".to_string(),
+                        at: entry.at,
+                        alert_id: None,
+                        setup_id: Some(record.id.clone()),
+                        body: json!({
+                            "mae_r": entry.changes.get("mae_r").map(|m| m["to"].clone()),
+                            "gap": record.gap,
+                        })
+                        .to_string(),
+                        deliver: wakes && record.status == Status::Triggered,
+                    });
+                    continue;
+                }
                 let Some(status) = entry.changes.get("status") else {
                     continue;
                 };

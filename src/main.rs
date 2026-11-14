@@ -3,6 +3,7 @@ mod chart_push;
 mod event_log;
 mod fetch;
 mod intrabars;
+mod market_context;
 mod mcp;
 mod replay;
 mod replay_fixtures;

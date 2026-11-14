@@ -2115,3 +2115,69 @@ fn a_split_leaves_alone_levels_sent_after_it_took_effect() {
     assert_eq!(pending[0].invalidation, 17.5);
     assert_eq!(pending[1], &after);
 }
+
+fn near_stops(log: &[Revision]) -> Vec<&Revision> {
+    log.iter().filter(|e| e.kind == Kind::NearStop).collect()
+}
+
+/// ADR-0072: a filled take says once, in its log, that it went 0.8 R against it.
+#[test]
+fn a_take_says_once_that_it_went_near_its_stop() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 103.0, 103.5, 102.0, 102.5));
+    // Filled at 101 with a risk of 3: 0.8 R against is 98.6.
+    assert!(near_stops(&r.apply_bar(&bar(30, 102.5, 102.6, 100.8, 101.2))).is_empty());
+    // 98.7 is 0.7667 R against: not yet.
+    assert!(near_stops(&r.apply_bar(&bar(31, 101.0, 101.2, 98.7, 99.0))).is_empty());
+    let log = r.apply_bar(&bar(32, 99.0, 99.1, 98.6, 98.9));
+    let near = near_stops(&log);
+    assert_eq!(near.len(), 1, "{log:?}");
+    assert_eq!((near[0].at, near[0].by), (T0 + 32 * MIN, By::Server));
+    assert_eq!(
+        near[0].changes["mae_r"],
+        json!({ "from": -0.7667, "to": -0.8 })
+    );
+    assert_eq!(r.near_stop_at, Some(T0 + 32 * MIN));
+    assert_eq!(r.view()["near_stop_at"], json!(T0 + 32 * MIN));
+    // Further against, back, and against again: said once.
+    for (minute, low) in [(33, 98.2), (34, 99.5), (35, 98.1)] {
+        let log = r.apply_bar(&bar(minute, 99.0, 99.6, low, 99.0));
+        assert!(near_stops(&log).is_empty(), "minute {minute}: {log:?}");
+    }
+    assert_eq!(r.status, Status::Triggered);
+    // Stored and read back, it still knows.
+    let stored: Record = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+    assert_eq!(stored.near_stop_at, Some(T0 + 32 * MIN));
+}
+
+#[test]
+fn a_stop_or_a_skip_says_nothing_of_being_near() {
+    // Straight from 0.5 R against to the stop: the status says it.
+    let mut stopped = create(long_args());
+    stopped.apply_bar(&bar(0, 103.0, 103.5, 102.0, 102.5));
+    stopped.apply_bar(&bar(30, 102.5, 102.6, 100.8, 101.2));
+    stopped.apply_bar(&bar(31, 101.0, 101.2, 99.5, 99.6));
+    let log = stopped.apply_bar(&bar(32, 99.6, 99.7, 97.5, 97.6));
+    assert_eq!(stopped.status, Status::Invalidated);
+    assert!(near_stops(&log).is_empty(), "{log:?}");
+    assert_eq!(stopped.near_stop_at, None);
+    assert!(stopped.view().get("near_stop_at").is_none());
+
+    // The bar that fills it can take it near the stop, and says so with the fill.
+    let mut filled_near = create(long_args());
+    let log = filled_near.apply_bar(&bar(0, 102.0, 102.1, 98.5, 99.0));
+    assert_eq!(filled_near.status, Status::Triggered);
+    let kinds: Vec<Kind> = log.iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, [Kind::Status, Kind::NearStop]);
+    assert_eq!(
+        log[1].changes["mae_r"],
+        json!({ "from": null, "to": -0.8333 })
+    );
+
+    // Nobody waits on a skip.
+    let mut skipped = create(long_args());
+    skipped.decision = Decision::Skip;
+    let log = skipped.apply_bar(&bar(0, 100.5, 100.6, 98.5, 99.0));
+    assert_eq!(skipped.status, Status::Triggered);
+    assert!(near_stops(&log).is_empty(), "{log:?}");
+}

@@ -932,6 +932,50 @@ The Binance and Yahoo fetches for one call run at the same time.
 
 Each request times out after 10 s.
 
+#### `get_market_context`
+
+A symbol's market at a glance: the same `context` a [wake-up](#waking-your-agent) carries
+([ADR-0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/)).
+
+Required: `symbols`, 1 to 10 strings, trimmed, uppercased and deduplicated as `get_quotes`
+takes them. One entry per distinct symbol, in request order:
+
+```json
+{
+  "contexts": [
+    {
+      "symbol": "BTCUSDT", "at": 1794700800000, "price": 91234.5,
+      "trend": { "4h": "down", "1d": "down" },
+      "funding_pct": 0.006,
+      "long_short": { "long": 0.764, "ratio": 3.24 },
+      "fear_greed": { "value": 13, "label": "extreme fear" },
+      "line": "BTCUSDT 91234.5 | trend 4h down, 1d down | funding 0.006% | longs 76.4% (L/S 3.24) | F&G 13 extreme fear"
+    },
+    { "symbol": "NOPEUSDT", "error": "Binance: Invalid symbol." }
+  ]
+}
+```
+
+- `price`: the close of the forming 4h bar, so the last price.
+- `trend` per interval, of 150 bars with the forming one: `up` when the price is above the
+  20-bar EMA and that EMA is above the 50-bar EMA, `down` when both are the other way round,
+  `mixed` otherwise.
+- `funding_pct`: the latest funding rate, in percent, as the `funding_rate` indicator reads it
+  on 1h bars.
+- `long_short`: the share of Binance accounts that are long, and `ratio` long/short, as the
+  `long_short` indicator reads them (4h period).
+- `fear_greed`: today's crypto Fear & Greed index (alternative.me) and its band: `extreme fear`
+  below 25, `fear` below 45, `neutral` below 55, `greed` below 75, else `extreme greed`.
+- `line`: all of it in one line, for a template.
+
+Funding, long/short and the index are for Binance symbols only; a stock has its price and
+trends. A part that could not be read is absent. A symbol whose bars cannot be read gets
+`{symbol, error}` and never fails the call. Each symbol is read at most once a minute, the
+index once in ten minutes; within that, every caller gets the held answer, and callers that
+come during a read wait for it. There is no macro
+calendar here, so whether a macro blackout is on is not part of it. A replay server refuses
+the tool.
+
 #### `search_symbols`
 
 Search tickers and names across all Binance spot pairs and Yahoo Finance
@@ -1436,6 +1480,13 @@ its own, in this order:
     "trigger": "once", "bar_time": 1793965320, "fire_count": 1
   },
   "note": "the alert's message",
+  "context": {
+    "symbol": "BTCUSDT", "at": 1793965352000, "price": 65012.0,
+    "trend": { "4h": "up", "1d": "mixed" }, "funding_pct": 0.01,
+    "long_short": { "long": 0.52, "ratio": 1.08 },
+    "fear_greed": { "value": 61, "label": "greed" },
+    "line": "BTCUSDT 65012.0 | trend 4h up, 1d mixed | funding 0.01% | longs 52.0% (L/S 1.08) | F&G 61 greed"
+  },
   "setup": {
     "id": "0b6f6f0e-6f0e-4a3e-9d43-0d6c1f6a2a11",
     "status": "watching",
@@ -1453,7 +1504,11 @@ its own, in this order:
 ```
 
 `note` is absent without a `message`, and `setup` without a `setup_id` or once the setup is
-gone. **The order is fixed:** what says which event this is and where the setup stands comes
+gone. `context` is the symbol's market when the body is made, as
+[`get_market_context`](#get_market_context) answers it
+([ADR-0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/)). A wake-up waits at most
+5 s for it, and goes without it when it is not held from the last minute and not read in
+time, or when the symbol's bars cannot be read. Whether a macro blackout is on is not in it. **The order is fixed:** what says which event this is and where the setup stands comes
 first, the thesis last, so a receiver that shows only the beginning of a body still shows
 the levels. The setup has no drawings and no log here; `get_setup` answers those. A body is
 at most 8 KiB: a thesis that would exceed it is cut, and `"thesis_cut": true` says so.
@@ -1472,6 +1527,24 @@ wake nobody.
 
 **`change` says what happened; `setup` is the setup as it is when the body is sent.** A
 wake-up that reaches you late can say `triggered` about a setup that already shows `won`.
+
+##### Near the stop
+
+**A take that went 0.8 R against it wakes your agent once, before the stop**
+([ADR-0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/)). It is the first 1m bar
+whose low (long) or high (short) takes `mae_r` to −0.8 or below while the setup stays
+`triggered`: R from the fill price to the invalidation, before costs, as `mae_r` counts it. The
+body has `"type": "setup.near_stop"`, `at` the time of that bar, and
+
+```json
+"change": { "mae_r": -0.83, "gap": false }
+```
+
+followed by `context` and the setup, which shows `near_stop_at`. It is said once per setup,
+however often the price comes back and goes out again. A bar that stops the take out says so
+with its status instead, and the bar that fills it can be the one. After the server was away, a
+warning written together with the stop that followed it is logged and not sent. A skip is not
+warned about.
 
 Wake-ups have limits of their own, apart from the ones above: 50 waiting, 30 a minute, 2
 at once. Delivery is tried three times within about fifteen seconds. With no answer, a 5xx
@@ -1501,9 +1574,13 @@ kept, and repeats while `more` is true.**
     { "seq": 42, "id": "7a0c1d0e-…", "type": "setup.status",
       "at": 1793965380000, "setup_id": "0b6f6f0e-…",
       "what": { "from": "watching", "to": "triggered", "gap": false },
+      "delivery": "delivered" },
+    { "seq": 43, "id": "c1f4e2b7-…", "type": "setup.near_stop",
+      "at": 1793967180000, "setup_id": "0b6f6f0e-…",
+      "what": { "mae_r": -0.83, "gap": false },
       "delivery": "waiting" }
   ],
-  "cursor": 42, "more": false, "truncated": false
+  "cursor": 43, "more": false, "truncated": false
 }
 ```
 
@@ -1588,7 +1665,8 @@ setups; `can_create` in the list says so.
   list replaces the old one (`[]` clears it), and it can change after the fill too. A closed
   setup, or one being cancelled, takes a revision with `tags` alone.
 - `status`, `result_r`, the excursion and duration fields, `closest_approach_r`,
-  `shadow_results`, `fill`, `exit` and `costs` are set by the server. Sending one is an error.
+  `near_stop_at`, `shadow_results`, `fill`, `exit` and `costs` are set by the server. Sending
+  one is an error.
 - `features`, `probability`, `playbook_version` ([ADR-0064](/chartgen/decisions/0064-a-setups-record/)):
   what you state when you make the setup, all optional. `features` is a flat object of at
   most 16 entries, names of `a-z`, `0-9` and `_` up to 32 characters, values a number,
@@ -1615,10 +1693,12 @@ not be read afterwards, so the result is incomplete), `pending`
 (changes that count from the next 1m bar), `revisions` and `agent_revisions`. A stock setup
 also has `market` (`us_equity`), `last_close` (its newest 1m close scored, `{price, bar_time}`)
 and `adjustments` once a split or a dividend applied (`{kind: "split", at, ratio}` or
-`{kind: "dividend", at, amount}`); a Binance setup has none of the three. `log` holds every
+`{kind: "dividend", at, amount}`); a Binance setup has none of the three. A take that went
+0.8 R against it while open has `near_stop_at`, the open time of that 1m bar
+([near the stop](#near-the-stop)); until then it is absent. `log` holds every
 entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `cancelled`,
-`status`, `voided`, `gap`, `adjusted`), `reason` and `changes` (`{field: {from, to}}`). Times
-are in ms.
+`status`, `voided`, `gap`, `adjusted`, `near_stop`), `reason` and `changes`
+(`{field: {from, to}}`). Times are in ms.
 
 A call that fails a check answers with an error whose text is JSON:
 `{error, setup_errors: [{field, message, hint}]}`, one entry per problem, and stores nothing.
