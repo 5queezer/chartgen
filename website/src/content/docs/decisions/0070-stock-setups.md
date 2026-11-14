@@ -90,8 +90,9 @@ accepted before is still read the same way.
 **Known limit: a stock whose ticker ends like a Binance quote is not supported.**
 `detect_source` sends a symbol to Binance when it ends in a quote asset (USDT, BUSD, BTC, ETH,
 BNB, USDC, FDUSD), so ABNB (Airbnb, Nasdaq) is read from Binance, by charts as well as setups.
-- `create_setup` refuses it as before: Binance does not list it. The error now says that a US
-  stock with such a ticker is not supported yet.
+- `create_setup` refuses it as before: Binance does not list it. When Binance's answer says the
+  symbol is invalid or has no bars, the error now adds that a US stock with such a ticker is not
+  supported yet. A passing failure on a real pair gets no such hint.
 - A fallback to the stock check was built and taken out again. Charts, the fixture builder, the
   least-risk check and a rollback's restore all route by the symbol, so a setup that only
   creation took for a stock would be half supported, which is worse than a clear refusal.
@@ -128,10 +129,11 @@ row and its answers are byte for byte as before.
     - A minute Yahoo has not published yet is therefore read by the next poll, not taken for a
       minute without a trade.
     - Only minutes of the session count as answered: the 16:00 row of the close does not.
-    - **A page Yahoo answered no minute for** is read past once its sessions are over: its end is
-      at or before the latest session's open. Each setup's log gets a `gap` over it, which is
-      honest because nothing was seen there and nothing will be. For the session that is open,
-      the page waits: its minutes may not be published yet.
+    - **A page Yahoo answered no minute for** is read past once its sessions are over (its end is
+      at or before the latest session's open), on the second such answer for the same page: one
+      silent answer may be a hiccup. Each setup's log gets a `gap` over it, which is honest
+      because nothing was seen there and nothing will be. For the session that is open, the page
+      waits: its minutes may not be published yet.
   - A minute applies only once it is 60 s old, so trades reported late have had a minute to arrive.
     The lag was not measured; see the delay row above.
   - One request covers 7 days. A setup further behind than that catches up one page per poll.
@@ -149,25 +151,34 @@ row and its answers are byte for byte as before.
   - bars older than Yahoo's 1m history (29 days, a day short of the limit) that the server could
     no longer read, which is the same meaning a gap has for Binance;
   - and a past page Yahoo answered no minute for, as above.
-- **A symbol Yahoo stops answering.** When a read fails (a delisted symbol gets a 404 for good) or
-  Yahoo answers no minute for the session that is open (a long halt), the symbol's setups that
-  expired a whole session ago are ended as an owner's are when it is taken off the operator's
-  list:
+- **A symbol Yahoo stops answering.** The symbol's setups are ended as an owner's are when it is
+  taken off the operator's list:
   - a `gap` over what was not read;
   - `expired` at 0 R if never filled, and with no result if filled, since no exit price is
     invented.
 
-  "A whole session ago" means after the close of the first session that opens at or after the
-  expiry. A setup Yahoo still answers for expires on its bars, and a catch-up that makes progress
-  is never cut short.
+  When that happens depends on why the bars are missing:
+  - **Yahoo answers 404** (a delisted symbol, for good), or answers no minute for the session
+    that is open (a long halt): once the setup's expiry is a whole session ago, that is after the
+    close of the first session that opens at or after it.
+  - **Any other failed read** (a timeout, a 5xx) may be ours, such as our own network down over a
+    weekend, while Yahoo keeps the bars. Such a setup is ended only once its expiry is older than
+    Yahoo's 1m reach (29 days), when the bars really are gone. Until then the next poll that gets
+    through scores it from its bars.
+  - The expiry in force counts: levels the agent sent before now take effect first, so an
+    extension is honoured though no bar came to apply it.
+  - A setup Yahoo still answers for expires on its bars, and a catch-up that makes progress is
+    never cut short.
 - **An implausible open is held.** A read is held back, not applied and not counted as read, when
   both of these hold:
   - its first bar after the last close scored opens below 0.7 or above 1.4 times that close;
   - it holds no split.
 
-  When no setup on the symbol has scored a close yet, as for one made over a weekend before a
-  Monday split, the reference is the middle of the newest setup's entry zone, from when it was
-  made. An entry zone far from the price can then hold a real open for the half hour below.
+  The check runs for every setup on the symbol against its own reference: its last close scored,
+  or, with none yet, as for one made over a weekend before a Monday split, the middle of its entry
+  zone from when it was made. The read is held if any of them is out of band. So a newer setup
+  made in the new terms cannot take the hold away from an older one in the old terms. An entry
+  zone far from the price can hold a real open for the half hour below.
 
   The next poll reads it again, and once Yahoo sends the split it is scored in the split's terms.
   The band takes in every split from 3:2 on (0.67) and every reverse split from 2:3 on (1.5). A

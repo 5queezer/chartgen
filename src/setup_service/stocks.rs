@@ -24,6 +24,17 @@ const PLAUSIBLE: (f64, f64) = (0.7, 1.4);
 /// Polls a read is held back before its first price is taken as a real gap: half an
 /// hour of the session at one a minute.
 const HOLD_POLLS: u32 = 30;
+/// Silent answers for a past page before it is read past: one may be a hiccup.
+const SILENT_ANSWERS: u32 = 2;
+
+/// Why a symbol's bars will not come, for `expire_unread`.
+#[derive(Clone, Copy)]
+enum Unread {
+    /// Yahoo answers 404 (delisted), or no minute for the session that is open (a halt).
+    Gone,
+    /// A read failed otherwise: perhaps on our side, while Yahoo keeps the bars.
+    Unreachable,
+}
 
 /// Why a stock setup cannot expire at `expires_at`: past the years the exchange
 /// calendar holds, holidays would count as sessions.
@@ -120,8 +131,14 @@ impl Setups {
             true => match fetch::fetch_stock_minutes(self.source, symbol, from, to) {
                 Ok(read) => read,
                 Err(e) => {
-                    // A delisted symbol answers 404 for good.
-                    self.expire_unread(symbol, now);
+                    // A delisted symbol answers 404 for good: its setups end a whole session
+                    // after their expiry. Any other failure may be ours, such as our own
+                    // network down over a weekend, while Yahoo keeps the bars: they end only
+                    // once their expiry is older than Yahoo's 1m bars reach.
+                    match e.contains("status 404") {
+                        true => self.expire_unread(symbol, now, Unread::Gone),
+                        false => self.expire_unread(symbol, now, Unread::Unreachable),
+                    }
                     return Err(e);
                 }
             },
@@ -133,16 +150,20 @@ impl Setups {
         self.apply_read(symbol, &read, from, to, now)
     }
 
-    /// End `symbol`'s stock setups that ran out a whole session ago while Yahoo failed
-    /// or answered for no minute, as `expire_unscored` ends those of an owner off the
-    /// operator's list: a gap in the log, 0 R if never filled, and no invented exit if
-    /// filled. A setup Yahoo answers for expires on its bars.
-    fn expire_unread(&self, symbol: &str, now: i64) {
+    /// End `symbol`'s stock setups whose bars will not come, as `expire_unscored` ends
+    /// those of an owner off the operator's list: a gap in the log, 0 R if never filled,
+    /// and no invented exit if filled. A setup Yahoo answers for expires on its bars.
+    fn expire_unread(&self, symbol: &str, now: i64, why: Unread) {
         let mut st = self.lock();
+        // The expiry in force: a revision that extended it counts once it is due.
         let due = |r: &Record| {
-            Market::UsEquity
-                .session_after(r.levels.expires_at)
-                .is_some_and(|whole| now > whole)
+            let expiry = r.expiry_in_force(now);
+            match why {
+                Unread::Gone => Market::UsEquity
+                    .session_after(expiry)
+                    .is_some_and(|whole| now > whole),
+                Unread::Unreachable => expiry < now - REACH_MS,
+            }
         };
         let changed: Vec<(Record, Vec<Revision>)> = self
             .stock_setups(&st, symbol)
@@ -192,13 +213,27 @@ impl Setups {
             .latest_open(now)
             .is_some_and(|open| to <= open);
         if silent && !over {
-            self.expire_unread(symbol, now);
+            self.expire_unread(symbol, now, Unread::Gone);
         }
-        let through = match silent && over {
+        let mut st = self.lock();
+        // A past page is read past on Yahoo's second silent answer for it, not its first.
+        let past = silent && over && {
+            let answers = match st.stock_silences.get(symbol) {
+                Some(&(at, n)) if at == from => n + 1,
+                _ => 1,
+            };
+            st.stock_silences
+                .insert(symbol.to_string(), (from, answers));
+            answers >= SILENT_ANSWERS
+        };
+        if silent && over && !past {
+            return Ok(());
+        }
+        st.stock_silences.remove(symbol);
+        let through = match past {
             true => to,
             false => covered(read, from, to),
         };
-        let mut st = self.lock();
         let read_before = st.stock_reads.get(symbol).copied();
         if self.held(&mut st, symbol, read) {
             return Ok(());
@@ -213,7 +248,7 @@ impl Setups {
                 log.push(record.note_gap(next, reach, now));
             }
             let next = record.next_bar_time().max(next);
-            if silent && over && next < to && Market::UsEquity.session_ms_between(next, to) > 0 {
+            if past && next < to && Market::UsEquity.session_ms_between(next, to) > 0 {
                 log.push(record.note_gap(next, to, now));
             }
             log.extend(score(&mut record, read, through));
@@ -229,38 +264,31 @@ impl Setups {
         Ok(())
     }
 
-    /// Whether to hold `read` back: its first bar after the last close scored (or, with
-    /// none, the newest setup's entry) opens outside `PLAUSIBLE` of it, and it holds no
-    /// split. After `HOLD_POLLS` polls of the
+    /// Whether to hold `read` back: for any of the symbol's setups, its first bar after
+    /// that setup's last close scored (or, with none, its entry) opens outside
+    /// `PLAUSIBLE` of it, and it holds no split. After `HOLD_POLLS` polls of the
     /// same bar it is taken as a real gap, and the log says so.
     fn held(&self, st: &mut State, symbol: &str, read: &fetch::StockMinutes) -> bool {
-        // The newest close scored; with none yet, the entry zone's middle of the newest
-        // setup, from when it was made: a setup made over a weekend is protected too.
-        let last = self
-            .stock_setups(st, symbol)
-            .filter_map(|r| r.last_close)
-            .max_by_key(|m| m.bar_time)
-            .or_else(|| {
-                self.stock_setups(st, symbol)
-                    .max_by_key(|r| r.created_at)
-                    .map(|r| Mark {
-                        price: (r.levels.entry.low + r.levels.entry.high) / 2.0,
-                        bar_time: r.created_at - 1,
-                    })
-            });
-        let first = last.and_then(|last| {
-            read.bars
-                .iter()
-                .filter_map(MinuteBar::of)
-                .find(|b| b.time > last.bar_time)
-                .map(|b| (last, b))
-        });
         let split = read
             .adjustments
             .iter()
             .any(|a| matches!(a, Adjustment::Split { .. }));
-        let Some((last, bar)) = first.filter(|(last, b)| !split && implausible(b.open, last.price))
-        else {
+        // Each setup against its own reference: its last close scored or, with none yet,
+        // the middle of its entry zone from when it was made. A setup made after a split,
+        // in its terms, must not take the hold away from one made before it.
+        let bars: Vec<MinuteBar> = read.bars.iter().filter_map(MinuteBar::of).collect();
+        let out_of_band = self
+            .stock_setups(st, symbol)
+            .filter_map(|r| {
+                let last = r.last_close.unwrap_or(Mark {
+                    price: (r.levels.entry.low + r.levels.entry.high) / 2.0,
+                    bar_time: r.created_at - 1,
+                });
+                let bar = bars.iter().find(|b| b.time > last.bar_time)?;
+                implausible(bar.open, last.price).then_some((last, *bar))
+            })
+            .min_by_key(|(_, bar)| bar.time);
+        let Some((last, bar)) = out_of_band.filter(|_| !split) else {
             st.stock_holds.remove(symbol);
             return false;
         };

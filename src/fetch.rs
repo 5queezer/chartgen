@@ -1921,6 +1921,11 @@ pub fn fetch_stock_minutes(
             })
         }
         #[cfg(test)]
+        // As Yahoo answers a delisted symbol, for a test's symbol named so.
+        DataSource::Unavailable if symbol.starts_with("DELISTED") => {
+            Err("Yahoo API returned status 404 Not Found".into())
+        }
+        #[cfg(test)]
         DataSource::Unavailable => Err("upstream unavailable".into()),
     }
 }

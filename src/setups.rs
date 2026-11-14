@@ -1770,6 +1770,10 @@ impl Record {
 
     /// The expiry in force for a bar that opens at `t`: a watching setup's new levels
     /// count from the first bar at or after they were sent.
+    pub fn expiry_in_force(&self, t: i64) -> i64 {
+        self.expiry_for(t)
+    }
+
     fn expiry_for(&self, t: i64) -> i64 {
         self.due_levels(t)
             .map_or(self.levels.expires_at, |l| l.expires_at)
@@ -2111,6 +2115,11 @@ impl Record {
     /// `expire_unscored` for a stock setup whose bars could not be read (ADR-0070): Yahoo
     /// failed, or answered for no minute, past its expiry.
     pub fn expire_unread(&mut self, now_ms: i64) -> Vec<Revision> {
+        // New levels sent before now are in force: an expiry the agent extended counts.
+        if let Some(levels) = self.due_levels(now_ms).cloned() {
+            self.levels = levels;
+            self.pending.retain(|p| p.at() > now_ms);
+        }
         self.expire_unscored_because(
             now_ms,
             "expired while its bars could not be read, so it was not scored to its end",

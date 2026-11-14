@@ -116,6 +116,9 @@ struct State {
     /// Per stock symbol, a read held back for an implausible first price: that bar's
     /// time, and the polls it has been held.
     stock_holds: HashMap<String, (i64, u32)>,
+    /// Per stock symbol, a past page Yahoo answered no minute for: where it starts, and
+    /// how many times it did.
+    stock_silences: HashMap<String, (i64, u32)>,
 }
 
 pub struct Setups {
@@ -827,9 +830,14 @@ impl Setups {
                     setups::problems_text(&[Problem::new("symbol", message).hint(hint)])
                 })?
             }
-            (Some(hub), true, None) => hub
-                .check_symbol(&symbol, FEED_INTERVAL)
-                .map_err(|e| format!("Cannot watch {symbol}: {e}. {}", unlisted_hint(&symbol)))?,
+            (Some(hub), true, None) => {
+                hub.check_symbol(&symbol, FEED_INTERVAL).map_err(|e| {
+                    match e.contains("Invalid symbol") || e.starts_with("no bars") {
+                        true => format!("Cannot watch {symbol}: {e}. {}", unlisted_hint(&symbol)),
+                        false => format!("Cannot watch {symbol}: {e}"),
+                    }
+                })?
+            }
             _ => {}
         }
         let needs_bars = requests.is_some() || draft.decision == Decision::Skip;

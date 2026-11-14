@@ -3758,18 +3758,34 @@ async fn a_us_stock_whose_ticker_ends_like_a_binance_quote_is_refused_with_a_hin
 // Round 2 (ADR-0070): a symbol Yahoo stops answering, a page it answered nothing for, and
 // a late split before any close was scored.
 
+/// A long on `symbol` at `zone`, made at `made`, expiring at `expires_at`.
+fn stock_long_on(s: &Setups, symbol: &str, made: i64, zone: (f64, f64), expires_at: i64) -> String {
+    crate::replay::at(Some(made), || {
+        let args = json!({
+            "symbol": symbol, "interval": "1h", "direction": "long",
+            "thesis": "example thesis", "entry": { "low": zone.0, "high": zone.1 },
+            "invalidation": zone.0 * 0.97, "targets": [zone.1 * 1.06], "expires_at": expires_at,
+        });
+        id_of(&call(s, "create_setup", args, "owner").unwrap())
+    })
+}
+
+fn poll_symbol_at(s: &Setups, symbol: &str, t: i64) -> Result<(), String> {
+    crate::replay::at(Some(t), || s.poll(symbol))
+}
+
 #[tokio::test]
-async fn a_stock_setup_whose_symbol_yahoo_no_longer_answers_expires_a_session_after() {
-    // A delisted symbol: every read fails, as Yahoo's 404 does.
+async fn a_delisted_symbol_ends_its_setups_a_session_after_their_expiry() {
+    // Yahoo answers 404 for a delisted symbol, for good.
     let s = stock_service(DataSource::Unavailable);
-    let id = nvda_long(&s, ny(6, 15, 55));
-    assert!(poll_at(&s, ny(9, 15, 0)).is_err());
+    let id = stock_long_on(&s, "DELISTED", ny(6, 15, 49), (99.0, 100.0), ny(6, 15, 55));
+    assert!(poll_symbol_at(&s, "DELISTED", ny(9, 15, 0)).is_err());
     assert_eq!(
         nvda_setup(&s, &id)["status"],
         "watching",
         "Monday's session is not over"
     );
-    assert!(poll_at(&s, ny(9, 16, 1)).is_err());
+    assert!(poll_symbol_at(&s, "DELISTED", ny(9, 16, 1)).is_err());
     let ended = nvda_setup(&s, &id);
     assert_eq!(ended["status"], "expired");
     assert_eq!(ended["result_r"], 0.0);
@@ -3779,6 +3795,44 @@ async fn a_stock_setup_whose_symbol_yahoo_no_longer_answers_expires_a_session_af
         .as_str()
         .unwrap()
         .contains("could not be read"));
+}
+
+#[tokio::test]
+async fn reads_that_fail_otherwise_end_nothing_until_yahoo_no_longer_keeps_the_bars() {
+    // A timeout or a 5xx, as when our own network is down over a weekend.
+    let s = stock_service(DataSource::Unavailable);
+    let id = nvda_long(&s, ny(6, 15, 55));
+    assert!(poll_at(&s, ny(10, 16, 1)).is_err());
+    assert_eq!(
+        nvda_setup(&s, &id)["status"],
+        "watching",
+        "Yahoo still has the bars"
+    );
+    // 29 days past the expiry, they are out of its reach.
+    assert!(poll_at(&s, ny(6, 15, 56) + 29 * 86_400_000).is_err());
+    assert_eq!(nvda_setup(&s, &id)["status"], "expired");
+}
+
+#[tokio::test]
+async fn an_extended_expiry_counts_for_a_symbol_yahoo_no_longer_answers() {
+    let s = stock_service(DataSource::Unavailable);
+    let id = stock_long_on(&s, "DELISTED", ny(6, 15, 49), (99.0, 100.0), ny(6, 16, 0));
+    // Extended to the 20th before the first expiry passed; no bar came to apply it.
+    crate::replay::at(Some(ny(6, 15, 50)), || {
+        let args = json!({ "id": id, "reason": "more time", "expires_at": ny(20, 16, 0) });
+        call(&s, "revise_setup", args, "owner").unwrap()
+    });
+    assert!(poll_symbol_at(&s, "DELISTED", ny(9, 16, 1)).is_err());
+    assert!(poll_symbol_at(&s, "DELISTED", ny(20, 16, 1)).is_err());
+    assert_eq!(
+        nvda_setup(&s, &id)["status"],
+        "watching",
+        "the 20th's session is the expiry's own"
+    );
+    assert!(poll_symbol_at(&s, "DELISTED", ny(23, 16, 1)).is_err());
+    let ended = nvda_setup(&s, &id);
+    assert_eq!(ended["status"], "expired");
+    assert_eq!(ended["expires_at"], json!(ny(20, 16, 0)));
 }
 
 #[tokio::test]
@@ -3819,7 +3873,11 @@ async fn a_past_page_yahoo_answered_nothing_for_is_read_past_as_a_gap() {
         poll_at(&s, ny(6, 16, 5)).unwrap();
         // Monday's session is over by Tuesday 10:00, and Yahoo answered no row for it.
         let silent = fetch::StockMinutes::default();
+        // Once may be a hiccup: the page is read again.
         s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(10, 9, 30), ny(10, 10, 0))
+            .unwrap();
+        assert_eq!(s.lock().stock_reads["NVDA"], ny(6, 16, 4));
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(10, 9, 30), ny(10, 10, 1))
             .unwrap();
         assert_eq!(s.lock().stock_reads["NVDA"], ny(10, 9, 30));
         let gapped = nvda_setup(&s, &id);
@@ -3876,5 +3934,28 @@ async fn a_late_split_is_held_for_a_setup_with_no_close_scored_yet() {
         let scored = nvda_setup(&s, &id);
         assert_eq!(scored["status"], "watching");
         assert_eq!(scored["invalidation"], 9.7);
+    });
+}
+
+#[tokio::test]
+async fn a_late_split_is_held_for_an_old_setup_when_a_newer_one_is_in_the_new_terms() {
+    crate::replay::on(nvda_minutes(&[], 0), |_| {
+        let s = live_reading_chosen_bars();
+        // One made on Saturday in the old terms, one on Sunday in the new ones.
+        let old = stock_long_on(&s, "NVDA", ny(7, 12, 0), (99.0, 100.0), ny(20, 16, 0));
+        let new = stock_long_on(&s, "NVDA", ny(8, 12, 0), (10.0, 10.2), ny(20, 16, 0));
+        let read = nvda_read(ny(9, 9, 30), 5, 10.1, Vec::new());
+        s.apply_read("NVDA", &read, ny(7, 12, 0), ny(9, 9, 35), ny(9, 9, 36))
+            .unwrap();
+        assert_eq!(
+            nvda_setup(&s, &old)["status"],
+            "watching",
+            "held, not invalidated"
+        );
+        assert_eq!(
+            nvda_setup(&s, &new)["scored_through"],
+            Value::Null,
+            "nothing applied"
+        );
     });
 }
