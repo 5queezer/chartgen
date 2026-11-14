@@ -218,6 +218,9 @@ fn build(args: &Args, now_ms: i64, sleep: &dyn Fn(Duration)) -> Result<(), Strin
         }
         let began = Instant::now();
         if crate::fetch::market_of(symbol).is_some() {
+            // What create_setup takes, and only that: a replay scores it as a US stock.
+            crate::fetch::check_us_stock(crate::fetch::DataSource::Live, symbol)
+                .map_err(|(problem, hint)| format!("{problem}: {hint}"))?;
             let read = |start, end| {
                 sleep(STOCK_PACE);
                 crate::fetch::fetch_stock_minutes(
@@ -754,6 +757,7 @@ mod tests {
                 bars: vec![bar],
                 // Yahoo may report it on both pages around it; it is kept once.
                 adjustments: vec![paid],
+                reached: Some(stop),
             })
         })
         .unwrap();

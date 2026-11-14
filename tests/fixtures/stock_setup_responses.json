@@ -63,10 +63,10 @@
       }
     ],
     "agent_revisions": 0,
-    "bars_to_exit": 6.48,
+    "bars_to_exit": 6.98,
     "bars_to_fill": 0.0,
-    "bars_to_mae": 1.57,
-    "bars_to_mfe": 1.08,
+    "bars_to_mae": 2.07,
+    "bars_to_mfe": 1.58,
     "bracket": "agent",
     "closest_approach_r": 0.0,
     "costs": {

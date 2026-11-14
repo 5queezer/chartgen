@@ -1838,7 +1838,7 @@ impl Record {
                     return None;
                 }
                 let (levels, fill) = (self.levels.clone(), self.fill);
-                self.scale(ratio);
+                self.scale(ratio, at);
                 level_changes(&mut changes, &levels, &self.levels);
                 changed(&mut changes, "fill", json!(fill), json!(self.fill));
                 format!(
@@ -1871,8 +1871,10 @@ impl Record {
         ))
     }
 
-    /// Divide every price of the setup by `ratio`. Results in R do not change.
-    fn scale(&mut self, ratio: f64) {
+    /// Divide every price of the setup by `ratio`, for a split that took effect at
+    /// `split_at`. Levels sent at or after it are in the new terms already: the agent
+    /// read them from charts Yahoo had adjusted. Results in R do not change.
+    fn scale(&mut self, ratio: f64, split_at: i64) {
         let levels = |l: &mut Levels| {
             l.entry.low /= ratio;
             l.entry.high /= ratio;
@@ -1881,8 +1883,10 @@ impl Record {
         };
         levels(&mut self.levels);
         for pending in &mut self.pending {
-            if let Pending::Levels { levels: l, .. } = pending {
-                levels(l);
+            if let Pending::Levels { levels: l, at } = pending {
+                if *at < split_at {
+                    levels(l);
+                }
             }
         }
         for mark in [&mut self.fill, &mut self.exit, &mut self.last_close]
@@ -2143,16 +2147,16 @@ impl Record {
         else {
             return Durations::default();
         };
-        // A stock's bars hold session time only (ADR-0070).
+        // A stock's bars are on its session grid (ADR-0070).
         let session = self
             .market
             .zip(crate::interval::Interval::parse(&self.interval).ok());
         let bars = |from: i64, to: i64| {
-            let (elapsed, per) = match session {
-                Some((market, iv)) => (market.session_ms_between(from, to), Market::bar_ms(&iv)),
-                None => (to - from, secs * 1000),
+            let n = match session {
+                Some((market, iv)) => market.bars_between(&iv, from, to),
+                None => (to - from) as f64 / (secs * 1000) as f64,
             };
-            (elapsed as f64 / per as f64 * 100.0).round() / 100.0
+            (n * 100.0).round() / 100.0
         };
         let last = match (self.exit, self.status) {
             (Some(exit), _) => Some(exit.bar_time),

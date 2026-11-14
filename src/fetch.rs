@@ -1776,13 +1776,11 @@ pub fn market_of(symbol: &str) -> Option<Market> {
     (detect_source(symbol) == "yahoo").then_some(Market::UsEquity)
 }
 
-#[cfg(feature = "scripting")]
 /// The exchanges a stock setup may be on, by Yahoo's `exchangeName`: Nasdaq (NMS,
 /// NGM, NCM), NYSE (NYQ), NYSE American (ASE), NYSE Arca (PCX) and Cboe BZX (BTS).
 const US_EXCHANGES: [&str; 7] = ["NMS", "NGM", "NCM", "NYQ", "ASE", "PCX", "BTS"];
 
 /// What makes a Yahoo `meta` not a US-listed stock or ETF, as a problem and a hint.
-#[cfg(feature = "scripting")]
 fn us_stock_problem(symbol: &str, meta: &serde_json::Value) -> Option<(String, String)> {
     let field = |k: &str| meta.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let kind = field("instrumentType");
@@ -1815,7 +1813,6 @@ fn us_stock_problem(symbol: &str, meta: &serde_json::Value) -> Option<(String, S
 /// Whether a setup may be made on `symbol` as a stock: a US-listed stock or ETF, as
 /// Yahoo reports it. One read, live; a sample or test source takes any stock symbol.
 /// The error is a problem and a hint.
-#[cfg(feature = "scripting")]
 pub fn check_us_stock(source: DataSource, symbol: &str) -> Result<(), (String, String)> {
     if source != DataSource::Live {
         return Ok(());
@@ -1854,11 +1851,17 @@ pub fn check_us_stock(source: DataSource, symbol: &str) -> Result<(), (String, S
 pub struct StockMinutes {
     pub bars: Vec<Bar>,
     pub adjustments: Vec<Adjustment>,
+    /// The end (ms) of the newest minute the source answered for, a minute without a
+    /// trade included: what the read covers. A minute past it may not be published yet.
+    /// None when it answered for none.
+    pub reached: Option<i64>,
 }
 
 /// The 1m bars of `symbol`'s regular session that closed in [`from_ms`, `to_ms`], with
 /// the splits and dividends of that window. One request, live; the caller keeps the
-/// window inside Yahoo's 7-day page and 30-day history.
+/// window inside Yahoo's 7-day page and 30-day history. Yahoo answers every bar in the
+/// terms of the latest split, so a read of an older page also brings the splits from
+/// its end up to now (a second request): its bars are in their terms.
 pub fn fetch_stock_minutes(
     source: DataSource,
     symbol: &str,
@@ -1886,9 +1889,14 @@ pub fn fetch_stock_minutes(
                 .json()
                 .map_err(|e| format!("Failed to parse Yahoo response: {e}"))?;
             let read = parse_stock_minutes(&body)?;
+            let mut adjustments = read.adjustments;
+            if to_ms < now_ms() - CATCH_UP_SPLITS_AFTER_MS {
+                adjustments.extend(fetch_stock_splits(symbol, to_ms, now_ms())?);
+            }
             Ok(StockMinutes {
                 bars: keep(&read.bars),
-                adjustments: read.adjustments,
+                adjustments,
+                reached: read.reached.map(|r| r.min(to_ms)),
             })
         }
         DataSource::Sample => {
@@ -1897,6 +1905,7 @@ pub fn fetch_stock_minutes(
             Ok(StockMinutes {
                 bars: keep(&data.bars),
                 adjustments: Vec::new(),
+                reached: Some(to_ms),
             })
         }
         DataSource::Replay { as_of } => {
@@ -1905,11 +1914,43 @@ pub fn fetch_stock_minutes(
             Ok(StockMinutes {
                 bars: keep(replay.minute_bars(symbol, from_ms, to)),
                 adjustments: replay.dividends(symbol, from_ms, to),
+                reached: Some(to),
             })
         }
         #[cfg(test)]
         DataSource::Unavailable => Err("upstream unavailable".into()),
     }
+}
+
+/// How old a page's end must be for a read of it to ask for the splits since: a read of
+/// the last hour is close enough to now that a split since would be in its own events.
+const CATCH_UP_SPLITS_AFTER_MS: i64 = 3_600_000;
+
+/// The splits of `symbol` that took effect from `from_ms` to `to_ms`, from Yahoo's
+/// daily chart: one request.
+fn fetch_stock_splits(symbol: &str, from_ms: i64, to_ms: i64) -> Result<Vec<Adjustment>, String> {
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&period1={}&period2={}&events=split",
+        path_segment(symbol)?,
+        from_ms.div_euclid(1000),
+        to_ms.div_euclid(1000) + 86_400
+    );
+    let resp = http()
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .map_err(|e| format!("Yahoo request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Yahoo API returned status {}", resp.status()));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("Failed to parse Yahoo response: {e}"))?;
+    Ok(parse_stock_minutes(&body)?
+        .adjustments
+        .into_iter()
+        .filter(|a| matches!(a, Adjustment::Split { .. }) && a.at() >= from_ms)
+        .collect())
 }
 
 /// The bars of `bars` that are whole minutes of the regular session and closed in
@@ -1932,7 +1973,8 @@ fn session_minutes(bars: &[Bar], from_ms: i64, to_ms: i64) -> Vec<Bar> {
 }
 
 /// The 1m rows of a Yahoo chart answer that have prices, and its splits and dividends.
-/// A row with a null price is a minute without a trade and is left out. Pure.
+/// A row with a null price is a minute without a trade and is left out, but counts in
+/// `reached`: Yahoo answered for it. Pure.
 fn parse_stock_minutes(body: &serde_json::Value) -> Result<StockMinutes, String> {
     let result = body
         .pointer("/chart/result/0")
@@ -1942,6 +1984,9 @@ fn parse_stock_minutes(body: &serde_json::Value) -> Result<StockMinutes, String>
     if let Some(times) = result.get("timestamp").and_then(|t| t.as_array()) {
         let price = |name: &str, i: usize| column(name)?.get(i)?.as_f64();
         for (i, t) in times.iter().enumerate() {
+            if let Some(minute) = t.as_i64().filter(|t| t % 60 == 0) {
+                out.reached = out.reached.max(Some((minute + 60) * 1000));
+            }
             let (Some(t), Some(open), Some(high), Some(low), Some(close)) = (
                 t.as_i64(),
                 price("open", i),
@@ -2894,7 +2939,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn only_us_listed_stocks_and_etfs_take_setups() {
         let meta = recorded("yahoo_nvda_1m_close.json")["chart"]["result"][0]["meta"].clone();
         assert_eq!(us_stock_problem("NVDA", &meta), None);

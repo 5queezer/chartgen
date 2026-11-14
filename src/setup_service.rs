@@ -113,6 +113,9 @@ struct State {
     made: HashMap<String, u64>,
     /// Per stock symbol, the time through which its 1m bars were read (ADR-0070).
     stock_reads: HashMap<String, i64>,
+    /// Per stock symbol, a read held back for an implausible first price: that bar's
+    /// time, and the polls it has been held.
+    stock_holds: HashMap<String, (i64, u32)>,
 }
 
 pub struct Setups {
@@ -369,11 +372,31 @@ impl Setups {
         record.is_scoring() && self.access.may_create(&record.owner)
     }
 
+    /// The feed of a setup: a stock's is its poll of Yahoo, whatever its symbol looks
+    /// like (ADR-0070: ABNB ends in BNB).
+    fn feed_of(&self, record: &Record) -> Result<FeedKey, String> {
+        match record.market {
+            Some(_) => Ok((record.symbol.clone(), FEED_INTERVAL.to_string())),
+            None => self.feed(&record.symbol),
+        }
+    }
+
+    /// The market of setups on `symbol`: a stock's when its symbol is read from Yahoo,
+    /// or when a stock setup on it is kept here already.
+    fn market_on(&self, st: &State, symbol: &str) -> Option<setups::Market> {
+        fetch::market_of(symbol).or_else(|| {
+            st.setups
+                .values()
+                .find(|h| h.record.symbol == symbol)
+                .and_then(|h| h.record.market)
+        })
+    }
+
     fn wanted_feeds(&self, st: &State) -> HashSet<FeedKey> {
         st.setups
             .values()
             .filter(|h| self.runs(&h.record))
-            .filter_map(|h| self.feed(&h.record.symbol).ok())
+            .filter_map(|h| self.feed_of(&h.record).ok())
             .collect()
     }
 
@@ -406,7 +429,7 @@ impl Setups {
             if st.watches.contains_key(&key) {
                 continue;
             }
-            if fetch::market_of(&key.0).is_some() {
+            if self.market_on(st, &key.0).is_some() {
                 let task = self
                     .runtime
                     .spawn(stocks::run_poll(self.me.clone(), key.0.clone()));
@@ -579,6 +602,7 @@ impl Setups {
             let read = fetch::StockMinutes {
                 bars: replay.minute_bars(&record.symbol, from, now).to_vec(),
                 adjustments: replay.dividends(&record.symbol, from, now),
+                reached: Some(now),
             };
             let log = stocks::score(&mut record, &read, now);
             if record != before {
@@ -647,6 +671,7 @@ impl Setups {
         st: &State,
         owner: &str,
         symbol: &str,
+        market: Option<setups::Market>,
         alert_pairs: &HashSet<FeedKey>,
     ) -> Result<(), String> {
         let limits = &self.limits;
@@ -689,7 +714,10 @@ impl Setups {
         let Some(hub) = &self.hub else {
             return Ok(());
         };
-        let feed = self.feed(symbol)?;
+        let feed = match market {
+            Some(_) => (symbol.to_string(), FEED_INTERVAL.to_string()),
+            None => self.feed(symbol)?,
+        };
         let mut pairs = self.wanted_feeds(st);
         pairs.extend(alert_pairs.iter().cloned());
         if !pairs.contains(&feed) && pairs.len() >= limits.pairs_total {
@@ -698,7 +726,7 @@ impl Setups {
                 limits.pairs_total
             ));
         }
-        if !st.watches.contains_key(&feed) && fetch::market_of(symbol).is_none() {
+        if !st.watches.contains_key(&feed) && market.is_none() {
             hub.feed_room(&feed).map_err(|_| {
                 "Limit reached: this server is starting too many feeds; try again in a minute"
                     .to_string()
@@ -792,7 +820,9 @@ impl Setups {
             .and_then(Value::as_str)
             .and_then(normalize_quote_symbol);
         // A symbol read from Yahoo is a stock's, with its costs and sessions (ADR-0070).
-        let market = symbol.as_deref().and_then(fetch::market_of);
+        let mut market = symbol
+            .as_deref()
+            .and_then(|s| self.market_on(&self.lock(), s));
         let draft = Draft::parse_for(args, market, now, &mut problems);
         if let (Some(given), None) = (args.get("symbol").and_then(Value::as_str), &symbol) {
             problems.push(
@@ -814,18 +844,28 @@ impl Setups {
         let alert_pairs = self.alert_pairs();
         let new_feed = {
             let st = self.lock();
-            self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
-            !st.watches.contains_key(&self.feed(&symbol)?)
+            self.check_capacity(&st, owner, &symbol, market, &alert_pairs)?;
+            let feed = match market {
+                Some(_) => (symbol.clone(), FEED_INTERVAL.to_string()),
+                None => self.feed(&symbol)?,
+            };
+            !st.watches.contains_key(&feed)
+        };
+        let as_stock = |symbol: &str| {
+            fetch::check_us_stock(self.source, symbol).map_err(|(message, hint)| {
+                setups::problems_text(&[Problem::new("symbol", message).hint(hint)])
+            })
         };
         match (&self.hub, new_feed, market) {
-            (Some(_), true, Some(_)) => {
-                fetch::check_us_stock(self.source, &symbol).map_err(|(message, hint)| {
-                    setups::problems_text(&[Problem::new("symbol", message).hint(hint)])
-                })?
+            (Some(_), true, Some(_)) => as_stock(&symbol)?,
+            (Some(hub), true, None) => {
+                if let Err(e) = hub.check_symbol(&symbol, FEED_INTERVAL) {
+                    // A symbol the quote suffix sends to Binance that Binance does not
+                    // list may be a US stock, such as ABNB (ADR-0070).
+                    as_stock(&symbol).map_err(|_| format!("Cannot watch {symbol}: {e}"))?;
+                    market = Some(setups::Market::UsEquity);
+                }
             }
-            (Some(hub), true, None) => hub
-                .check_symbol(&symbol, FEED_INTERVAL)
-                .map_err(|e| format!("Cannot watch {symbol}: {e}"))?,
             _ => {}
         }
         let needs_bars = requests.is_some() || draft.decision == Decision::Skip;
@@ -851,6 +891,10 @@ impl Setups {
                 .map_err(|p| setups::problems_text(&[p]))?
             }
         };
+        // A skip's expiry, and a setup found to be a stock only now, are checked here.
+        if let Some(problem) = market.and_then(|m| stocks::calendar_problem(m, levels.expires_at)) {
+            return Err(setups::problems_text(&[problem]));
+        }
 
         // The read of bars ran unlocked: another call may have taken the last pair. From
         // here to the write nobody may, alerts included, whose pairs are read afresh.
@@ -861,7 +905,7 @@ impl Setups {
             hook();
         }
         let mut st = self.lock();
-        self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
+        self.check_capacity(&st, owner, &symbol, market, &alert_pairs)?;
         let id = self.new_id(&mut st, owner);
         let (mut record, created) = Record::new(id, owner, symbol, draft, levels, placed, now);
         record.bracket = rule;
@@ -1253,8 +1297,11 @@ impl Setups {
     /// first gets the bars it missed; where those cannot be had, its log says which
     /// stretch was not scored. Blocking.
     fn on_bar(&self, key: &FeedKey, bar: MinuteBar) {
-        let on_feed =
-            |r: &Record| self.runs(r) && self.feed(&r.symbol).is_ok_and(|feed| feed == *key);
+        let on_feed = |r: &Record| {
+            self.runs(r)
+                && r.market.is_none()
+                && self.feed(&r.symbol).is_ok_and(|feed| feed == *key)
+        };
         let behind = self
             .lock()
             .setups

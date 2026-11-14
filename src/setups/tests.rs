@@ -2014,11 +2014,12 @@ fn a_stock_setups_time_stop_and_durations_count_session_time() {
     assert_eq!(shadows(&r).v3_time_stop.time_stop_at, Some(ny(10, 13, 30)));
     r.apply_bar(&at(ny(9, 9, 59), 182.0, 191.0, 181.0, 190.5));
     assert_eq!(r.status, Status::Won);
-    // Made at 14:00 and filled at 15:00; out at 09:59 on Monday: an hour on Friday and
-    // 29 minutes on Monday.
+    // Made at 14:00 and filled at 15:00; out at 09:59 on Monday. On the grid of 1h
+    // bars, 15:00 is half way through the 14:30 bar: 1.5 bars to Friday's close (its
+    // last bar a half hour), and 29 of the first bar's 60 minutes on Monday.
     let durations = r.durations();
     assert_eq!(durations.bars_to_fill, Some(1.0));
-    assert_eq!(durations.bars_to_exit, Some(1.48));
+    assert_eq!(durations.bars_to_exit, Some(1.98));
 }
 
 #[test]
@@ -2038,12 +2039,13 @@ fn a_skip_on_a_stock_runs_out_after_its_bars_of_session_time() {
     )
     .unwrap();
     assert_eq!(rule, Bracket::Atr);
-    let next_wednesday_close = chrono_tz::America::New_York
-        .with_ymd_and_hms(2026, 12, 2, 16, 0, 0)
+    // The close of the 24th bar of the session grid (`Market::skip_expiry`).
+    let next_wednesday = chrono_tz::America::New_York
+        .with_ymd_and_hms(2026, 12, 2, 13, 30, 0)
         .single()
         .unwrap()
         .timestamp_millis();
-    assert_eq!(levels.expires_at, next_wednesday_close);
+    assert_eq!(levels.expires_at, next_wednesday);
     // On a weekly chart, at most 90 days, as for Binance.
     let (levels, _) = stock_skip_bracket(
         Market::UsEquity,
@@ -2068,4 +2070,48 @@ fn a_binance_record_is_written_without_the_stock_fields() {
     assert_eq!(view["market"], "us_equity");
     let back: Record = serde_json::from_str(&serde_json::to_string(&stock).unwrap()).unwrap();
     assert_eq!(back, stock);
+}
+
+#[test]
+fn a_split_leaves_alone_levels_sent_after_it_took_effect() {
+    let (mut r, _) = stock_long(json!([190.0]), ny(20, 16, 0));
+    let split = ny(9, 9, 30);
+    // Sent before the split, in the old terms, and after it, in the new: the agent read
+    // them from charts Yahoo had adjusted already.
+    let mut before = r.levels.clone();
+    before.invalidation = 175.0;
+    r.revise(None, None, None, Some(before), "lower".into(), ny(7, 10, 0))
+        .unwrap();
+    let mut after = r.levels.clone();
+    after.entry = Zone {
+        low: 18.0,
+        high: 18.1,
+    };
+    after.invalidation = 17.5;
+    after.targets = vec![19.0];
+    r.revise(
+        None,
+        None,
+        None,
+        Some(after.clone()),
+        "new terms".into(),
+        split + 5 * MIN,
+    )
+    .unwrap();
+    r.adjust(Adjustment::Split {
+        at: split,
+        ratio: 10.0,
+    })
+    .unwrap();
+    assert_eq!(r.levels.invalidation, 17.6);
+    let pending: Vec<&Levels> = r
+        .pending
+        .iter()
+        .map(|p| match p {
+            Pending::Levels { levels, .. } => levels,
+            Pending::Cancel { .. } => unreachable!(),
+        })
+        .collect();
+    assert_eq!(pending[0].invalidation, 17.5);
+    assert_eq!(pending[1], &after);
 }

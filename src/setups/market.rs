@@ -16,8 +16,6 @@ pub const STOCK_SLIPPAGE_BPS_PER_SIDE: f64 = 3.0;
 /// Sessions a bar of a day or longer counts as: a week of 5, a month of 21.
 const SESSIONS_PER_WEEK: i64 = 5;
 const SESSIONS_PER_MONTH: i64 = 21;
-/// A full session, for durations in bars of a day or longer.
-const SESSION_MS: i64 = 390 * 60_000;
 /// How far ahead a session is looked for: longer than any closure there has been.
 const SEARCH_DAYS: i64 = 4000;
 
@@ -107,12 +105,33 @@ impl Market {
         }
     }
 
-    /// Session time a bar of `iv` holds, for durations in bars.
-    pub fn bar_ms(iv: &Interval) -> i64 {
-        match Self::sessions_per_bar(iv) {
-            Some(sessions) => sessions * SESSION_MS,
-            None => iv.secs() * 1000,
+    /// Bars of `iv` from `from` to `to` (ms), on the session grid, to fractions of a bar:
+    /// the bars a duration spans, as the time stop counts them. An intraday bar is a slot
+    /// of the session grid, the session's last one shorter; a bar of a day or longer is
+    /// that many sessions. Nights, weekends and holidays count for nothing.
+    pub fn bars_between(self, iv: &Interval, from: i64, to: i64) -> f64 {
+        let step = iv.secs() * 1000;
+        let per = Self::sessions_per_bar(iv);
+        let mut bars = 0.0;
+        for (open, close) in self.sessions_from(from) {
+            if open >= to {
+                break;
+            }
+            let (start, end) = (from.max(open), to.min(close));
+            bars += match per {
+                Some(per) => (end - start) as f64 / (close - open) as f64 / per as f64,
+                None => {
+                    // Where `t` is on this session's grid, in bars from its open.
+                    let at = |t: i64| {
+                        let k = ((t - open) / step).min((close - open - 1) / step);
+                        let (lo, hi) = (open + k * step, (open + (k + 1) * step).min(close));
+                        k as f64 + (t - lo) as f64 / (hi - lo) as f64
+                    };
+                    at(end) - at(start)
+                }
+            };
         }
+        bars
     }
 
     /// The close (ms) of the `n`th bar of `iv` after the bar holding `t`. Intraday bars
@@ -141,16 +160,16 @@ impl Market {
         None
     }
 
-    /// When a skip made at `now` runs out: `bars` bars of `iv` of session time later.
-    /// For a bar of a day or longer, the close of that many sessions after the one
-    /// holding `now`, or the next.
+    /// When a skip made at `now` runs out: at the close of the `bars`th bar of `iv` on
+    /// the session grid, the bar forming now the first. For a bar of a day or longer,
+    /// the close of that many sessions after the one holding `now`, or the next.
     pub fn skip_expiry(self, iv: &Interval, now: i64, bars: i64) -> Option<i64> {
         match Self::sessions_per_bar(iv) {
             Some(per) => self
                 .sessions_from(now)
                 .nth(usize::try_from(bars * per).ok()?)
                 .map(|(_, close)| close),
-            None => self.add_session_ms(now, bars * iv.secs() * 1000),
+            None => self.bar_close_after(iv, now, bars - 1),
         }
     }
 
@@ -290,15 +309,31 @@ mod tests {
     #[test]
     fn a_skip_runs_out_after_its_bars_of_session_time() {
         let hour = Interval::parse("1h").unwrap();
-        // 24 trading hours from Wednesday 15:00: an hour that day, none on Thanksgiving,
-        // 3.5h to Friday's 13:00 close, then 6.5h on each of Monday, Tuesday and
-        // Wednesday: the next Wednesday's close.
+        // 24 bars of the grid from Wednesday 15:00, the 14:30 bar the first: two that
+        // day, none on Thanksgiving, four to Friday's 13:00 close (the last a half
+        // hour), seven on each of Monday and Tuesday, and four on Wednesday: its 12:30
+        // bar closes at 13:30.
         let expiry = US.skip_expiry(&hour, ny(2026, 11, 25, 15, 0), 24);
-        assert_eq!(expiry, Some(ny(2026, 12, 2, 16, 0)));
+        assert_eq!(expiry, Some(ny(2026, 12, 2, 13, 30)));
         let day = Interval::parse("1D").unwrap();
         // 2 day bars from a Saturday: the close of the second session after Monday's.
         let expiry = US.skip_expiry(&day, ny(2026, 11, 7, 12, 0), 2);
         assert_eq!(expiry, Some(ny(2026, 11, 11, 16, 0)));
+    }
+
+    #[test]
+    fn durations_count_bars_of_the_session_grid() {
+        let hour = Interval::parse("1h").unwrap();
+        // Friday 15:00 is half way through the 14:30 bar: 1.5 bars to the close, and
+        // Monday's first bar is one more. The half-hour last bar counts as a bar.
+        let bars = US.bars_between(&hour, ny(2026, 11, 6, 15, 0), ny(2026, 11, 9, 10, 30));
+        assert!((bars - 2.5).abs() < 1e-9, "{bars}");
+        let last = US.bars_between(&hour, ny(2026, 11, 6, 15, 30), ny(2026, 11, 6, 16, 0));
+        assert!((last - 1.0).abs() < 1e-9, "{last}");
+        // Day bars are sessions: half of Wednesday's and all of Friday's short one.
+        let day = Interval::parse("1D").unwrap();
+        let days = US.bars_between(&day, ny(2026, 11, 25, 12, 45), ny(2026, 11, 27, 13, 0));
+        assert!((days - 1.5).abs() < 1e-9, "{days}");
     }
 
     #[test]
