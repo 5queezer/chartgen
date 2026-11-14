@@ -86,7 +86,7 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Write replay fixtures of real Binance 1m bars, for CHARTGEN_REPLAY_FIXTURES (ADR-0068)
+    /// Write replay fixtures of real 1m bars, from Binance or for a US stock from Yahoo, for CHARTGEN_REPLAY_FIXTURES (ADR-0068, ADR-0070)
     ReplayFixtures(replay_fixtures::Args),
 }
 

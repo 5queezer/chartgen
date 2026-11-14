@@ -6,6 +6,9 @@
 //! that symbol shares, so setups add no polling. On a replay server (`crate::replay`)
 //! there is no feed: the bars come from fixtures, up to the time a call asks about,
 //! and the setups live in a store of their own.
+//!
+//! A setup on a US stock (ADR-0070) has no feed: `stocks` polls Yahoo's 1m bars for it
+//! and moves it with the same scorer.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -89,7 +92,8 @@ impl Default for Limits {
 
 struct Watch {
     task: JoinHandle<()>,
-    _lease: FeedLease,
+    /// The hub's feed a Binance symbol holds; a stock's poll holds none.
+    _lease: Option<FeedLease>,
 }
 
 /// A setup and the bytes it holds: its record and its log.
@@ -107,6 +111,8 @@ struct State {
     changes: Window,
     /// Setups made so far per owner, for a replay's ids.
     made: HashMap<String, u64>,
+    /// Per stock symbol, the time through which its 1m bars were read (ADR-0070).
+    stock_reads: HashMap<String, i64>,
 }
 
 pub struct Setups {
@@ -265,6 +271,11 @@ impl Setups {
                     if let Some(first) = first.and_then(|b| serde_json::from_str(b).ok()) {
                         record.restate(&first);
                     }
+                    // A row a build from before stock setups wrote again has lost its
+                    // market (ADR-0070); a symbol read from Yahoo is only ever a stock's.
+                    if record.market.is_none() {
+                        record.market = fetch::market_of(&record.symbol);
+                    }
                     let key = (record.owner.clone(), record.id.clone());
                     st.setups.insert(
                         key,
@@ -342,11 +353,11 @@ impl Setups {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The feed of a symbol's 1m bars.
+    /// The feed of a symbol's 1m bars. A stock's is the symbol's poll of Yahoo.
     fn feed(&self, symbol: &str) -> Result<FeedKey, String> {
         match &self.hub {
-            Some(hub) => hub.feed_key(symbol, FEED_INTERVAL),
-            None => Ok((symbol.to_string(), FEED_INTERVAL.to_string())),
+            Some(hub) if fetch::market_of(symbol).is_none() => hub.feed_key(symbol, FEED_INTERVAL),
+            _ => Ok((symbol.to_string(), FEED_INTERVAL.to_string())),
         }
     }
 
@@ -395,6 +406,13 @@ impl Setups {
             if st.watches.contains_key(&key) {
                 continue;
             }
+            if fetch::market_of(&key.0).is_some() {
+                let task = self
+                    .runtime
+                    .spawn(stocks::run_poll(self.me.clone(), key.0.clone()));
+                st.watches.insert(key, Watch { task, _lease: None });
+                continue;
+            }
             // Refused now: the upkeep tries again. Bars missed meanwhile are read then.
             let (rx, lease) = match hub.watch_feed(&key) {
                 Ok(joined) => joined,
@@ -410,7 +428,7 @@ impl Setups {
                 key,
                 Watch {
                     task,
-                    _lease: lease,
+                    _lease: Some(lease),
                 },
             );
         }
@@ -557,12 +575,12 @@ impl Setups {
         let mut changed = Vec::new();
         for mut record in open {
             let before = record.clone();
-            let mut log = Vec::new();
-            for bar in replay.minute_bars(&record.symbol, record.next_bar_time(), now) {
-                if let Some(bar) = MinuteBar::of(bar) {
-                    log.extend(record.apply_bar(&bar));
-                }
-            }
+            let from = record.next_bar_time();
+            let read = fetch::StockMinutes {
+                bars: replay.minute_bars(&record.symbol, from, now).to_vec(),
+                adjustments: replay.dividends(&record.symbol, from, now),
+            };
+            let log = stocks::score(&mut record, &read, now);
             if record != before {
                 changed.push((record, log));
             }
@@ -680,7 +698,7 @@ impl Setups {
                 limits.pairs_total
             ));
         }
-        if !st.watches.contains_key(&feed) {
+        if !st.watches.contains_key(&feed) && fetch::market_of(symbol).is_none() {
             hub.feed_room(&feed).map_err(|_| {
                 "Limit reached: this server is starting too many feeds; try again in a minute"
                     .to_string()
@@ -769,18 +787,24 @@ impl Setups {
         }
         self.admit_change(owner)?;
         let mut problems = Vec::new();
-        let draft = Draft::parse(args, now, &mut problems);
         let symbol = args
             .get("symbol")
             .and_then(Value::as_str)
             .and_then(normalize_quote_symbol);
-        if let Some(symbol) = &symbol {
-            if fetch::detect_source(symbol) != "binance" {
-                problems.push(
-                    Problem::new("symbol", format!("{symbol} is not a Binance symbol"))
-                        .hint("setups are scored on Binance symbols only, such as BTCUSDT"),
-                );
-            }
+        // A symbol read from Yahoo is a stock's, with its costs and sessions (ADR-0070).
+        let market = symbol.as_deref().and_then(fetch::market_of);
+        let draft = Draft::parse_for(args, market, now, &mut problems);
+        if let (Some(given), None) = (args.get("symbol").and_then(Value::as_str), &symbol) {
+            problems.push(
+                Problem::new("symbol", format!("{given:?} is not a symbol")).hint(
+                    "a Binance symbol, such as BTCUSDT, or a US stock or ETF, such as NVDA or SPY",
+                ),
+            );
+        }
+        if let (Some(market), Some(levels)) =
+            (market, draft.as_ref().and_then(|d| d.levels.as_ref()))
+        {
+            problems.extend(stocks::calendar_problem(market, levels.expires_at));
         }
         let requests = self.drawing_requests(args, now, &mut problems);
         let (Some(draft), Some(symbol), true) = (draft, symbol, problems.is_empty()) else {
@@ -793,9 +817,16 @@ impl Setups {
             self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
             !st.watches.contains_key(&self.feed(&symbol)?)
         };
-        if let (Some(hub), true) = (&self.hub, new_feed) {
-            hub.check_symbol(&symbol, FEED_INTERVAL)
-                .map_err(|e| format!("Cannot watch {symbol}: {e}"))?;
+        match (&self.hub, new_feed, market) {
+            (Some(_), true, Some(_)) => {
+                fetch::check_us_stock(self.source, &symbol).map_err(|(message, hint)| {
+                    setups::problems_text(&[Problem::new("symbol", message).hint(hint)])
+                })?
+            }
+            (Some(hub), true, None) => hub
+                .check_symbol(&symbol, FEED_INTERVAL)
+                .map_err(|e| format!("Cannot watch {symbol}: {e}"))?,
+            _ => {}
         }
         let needs_bars = requests.is_some() || draft.decision == Decision::Skip;
         let (bars, closed) = match needs_bars {
@@ -810,8 +841,14 @@ impl Setups {
             Some(levels) => (levels.clone(), setups::Bracket::Agent),
             None => {
                 let secs = chartgen::data::interval_secs(&draft.interval).unwrap_or(60);
-                setups::skip_bracket(draft.direction, &bars[..closed], secs, now)
-                    .map_err(|p| setups::problems_text(&[p]))?
+                let bars = &bars[..closed];
+                match market {
+                    Some(m) => {
+                        setups::stock_skip_bracket(m, draft.direction, bars, &draft.interval, now)
+                    }
+                    None => setups::skip_bracket(draft.direction, bars, secs, now),
+                }
+                .map_err(|p| setups::problems_text(&[p]))?
             }
         };
 
@@ -828,6 +865,10 @@ impl Setups {
         let id = self.new_id(&mut st, owner);
         let (mut record, created) = Record::new(id, owner, symbol, draft, levels, placed, now);
         record.bracket = rule;
+        if let Some(market) = market {
+            record.market = Some(market);
+            record.costs = market.costs();
+        }
         let log = vec![created];
         self.check_bytes(&st, &record, &log)?;
         let view = self.view(&record, &log);
@@ -906,6 +947,9 @@ impl Setups {
             ),
             false => None,
         };
+        if let (Some(market), Some(levels)) = (current.market, &levels) {
+            problems.extend(stocks::calendar_problem(market, levels.expires_at));
+        }
         let requests = match frozen {
             true => None,
             false => self.drawing_requests(args, now, &mut problems),
@@ -1343,6 +1387,8 @@ async fn run_upkeep(setups: Weak<Setups>) {
         this.sync_feeds(&mut this.lock());
     }
 }
+
+mod stocks;
 
 #[cfg(test)]
 mod tests;

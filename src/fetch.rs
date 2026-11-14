@@ -1,6 +1,7 @@
 use crate::data::{self, Bar, OhlcvData, Session};
 use chartgen::binance_gate::{self, Gate};
 use chartgen::interval::{Interval, Unit};
+use chartgen::setups::{Adjustment, Market};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1769,6 +1770,224 @@ pub fn detect_source(symbol: &str) -> &'static str {
     }
 }
 
+/// The market a setup on `symbol` is scored in (ADR-0070): a stock's, for every symbol
+/// read from Yahoo; none for a Binance symbol, which trades around the clock.
+pub fn market_of(symbol: &str) -> Option<Market> {
+    (detect_source(symbol) == "yahoo").then_some(Market::UsEquity)
+}
+
+#[cfg(feature = "scripting")]
+/// The exchanges a stock setup may be on, by Yahoo's `exchangeName`: Nasdaq (NMS,
+/// NGM, NCM), NYSE (NYQ), NYSE American (ASE), NYSE Arca (PCX) and Cboe BZX (BTS).
+const US_EXCHANGES: [&str; 7] = ["NMS", "NGM", "NCM", "NYQ", "ASE", "PCX", "BTS"];
+
+/// What makes a Yahoo `meta` not a US-listed stock or ETF, as a problem and a hint.
+#[cfg(feature = "scripting")]
+fn us_stock_problem(symbol: &str, meta: &serde_json::Value) -> Option<(String, String)> {
+    let field = |k: &str| meta.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let kind = field("instrumentType");
+    let refused = |what: &str, hint: &str| Some((format!("{symbol} is {what}"), hint.to_string()));
+    let supported = "setups take Binance symbols, such as BTCUSDT, and stocks and ETFs listed in the US, such as NVDA or SPY";
+    match kind {
+        "EQUITY" | "ETF" => {}
+        "INDEX" => return refused("an index, which cannot be traded", "use an ETF that tracks it, such as SPY for the S&P 500, QQQ for the Nasdaq 100 or DIA for the Dow"),
+        "CRYPTOCURRENCY" => return refused("Yahoo's crypto", "a crypto setup is made on its Binance symbol, such as BTCUSDT"),
+        _ => return refused(&format!("not a stock or an ETF ({})", if kind.is_empty() { "unknown" } else { kind }), supported),
+    }
+    if field("exchangeTimezoneName") != "America/New_York" || field("currency") != "USD" {
+        return refused(
+            &format!("listed on {}, not in the US", field("fullExchangeName")),
+            supported,
+        );
+    }
+    if !US_EXCHANGES.contains(&field("exchangeName")) {
+        return refused(
+            &format!(
+                "traded on {}, not on a US exchange",
+                field("fullExchangeName")
+            ),
+            "OTC stocks are not scored: their costs are not those assumed here",
+        );
+    }
+    None
+}
+
+/// Whether a setup may be made on `symbol` as a stock: a US-listed stock or ETF, as
+/// Yahoo reports it. One read, live; a sample or test source takes any stock symbol.
+/// The error is a problem and a hint.
+#[cfg(feature = "scripting")]
+pub fn check_us_stock(source: DataSource, symbol: &str) -> Result<(), (String, String)> {
+    if source != DataSource::Live {
+        return Ok(());
+    }
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=5d",
+        path_segment(symbol).map_err(|e| (e, String::new()))?
+    );
+    let unread = |e: String| {
+        (
+            format!("cannot read {symbol} from Yahoo: {e}"),
+            "check the symbol, or try again in a minute".to_string(),
+        )
+    };
+    let resp = http()
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .map_err(|e| unread(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(unread(format!("status {}", resp.status())));
+    }
+    let body: serde_json::Value = resp.json().map_err(|e| unread(e.to_string()))?;
+    let meta = body
+        .pointer("/chart/result/0/meta")
+        .ok_or_else(|| unread("no meta in the answer".into()))?;
+    match us_stock_problem(symbol, meta) {
+        Some(problem) => Err(problem),
+        None => Ok(()),
+    }
+}
+
+/// A read of a stock's 1m bars (ADR-0070): the bars of the regular session, and the
+/// splits and dividends reported in the same window.
+#[derive(Debug, Default)]
+pub struct StockMinutes {
+    pub bars: Vec<Bar>,
+    pub adjustments: Vec<Adjustment>,
+}
+
+/// The 1m bars of `symbol`'s regular session that closed in [`from_ms`, `to_ms`], with
+/// the splits and dividends of that window. One request, live; the caller keeps the
+/// window inside Yahoo's 7-day page and 30-day history.
+pub fn fetch_stock_minutes(
+    source: DataSource,
+    symbol: &str,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<StockMinutes, String> {
+    let keep = |bars: &[Bar]| -> Vec<Bar> {
+        bars.iter()
+            .filter(|b| {
+                bar_ts(*b).is_some_and(|t| {
+                    let t = t * 1000;
+                    t >= from_ms && t + 60_000 <= to_ms && Market::UsEquity.in_session(t)
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    match source {
+        DataSource::Live => {
+            let url = format!(
+                "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1m&period1={}&period2={}&events=div%2Csplit",
+                path_segment(symbol)?,
+                from_ms.div_euclid(1000),
+                to_ms.div_euclid(1000)
+            );
+            let resp = http()
+                .get(&url)
+                .header("User-Agent", "Mozilla/5.0")
+                .send()
+                .map_err(|e| format!("Yahoo request failed: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Yahoo API returned status {}", resp.status()));
+            }
+            let body: serde_json::Value = resp
+                .json()
+                .map_err(|e| format!("Failed to parse Yahoo response: {e}"))?;
+            let read = parse_stock_minutes(&body)?;
+            Ok(StockMinutes {
+                bars: keep(&read.bars),
+                adjustments: read.adjustments,
+            })
+        }
+        DataSource::Sample => {
+            let wanted = ((to_ms - from_ms) / 60_000).clamp(1, 7 * 1440) as usize;
+            let data = data::sample_ohlcv(symbol, "1m", wanted, Some(to_ms), now_ms())?;
+            Ok(StockMinutes {
+                bars: keep(&data.bars),
+                adjustments: Vec::new(),
+            })
+        }
+        DataSource::Replay { as_of } => {
+            let (replay, as_of) = replay_at(as_of)?;
+            let to = to_ms.min(as_of);
+            Ok(StockMinutes {
+                bars: keep(replay.minute_bars(symbol, from_ms, to)),
+                adjustments: replay.dividends(symbol, from_ms, to),
+            })
+        }
+        #[cfg(test)]
+        DataSource::Unavailable => Err("upstream unavailable".into()),
+    }
+}
+
+/// The 1m rows of a Yahoo chart answer that have prices, and its splits and dividends.
+/// A row with a null price is a minute without a trade and is left out. Pure.
+fn parse_stock_minutes(body: &serde_json::Value) -> Result<StockMinutes, String> {
+    let result = body
+        .pointer("/chart/result/0")
+        .ok_or("Yahoo response missing chart.result[0]")?;
+    let mut out = StockMinutes::default();
+    let column = |name: &str| result.pointer(&format!("/indicators/quote/0/{name}"));
+    if let Some(times) = result.get("timestamp").and_then(|t| t.as_array()) {
+        let price = |name: &str, i: usize| column(name)?.get(i)?.as_f64();
+        for (i, t) in times.iter().enumerate() {
+            let (Some(t), Some(open), Some(high), Some(low), Some(close)) = (
+                t.as_i64(),
+                price("open", i),
+                price("high", i),
+                price("low", i),
+                price("close", i),
+            ) else {
+                continue;
+            };
+            out.bars.push(Bar {
+                open,
+                high,
+                low,
+                close,
+                volume: price("volume", i).unwrap_or(0.0),
+                date: t.to_string(),
+            });
+        }
+    }
+    let events = |kind: &str| {
+        result
+            .pointer(&format!("/events/{kind}"))
+            .and_then(|e| e.as_object())
+            .into_iter()
+            .flat_map(|e| e.values())
+    };
+    for split in events("splits") {
+        let at = split.get("date").and_then(|v| v.as_i64());
+        let num = split.get("numerator").and_then(|v| v.as_f64());
+        let den = split.get("denominator").and_then(|v| v.as_f64());
+        if let (Some(at), Some(num), Some(den)) = (at, num, den) {
+            if num > 0.0 && den > 0.0 {
+                out.adjustments.push(Adjustment::Split {
+                    at: at * 1000,
+                    ratio: num / den,
+                });
+            }
+        }
+    }
+    for dividend in events("dividends") {
+        let at = dividend.get("date").and_then(|v| v.as_i64());
+        let amount = dividend.get("amount").and_then(|v| v.as_f64());
+        if let (Some(at), Some(amount)) = (at, amount) {
+            out.adjustments.push(Adjustment::Dividend {
+                at: at * 1000,
+                amount,
+            });
+        }
+    }
+    out.adjustments.sort_by_key(|a| match a {
+        Adjustment::Split { at, .. } | Adjustment::Dividend { at, .. } => *at,
+    });
+    Ok(out)
+}
+
 /// Group consecutive bars into epoch-aligned `bucket_secs` buckets (1h → 4h,
 /// 1m → 3m) for 24/7 instruments and for 3m. Each bucket is dated by its grid
 /// start. Grid alignment keeps bucket boundaries identical across overlapping
@@ -2599,6 +2818,103 @@ mod tests {
 
     fn fixture() -> serde_json::Value {
         serde_json::from_str(AAPL_1H_LIVE).unwrap()
+    }
+
+    // --- Stock setups' 1m reads (ADR-0070), on answers recorded on 2026-11-14 ---
+
+    fn recorded(name: &str) -> serde_json::Value {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_stocks_minutes_leave_out_null_rows_and_keep_the_last_price_row_for_the_session_to_drop() {
+        // NVDA on 2026-11-13: the first two minutes, the last two and the 16:00 row.
+        let read = parse_stock_minutes(&recorded("yahoo_nvda_1m_close.json")).unwrap();
+        let times: Vec<i64> = read.bars.iter().map(|b| bar_ts(b).unwrap()).collect();
+        let open = 1_794_580_200;
+        assert_eq!(
+            times,
+            [open, open + 60, open + 23_280, open + 23_340, open + 23_400]
+        );
+        assert!(read.adjustments.is_empty());
+        // The 16:00 row is a price, not a minute of the session.
+        let session: Vec<bool> = times
+            .iter()
+            .map(|t| Market::UsEquity.in_session(t * 1000))
+            .collect();
+        assert_eq!(session, [true, true, true, true, false]);
+        // BRT, thinly traded: minutes without a trade come as nulls and are no bars.
+        let thin = parse_stock_minutes(&recorded("yahoo_brt_1m_nulls.json")).unwrap();
+        assert_eq!(thin.bars.len(), 1);
+        assert_eq!(thin.bars[0].close, 12.65999984741211);
+    }
+
+    #[test]
+    fn a_stocks_read_brings_its_dividends_and_splits() {
+        // O went ex 0.272 at the open of 2026-10-30, inside this 1m read.
+        let read = parse_stock_minutes(&recorded("yahoo_o_1m_dividend.json")).unwrap();
+        assert_eq!(
+            read.adjustments,
+            [Adjustment::Dividend {
+                at: 1_793_367_000_000,
+                amount: 0.272
+            }]
+        );
+        assert_eq!(read.bars.len(), 4);
+        // NVDA's 10:1 split, as Yahoo reported it on 2026-11-14.
+        let split = serde_json::json!({ "chart": { "result": [{ "events": {
+            "splits": { "1718026200": { "date": 1718026200, "numerator": 10.0,
+                "denominator": 1.0, "splitRatio": "10:1" } } } }] } });
+        assert_eq!(
+            parse_stock_minutes(&split).unwrap().adjustments,
+            [Adjustment::Split {
+                at: 1_718_026_200_000,
+                ratio: 10.0
+            }]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn only_us_listed_stocks_and_etfs_take_setups() {
+        let meta = recorded("yahoo_nvda_1m_close.json")["chart"]["result"][0]["meta"].clone();
+        assert_eq!(us_stock_problem("NVDA", &meta), None);
+        let with = |field: &str, value: &str| {
+            let mut m = meta.clone();
+            m[field] = serde_json::json!(value);
+            m
+        };
+        assert_eq!(
+            us_stock_problem("SPY", &with("instrumentType", "ETF")),
+            None
+        );
+        assert_eq!(us_stock_problem("SPY", &with("exchangeName", "PCX")), None);
+        let problem = |m: &serde_json::Value| us_stock_problem("X", m).unwrap();
+        let index = problem(&with("instrumentType", "INDEX"));
+        assert!(
+            index.0.contains("an index") && index.1.contains("SPY"),
+            "{index:?}"
+        );
+        assert!(problem(&with("instrumentType", "CRYPTOCURRENCY"))
+            .1
+            .contains("BTCUSDT"));
+        assert!(problem(&with("instrumentType", "FUTURE"))
+            .0
+            .contains("not a stock"));
+        assert!(problem(&with("exchangeTimezoneName", "Europe/Berlin"))
+            .0
+            .contains("not in the US"));
+        assert!(problem(&with("currency", "EUR"))
+            .0
+            .contains("not in the US"));
+        assert!(problem(&with("exchangeName", "PNK")).1.contains("OTC"));
+    }
+
+    #[test]
+    fn a_symbol_read_from_yahoo_is_a_stocks_and_a_binance_one_has_no_market() {
+        assert_eq!(market_of("NVDA"), Some(Market::UsEquity));
+        assert_eq!(market_of("BTCUSDT"), None);
     }
 
     fn win(api_interval: &str, period1: i64) -> YahooWindow<'_> {

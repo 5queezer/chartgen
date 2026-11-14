@@ -14,6 +14,7 @@ use std::sync::{Mutex, OnceLock};
 
 use chartgen::data::Bar;
 use chartgen::interval::{Interval, Unit};
+use chartgen::setups::Adjustment;
 use serde::Deserialize;
 
 const MINUTE_MS: i64 = 60_000;
@@ -74,15 +75,20 @@ pub fn fixtures_dir() -> Option<String> {
 }
 
 /// `{"symbol": "BTCUSDT", "bars": [[open_time_s, open, high, low, close, volume], ...]}`.
+/// A stock's may add `"dividends": [[ex_date_s, amount], ...]` (ADR-0070).
 #[derive(Deserialize)]
 struct Fixture {
     symbol: String,
     bars: Vec<(i64, f64, f64, f64, f64, f64)>,
+    #[serde(default)]
+    dividends: Vec<(i64, f64)>,
 }
 
 pub struct Replay {
     /// 1m bars per symbol, oldest first.
     bars: BTreeMap<String, Vec<Bar>>,
+    /// A stock's dividends per symbol, as (ex-date ms, amount), oldest first.
+    dividends: BTreeMap<String, Vec<(i64, f64)>>,
     /// The latest time any call has asked about. One clock for every tool and every
     /// caller: one process is one run, and registration is open, so a clock per caller
     /// would let a second client read a time the first has already passed.
@@ -141,6 +147,7 @@ impl Replay {
             .collect();
         paths.sort();
         let mut bars = BTreeMap::new();
+        let mut dividends = BTreeMap::new();
         for path in paths {
             let name = path.display();
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
@@ -150,18 +157,44 @@ impl Replay {
             if bars.insert(fixture.symbol.clone(), parsed).is_some() {
                 return Err(format!("{name}: {} has a fixture already", fixture.symbol));
             }
+            let mut paid = Vec::new();
+            for &(t, amount) in &fixture.dividends {
+                if !amount.is_finite() || amount <= 0.0 {
+                    return Err(format!(
+                        "{name}: the dividend at {t} is not an amount above 0"
+                    ));
+                }
+                paid.push((t * 1000, amount));
+            }
+            paid.sort_by_key(|d| d.0);
+            dividends.insert(fixture.symbol, paid);
         }
         if bars.is_empty() {
             return Err(format!("{} holds no fixture", dir.display()));
         }
-        Ok(Replay::of(bars))
+        Ok(Replay {
+            dividends,
+            ..Replay::of(bars)
+        })
     }
 
     pub fn of(bars: BTreeMap<String, Vec<Bar>>) -> Replay {
         Replay {
             bars,
+            dividends: BTreeMap::new(),
             clock: Mutex::default(),
         }
+    }
+
+    /// The dividends of a stock that went ex from `from_ms` to `to_ms`.
+    pub fn dividends(&self, symbol: &str, from_ms: i64, to_ms: i64) -> Vec<Adjustment> {
+        self.dividends
+            .get(symbol)
+            .into_iter()
+            .flatten()
+            .filter(|(at, _)| (from_ms..=to_ms).contains(at))
+            .map(|&(at, amount)| Adjustment::Dividend { at, amount })
+            .collect()
     }
 
     fn fixture_bars(fixture: &Fixture) -> Result<Vec<Bar>, String> {
@@ -273,11 +306,21 @@ impl Replay {
             ));
         }
         let minutes = self.minute_bars(symbol, i64::MIN, as_of);
+        // A stock's intraday bars start at its session's open, as Yahoo's do (ADR-0070).
+        let market = crate::fetch::market_of(symbol);
+        let start_of = |t: i64| match market {
+            Some(m) => m.bar_start(&iv, t * 1000) / 1000,
+            None => iv.grid_start(t),
+        };
+        let end_of = |start: i64| match market {
+            Some(m) => m.bar_end(&iv, start * 1000) / 1000,
+            None => iv.grid_end(start),
+        };
         let mut out: Vec<Bar> = Vec::new();
         let mut bucket = None;
         for bar in minutes {
             let t = open_ms(bar) / 1000;
-            let start = iv.grid_start(t);
+            let start = start_of(t);
             if bucket != Some(start) {
                 bucket = Some(start);
                 out.push(Bar {
@@ -299,7 +342,7 @@ impl Replay {
         out.retain(|b| {
             let start = open_ms(b) / 1000;
             start >= first
-                && iv.grid_end(start) * 1000 <= as_of
+                && end_of(start) * 1000 <= as_of
                 && end_ms.is_none_or(|end| start * 1000 < end)
         });
         let has_more = out.len() > limit;
@@ -473,6 +516,7 @@ mod tests {
         let fixture = |bars| Fixture {
             symbol: "BTCUSDT".into(),
             bars,
+            dividends: Vec::new(),
         };
         let ok = (T0, 1.0, 2.0, 0.5, 1.5, 3.0);
         assert!(
