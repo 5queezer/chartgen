@@ -5,7 +5,7 @@ sidebar:
   order: 70
 ---
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-11-14
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (a setup's symbol can be a US
 stock or ETF read from Yahoo; Binance setups are unchanged) and

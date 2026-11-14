@@ -96,4 +96,4 @@ one and link both ways.
 | [0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) | Server alerts on an indicator's line, at bar closes | Accepted | 2026-11-12 |
 | [0068](/chartgen/decisions/0068-replay-over-real-history/) | Replay over real Binance history | Accepted (phase 1); phases 2 and 3 proposed | 2026-11-12 |
 | [0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) | An alert at a bar's close | Accepted | 2026-11-13 |
-| [0070](/chartgen/decisions/0070-stock-setups/) | Setups on US stocks, scored on Yahoo's 1m bars | Proposed | 2026-11-14 |
+| [0070](/chartgen/decisions/0070-stock-setups/) | Setups on US stocks, scored on Yahoo's 1m bars | Accepted | 2026-11-14 |
