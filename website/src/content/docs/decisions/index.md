@@ -86,7 +86,7 @@ one and link both ways.
 | [0056](/chartgen/decisions/0056-png-and-summary-warm-up/) | A png or summary reads its indicators' warmup | Accepted | 2026-11-09 |
 | [0057](/chartgen/decisions/0057-e2e-shards/) | The e2e suite runs in duration-balanced CI shards | Accepted | 2026-11-09 |
 | [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) | Refresh tokens, so a client authorized once keeps working | Accepted | 2026-11-11 |
-| [0059](/chartgen/decisions/0059-setups-paper-scored/) | A setup is a stored record, scored on paper by the server | Accepted; amended by [0066](/chartgen/decisions/0066-shadow-exit-variants/) and [0068](/chartgen/decisions/0068-replay-over-real-history/) | 2026-11-11 |
+| [0059](/chartgen/decisions/0059-setups-paper-scored/) | A setup is a stored record, scored on paper by the server | Accepted; amended by [0066](/chartgen/decisions/0066-shadow-exit-variants/), [0068](/chartgen/decisions/0068-replay-over-real-history/) and [0070](/chartgen/decisions/0070-stock-setups/) | 2026-11-11 |
 | [0060](/chartgen/decisions/0060-image-built-in-ci/) | The production image is built in CI and pulled by the host | Accepted | 2026-11-11 |
 | [0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) | An alert can wake the owner's agent | Accepted | 2026-11-11 |
 | [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) | Other origins get an answer on the MCP and OAuth client routes only, and the app is not framed | Accepted | 2026-11-11 |
@@ -96,3 +96,4 @@ one and link both ways.
 | [0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) | Server alerts on an indicator's line, at bar closes | Accepted | 2026-11-12 |
 | [0068](/chartgen/decisions/0068-replay-over-real-history/) | Replay over real Binance history | Accepted (phase 1); phases 2 and 3 proposed | 2026-11-12 |
 | [0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) | An alert at a bar's close | Accepted | 2026-11-13 |
+| [0070](/chartgen/decisions/0070-stock-setups/) | Setups on US stocks, scored on Yahoo's 1m bars | Proposed | 2026-11-14 |

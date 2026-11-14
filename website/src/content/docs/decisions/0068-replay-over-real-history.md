@@ -5,7 +5,7 @@ sidebar:
   order: 68
 ---
 
-**Status:** Accepted (phase 1); phases 2 and 3 proposed
+**Status:** Accepted (phase 1); phases 2 and 3 proposed; amended by [ADR-0070](/chartgen/decisions/0070-stock-setups/) (stock symbols in fixtures and in the builder)
 **Date:** 2026-11-12
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (a replay's fixtures may be
 real history written by a fixture builder; the engine is unchanged)
