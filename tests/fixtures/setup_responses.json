@@ -489,9 +489,10 @@
         "mae_r": -1.0,
         "mfe_at": 1767276240000,
         "mfe_r": 0.0275,
+        "near_stop_at": 1767276720000,
         "pending": [],
         "result_r": -1.1547,
-        "revisions": 4,
+        "revisions": 5,
         "scored_through": 1767276900000,
         "shadow_results": {
           "v1_half_t1_be": {

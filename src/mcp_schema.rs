@@ -198,6 +198,24 @@ pub fn tools_list_result() -> Value {
                 }
             },
             {
+                "name": "get_market_context",
+                "description": "A symbol's market at a glance, the same context a wake-up carries (ADR-0072): {symbol, at, price, trend: {4h, 1d}, funding_pct, long_short: {long, ratio}, fear_greed: {value, label}, line}. trend is up when the last price is above the 20-bar EMA and that is above the 50-bar EMA, down when both are the other way round, mixed otherwise. funding_pct is the latest funding rate in percent; long_short.long the share of Binance accounts that are long, ratio long/short; fear_greed the crypto Fear & Greed index (alternative.me). The futures parts and the index are for Binance symbols only, and a part that could not be read is left out. line is all of it in one line. Read at most once a minute per symbol; a symbol that cannot be read answers {symbol, error}. There is no macro calendar here: whether a macro blackout is on is not part of it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "minItems": 1,
+                            // The same number as `market_context::MAX_SYMBOLS`.
+                            "maxItems": 10,
+                            "description": "Ticker symbols, e.g. [\"BTCUSDT\", \"ETHUSDT\"]: 1 to 10, trimmed, uppercased and deduplicated."
+                        }
+                    },
+                    "required": ["symbols"]
+                }
+            },
+            {
                 "name": "get_footprint",
                 "description": "Volume footprint of chart bars: buy and sell volume per price row of each bar, built from lower-timeframe bars (not from trades). `intrabar_interval` says which; null means nothing finer exists and the bar is its own only intrabar. `side` says how volume was split: 'taker_volume' uses Binance's taker buy volume per kline, 'close_vs_open' gives each intrabar to one side (Yahoo has no aggressor data). Row placement is always an estimate: each intrabar's volume is spread over its high-low range. The forming bar repaints as data arrives. Costs up to 7 Binance requests on a cold load, and is cached.",
                 "inputSchema": {
@@ -475,7 +493,7 @@ pub const EVENT_TOOLS: [&str; 1] = ["list_events"];
 pub fn event_tools() -> Vec<Value> {
     vec![json!({
         "name": "list_events",
-        "description": "What happened that could wake your agent, read back: your alerts that fired with notify_agent, and the status changes of your setups (triggered, won, invalidated, expired, cancelled). Every event is logged before any wake-up is tried and stays for 7 days whether or not it was delivered, so this answers what you missed while your receiver was away. Oldest first. Pass the cursor of the last answer as after to read on. An event says what happened and when; read the setup or alert as it is now with get_setup and list_server_alerts.",
+        "description": "What happened that could wake your agent, read back: your alerts that fired with notify_agent, the status changes of your setups (triggered, won, invalidated, expired, cancelled), and a take that went 0.8 R against it (setup.near_stop, once per setup). Every event is logged before any wake-up is tried and stays for 7 days whether or not it was delivered, so this answers what you missed while your receiver was away. Oldest first. Pass the cursor of the last answer as after to read on. An event says what happened and when; read the setup or alert as it is now with get_setup and list_server_alerts.",
         "inputSchema": {
             "type": "object",
             "properties": {

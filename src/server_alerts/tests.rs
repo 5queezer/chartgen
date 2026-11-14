@@ -4010,7 +4010,7 @@ async fn a_thesis_is_cut_to_what_fits_on_a_whole_character() {
         .collect();
     for thesis in ["𝄞".repeat(chartgen::setups::MAX_THESIS), mixed] {
         setup.thesis = thesis.clone();
-        let body = wake_up_body(&fired, Some(&alert), Some(&setup));
+        let body = wake_up_body(&fired, Some(&alert), Some(&setup), None);
         assert!(body.len() <= MAX_AGENT_BODY, "{} bytes", body.len());
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(sent["setup"]["thesis_cut"], true, "{} bytes", body.len());
@@ -4027,7 +4027,7 @@ async fn a_thesis_is_cut_to_what_fits_on_a_whole_character() {
     }
     // One that fits is whole and not marked.
     setup.thesis = "é".repeat(chartgen::setups::MAX_THESIS);
-    let body = wake_up_body(&fired, Some(&alert), Some(&setup));
+    let body = wake_up_body(&fired, Some(&alert), Some(&setup), None);
     let sent: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(sent["setup"]["thesis"], setup.thesis.as_str());
     assert!(sent["setup"].get("thesis_cut").is_none(), "{body}");

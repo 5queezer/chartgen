@@ -2172,6 +2172,92 @@ async fn a_status_the_server_gives_a_setup_is_logged_at_the_bars_time_and_wakes_
     assert!(raw.find("\"levels\":").unwrap() < raw.find("\"thesis\":").unwrap());
 }
 
+/// ADR-0072: a take that went 0.8 R against it wakes the agent once, and every wake-up
+/// carries the market around it, after what happened and before the setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_take_near_its_stop_wakes_the_agent_once_with_the_market_around_it() {
+    let (port, seen) = receiver().await;
+    let store = mem();
+    let (s, _alerts) = waking(store, port, "owner");
+    let setup = created(&s, "owner");
+    let (t, p) = (first_bar(&setup), mid(&setup));
+    // Filled at 0.98 p with a risk of 0.03 p: 0.8 R against is 0.956 p.
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    s.on_bar(
+        &key(),
+        bar(t + MINUTE_MS, p * 0.976, p * 0.977, p * 0.955, p * 0.96),
+    );
+    s.on_bar(
+        &key(),
+        bar(t + 2 * MINUTE_MS, p * 0.96, p * 0.97, p * 0.952, p * 0.96),
+    );
+
+    let log = events_of(store, "owner");
+    let kinds: Vec<(&str, i64)> = log.iter().map(|e| (e.kind.as_str(), e.at)).collect();
+    assert_eq!(
+        kinds,
+        [("setup.status", t), ("setup.near_stop", t + MINUTE_MS)],
+        "once, at its bar's time"
+    );
+    let near: Value = serde_json::from_str(&log[1].body).unwrap();
+    assert_eq!(near, json!({ "mae_r": -0.8333, "gap": false }));
+
+    for _ in 0..600 {
+        if seen.lock().unwrap().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let raw: Vec<String> = seen.lock().unwrap().clone();
+    assert_eq!(raw.len(), 2, "both wake the agent");
+    let body = raw.iter().find(|b| b.contains("setup.near_stop")).unwrap();
+    let woke: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(woke["id"], log[1].id.as_str());
+    assert_eq!(woke["change"], near);
+    assert_eq!(woke["setup"]["near_stop_at"], json!(t + MINUTE_MS));
+    // A unit test reads the sample source, which has the price and the trends.
+    for b in &raw {
+        let woke: Value = serde_json::from_str(b).unwrap();
+        let context = &woke["context"];
+        assert_eq!(context["symbol"], "BTCUSDT", "{b}");
+        assert!(context["price"].as_f64().is_some() && context["trend"]["4h"].is_string());
+        assert!(b.find("\"change\":").unwrap() < b.find("\"context\":").unwrap());
+        assert!(b.find("\"context\":").unwrap() < b.find("\"setup\":").unwrap());
+    }
+
+    // After the server was away, a stop in the same write says more than the warning
+    // before it: both are logged, and only the stop wakes the agent.
+    let other = created(&s, "owner");
+    let (t, p) = (first_bar(&other).max(t + 3 * MINUTE_MS), mid(&other));
+    let mut record = {
+        let st = s.lock();
+        st.setups[&("owner".to_string(), id_of(&other))]
+            .record
+            .clone()
+    };
+    let mut entries = Vec::new();
+    for b in [
+        bar(t, p, p, p * 0.975, p * 0.976),
+        bar(t + MINUTE_MS, p * 0.976, p * 0.977, p * 0.955, p * 0.96),
+        bar(t + 2 * MINUTE_MS, p * 0.96, p * 0.96, p * 0.94, p * 0.945),
+    ] {
+        entries.extend(record.apply_bar(&b));
+    }
+    let events = s.status_events(&[(record, entries)]);
+    let told: Vec<(&str, bool)> = events
+        .iter()
+        .map(|e| (e.kind.as_str(), e.deliver))
+        .collect();
+    assert_eq!(
+        told,
+        [
+            ("setup.status", true),
+            ("setup.near_stop", false),
+            ("setup.status", true)
+        ]
+    );
+}
+
 /// A cancellation is the agent's own act, and nobody waits on a skip: both are in the
 /// log and neither wakes anyone. Nor does another owner's setup.
 #[tokio::test(flavor = "multi_thread")]
@@ -3462,7 +3548,10 @@ async fn thanksgiving_ends_a_long_at_wednesdays_close_and_fridays_early_close_en
             (holiday["gap"].clone(), early["gap"].clone()),
             (json!(false), json!(false))
         );
-        assert_eq!(kinds(&early), ["created", "status", "status"]);
+        // Friday's low, 158.39, is 0.835 R under the fill at 175.57 with the stop at 155:
+        // near the stop, said once (ADR-0072).
+        assert_eq!(kinds(&early), ["created", "status", "near_stop", "status"]);
+        assert_eq!(kinds(&holiday), ["created", "status", "status"]);
     });
 }
 

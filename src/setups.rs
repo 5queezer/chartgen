@@ -54,6 +54,9 @@ pub const SHADOW_TIME_STOP_BARS: (u32, u32) = (12, 6);
 const SHADOW_TIME_STOP_LONG_FROM_SECS: i64 = 4 * 3600;
 /// v3 exits at that close when it is below this R from the fill.
 pub const SHADOW_TIME_STOP_KEEP_R: f64 = 0.5;
+/// How far against a filled take, in R, the server says it is near its stop, once
+/// (ADR-0072): 0.8 R of the 1 R to the invalidation.
+pub const NEAR_STOP_R: f64 = 0.8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -263,6 +266,10 @@ pub struct Record {
     /// The splits and dividends applied to a stock setup, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adjustments: Vec<Adjustment>,
+    /// Open time of the 1m bar in which a filled take first went `NEAR_STOP_R` against
+    /// the position and stayed open (ADR-0072). Set once; not written until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_stop_at: Option<i64>,
 }
 
 /// How a shadow variant ended, or that it has not.
@@ -393,6 +400,8 @@ pub enum Kind {
     Gap,
     /// A split or a dividend of a stock setup's stock (ADR-0070).
     Adjusted,
+    /// A filled take went `NEAR_STOP_R` against the position (ADR-0072).
+    NearStop,
 }
 
 /// A corporate action applied to a stock setup (ADR-0070). `at` is when it took effect:
@@ -629,7 +638,7 @@ fn one_of<T: for<'de> Deserialize<'de>>(
 }
 
 /// Fields the server sets. Named so that an agent sending one learns why it is refused.
-const SERVER_FIELDS: [&str; 19] = [
+const SERVER_FIELDS: [&str; 20] = [
     "status",
     "result_r",
     "shadow_results",
@@ -638,6 +647,7 @@ const SERVER_FIELDS: [&str; 19] = [
     "mae_at",
     "mfe_at",
     "closest_approach_r",
+    "near_stop_at",
     "bars_to_fill",
     "bars_to_exit",
     "bars_to_mae",
@@ -1254,6 +1264,7 @@ impl Record {
             market: None,
             last_close: None,
             adjustments: Vec::new(),
+            near_stop_at: None,
         };
         // What was stated goes into the log's first entry: the log is append-only in
         // the store, so this is the copy that cannot be rewritten after the outcome.
@@ -1918,6 +1929,7 @@ impl Record {
             return out;
         }
         let first = self.scored_through.is_none();
+        let mae_before = self.mae_r;
         self.scored_through = Some(bar.time);
         // Closed with a shadow still open: only the shadows move (ADR-0066).
         if !self.status.is_open() {
@@ -2037,6 +2049,7 @@ impl Record {
                 out.push(self.close(Status::Invalidated, Some(stop), bar));
             } else {
                 self.excursion(against, price, bar.time);
+                out.extend(self.near_stop(mae_before, bar.time));
             }
             return out;
         }
@@ -2076,7 +2089,37 @@ impl Record {
                 self.excursion(against, with, bar.time);
             }
         }
+        out.extend(self.near_stop(mae_before, bar.time));
         out
+    }
+
+    /// The entry that says a take is near its stop: in the first bar that took it
+    /// `NEAR_STOP_R` or further against the position and left it open. A bar that stops
+    /// it out says so with its status instead. `mae_before` is its excursion before
+    /// this bar.
+    fn near_stop(&mut self, mae_before: Option<f64>, bar_time: i64) -> Option<Revision> {
+        let mae = self.mae_r?;
+        let first = self.near_stop_at.is_none() && self.mae_at == Some(bar_time);
+        if self.decision != Decision::Take
+            || self.status != Status::Triggered
+            || !first
+            || mae > -NEAR_STOP_R
+        {
+            return None;
+        }
+        self.near_stop_at = Some(bar_time);
+        let mut changes = Map::new();
+        changed(&mut changes, "mae_r", json!(mae_before), json!(mae));
+        changed(&mut changes, "near_stop_at", Value::Null, json!(bar_time));
+        Some(self.log(
+            bar_time,
+            By::Server,
+            Kind::NearStop,
+            Some(format!(
+                "price went {mae} R against the position, {NEAR_STOP_R} R or more of the way to the invalidation"
+            )),
+            changes,
+        ))
     }
 
     /// The bars the server did not see, written to the log: this setup's result does

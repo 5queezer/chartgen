@@ -447,6 +447,26 @@ export interface GetIndicatorsInput {
   symbol: string;
 }
 
+export interface GetMarketContextInput {
+  /**
+   * Ticker symbols, e.g. ["BTCUSDT", "ETHUSDT"]: 1 to 10, trimmed, uppercased and deduplicated.
+   *
+   * @minItems 1
+   * @maxItems 10
+   */
+  symbols:
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string];
+}
+
 export interface GetNotificationsInput {}
 
 export interface GetOrdersInput {
