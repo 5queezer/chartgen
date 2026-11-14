@@ -1642,7 +1642,9 @@ fn restrict(path: &Path) {
 
 /// `CHARTGEN_DB`, else `~/.chartgen/chartgen.db`.
 pub fn db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("CHARTGEN_DB") {
+    // `var_os`, as the debug guard in `global()` reads it: a path that is not Unicode is
+    // still the one asked for, never a reason to fall back to the default.
+    if let Some(p) = std::env::var_os("CHARTGEN_DB") {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME")
