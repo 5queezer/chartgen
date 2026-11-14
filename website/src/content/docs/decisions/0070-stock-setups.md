@@ -278,13 +278,16 @@ on Binance symbols.
 - **Replay fixtures (`tests/fixtures/replay_stocks/`).** NVDA's real 1m bars from 2026-11-06 to
   2026-11-13, recorded with the builder:
   - an expiry across the weekend that ends at Friday's close;
-  - a long stopped by Monday's 7 % gap at the open;
-  - a skip over the session.
+  - a long stopped by Monday's 7 % gap at the open, at that open;
+  - a 1h skip whose bracket comes from session bars (09:30 to 15:30, the last a half hour) and
+    whose expiry is 24 trading hours later.
 
-  O's real 1m bars from 2026-10-29 to 2026-10-30, with its dividend, credit a long.
-- **Holiday fixture (`tests/fixtures/replay_stocks_holiday/`).** No NYSE holiday lies inside
-  Yahoo's 30 days of 1m history: the last was 2026-09-07 and the next is 2026-11-26. So this fixture
-  is NVDA's recorded bars of 2026-11-10 to 2026-11-13, moved 14 days onto Thanksgiving week, with
-  the holiday's session removed and Friday cut at its 13:00 early close. It says so in its own
-  fields. The prices are real; the dates are not.
+  O's real 1m bars from 2026-10-29 to 2026-10-30 (`tests/fixtures/replay_stocks_dividend/`),
+  with its dividend of 0.272, pay a long that was held over the ex-date.
+- **The holiday.** No NYSE holiday lies inside Yahoo's 30 days of 1m history: the last was
+  2026-09-07 and the next is 2026-11-26. So the holiday test builds its bars in code from the
+  NVDA fixture's recorded sessions of 2026-11-10 to 2026-11-13. It moves them 14 days onto
+  Thanksgiving week, removes the holiday's session and cuts Friday at its 13:00 early close. The
+  prices are real; the dates are not. A long expiring on Thanksgiving ends at Wednesday's close,
+  and one expiring on Friday afternoon ends at the 12:59 bar.
 - **Binance.** `tests/fixtures/setup_responses.json` is unchanged and its test still passes.

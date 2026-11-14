@@ -161,7 +161,7 @@ export interface CreateSetupInput {
    */
   probability?: number;
   /**
-   * Binance symbol, e.g. BTCUSDT.
+   * A Binance symbol, e.g. BTCUSDT, or a stock or ETF listed in the US (Nasdaq, NYSE, NYSE American, NYSE Arca or Cboe BZX), e.g. NVDA or SPY. An index such as ^GSPC cannot be traded: use an ETF that tracks it, such as SPY.
    */
   symbol: string;
   /**

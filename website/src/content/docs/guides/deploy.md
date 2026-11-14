@@ -235,6 +235,12 @@ open setup holds one of the server's **16 watched pairs**, which setups share wi
   pairs: four accounts with open setups on 5 symbols each are enough, and with sign-in off
   client ids are free. Your own agent is then refused a new symbol, and new alerts on new
   symbols are refused too.
+- **Stock setups** ([ADR-0070](/chartgen/decisions/0070-stock-setups/)) need nothing to
+  configure. Each stock symbol with an open setup is one of the 16 pairs too, and the server reads
+  its 1m bars from Yahoo once a minute while the US market is open. That is at most 16 requests
+  a minute from the server's IP, besides what charts read. After failed reads it waits longer,
+  up to 15 minutes, and at least 5 minutes after a 429. The log says `[setups] cannot read
+  <SYMBOL> from Yahoo` when a read fails.
 - `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` raises or lowers the 5 symbols per owner. The 16 is a
   constant in the server; it cannot be raised without building it.
 - Closed setups are kept as the track record and are not deleted for inactivity. An owner
@@ -335,6 +341,13 @@ A build from before the three stated fields of a setup
 `probability` and `playbook_version`, and **when it writes that setup, after a revision or a
 status change, the stored record loses them.** The setup's log keeps them, and the newer build
 reads them from the log at start, so they are back after the roll forward. No step is needed.
+
+A build from before stock setups (0.8.0) starts on a file that has some and reads them, but
+has no feed for their symbols, so it does not score them; they wait, open, for the newer build,
+which reads the bars they missed if those are inside Yahoo's 30 days. **When it writes
+one, after a revision by the agent, the stored record loses `last_close` and `adjustments`,** and
+a dividend already paid to it is not counted after the roll forward. The newer build gives such
+a row its market back from its symbol. No step is needed on the file.
 
 Before turning it on:
 

@@ -10,7 +10,8 @@ its decisions get a track record a person can trust
 ([ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)).
 
 Setups are off until the operator sets [`CHARTGEN_SETUPS=1`](/chartgen/guides/deploy/#setups).
-They run on Binance symbols and over the HTTP transport, where a call has an owner. A headless agent
+They run on Binance symbols and on [US stocks and ETFs](#stock-setups), and over the HTTP
+transport, where a call has an owner. A headless agent
 needs [durable tokens](/chartgen/reference/oauth/#refresh-tokens) for them: a setup belongs to
 the owner its token resolves to, which with sign-in off is the OAuth client, so an agent whose
 token does not outlive a restart loses sight of its setups until someone authorizes it again. The tools
@@ -37,7 +38,8 @@ not show setups yet.
 
 - **It must be able to be wrong.** A setup without an `invalidation` and an `expires_at` is
   refused. The invalidation is below the entry zone of a long and above that of a short, and at
-  least 42 bps of the price away from it (three times the assumed cost of getting in and out).
+  least 42 bps of the price away from it (three times the assumed cost of getting in and out;
+  24 bps on a stock).
 - **All or nothing.** If anything is wrong, nothing is stored, and the error names each field
   with a hint.
 - **Drawings** are the ones [`generate_chart`](/chartgen/reference/mcp/#drawings) takes, checked
@@ -237,6 +239,47 @@ one of `playbook_version`, one feature, the probability in tenths, symbol or dir
   figures,** not with the total: v1's open positions are the runners after T1, so until they
   end its closed ones are mostly losers.
 - Skips are in it as well, scored with the server's bracket. Filter with `decision`.
+
+## Stock setups
+
+A setup can be made on a stock or ETF listed in the US, such as `NVDA` or `SPY`
+([ADR-0070](/chartgen/decisions/0070-stock-setups/)). It is scored with the same rules as a
+Binance setup, with these differences:
+
+- **Bars.** Yahoo has no live feed, so the server reads a stock's 1m bars from Yahoo once a minute
+  while the market is open, regular session only: 09:30 to 16:00 New York, 13:00 on an early
+  close. Pre- and post-market trading does not count. A status moves a minute or two after the
+  price, not up to one minute as on Binance.
+- **What it takes.** Stocks and ETFs on Nasdaq, NYSE, NYSE American, NYSE Arca and Cboe BZX.
+  - An index such as `^GSPC` cannot be traded: use an ETF that tracks it, such as `SPY`.
+  - OTC stocks, other exchanges and Yahoo's crypto, FX and futures are refused.
+- **Costs.** 1 bps fee and 3 bps slippage per side, so the least risk is 24 bps. This assumes a
+  liquid stock: a thinly traded one is scored better than it would fill.
+- **Expiry.** A stock setup ends at **the last 1m close at or before `expires_at`**.
+  - An expiry on a Saturday ends at Friday's close, not at Monday's open after the weekend's gap.
+  - An expiry on a holiday ends at the close before it.
+- **Gaps at the open.**
+  - An open past the invalidation exits at that open, as on Binance.
+  - An open past the first target exits at that open too, which is the better price. A Binance
+    setup exits at the target.
+- **Counting in bars.** These count trading time, not hours on the clock:
+  - a skip's 24 bars, on a 1h chart about 3.7 sessions;
+  - the time stop of `v3_time_stop`;
+  - `bars_to_*`.
+- **Splits and dividends.**
+  - A split during a setup divides all its prices by the ratio, since Yahoo's bars are adjusted
+    from then on. R does not change.
+  - A dividend that goes ex while the position is open is paid to a long and by a short, in the
+    result from its exit on.
+  - Both are logged as `adjusted` and listed in `adjustments`.
+- **Gaps in the data.** A minute without a trade is not a bar, and nights, weekends and holidays
+  are not gaps. A read that fails is made again. Only bars older than Yahoo's 30 days of 1m
+  history, after a long outage, are a `gap`.
+- **Holidays.** The exchange calendar here lists NYSE holidays and early closes through 2028. A
+  stock setup cannot expire later than that.
+
+Server alerts still run on Binance symbols only. A stock setup's own status changes wake your
+agent as a Binance setup's do.
 
 ## When the server was away
 
