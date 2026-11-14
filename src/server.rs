@@ -1632,6 +1632,17 @@ fn with_setup_tools(mut result: Value) -> Value {
     result
 }
 
+/// Why this server must not start with these `CHARTGEN_SERVER_ALERT_CLIENTS`, if it
+/// must not: `*` gives server alerts, webhooks and setups to every client, which is for
+/// local use. A server with a public `CHARTGEN_BASE_URL` lists the accounts it trusts.
+fn open_clients_refused(clients: Option<&str>, public_base: Option<&str>) -> Option<String> {
+    let open = clients.is_some_and(|raw| raw.split(',').any(|id| id.trim() == "*"));
+    let base = public_base.filter(|_| open)?;
+    Some(format!(
+        "CHARTGEN_SERVER_ALERT_CLIENTS=* gives server alerts, webhooks and setups to every client of {base}. List the trusted accounts (github:<id>, google:<sub>) or client ids instead; refusing to start."
+    ))
+}
+
 /// What a replay server cannot also be, if any of it is on.
 fn replay_conflict(engine: bool, alerts: bool, setups: bool, signin: bool) -> Option<&'static str> {
     [
@@ -1978,6 +1989,13 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         eprintln!("{e}");
         std::process::exit(2);
     }
+    let clients = std::env::var("CHARTGEN_SERVER_ALERT_CLIENTS").ok();
+    if let Some(why) =
+        open_clients_refused(clients.as_deref(), signin::public_base_url().as_deref())
+    {
+        eprintln!("[alerts] {why}");
+        std::process::exit(1);
+    }
     #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
     let mut oauth = OAuthStore::new();
     match signin::Config::from_env() {
@@ -2246,6 +2264,17 @@ mod tests {
         );
         assert_eq!(store.owner_for_token("expired"), None);
         assert_eq!(store.owner_for_token("unknown"), None);
+    }
+
+    /// `*` is for local use: a server with a public base URL refuses to start with it.
+    #[test]
+    fn every_client_is_refused_on_a_public_server() {
+        let public = Some("https://chartgen.example");
+        assert!(open_clients_refused(Some("*"), public).is_some());
+        assert!(open_clients_refused(Some("github:1, *"), public).is_some());
+        assert!(open_clients_refused(Some("*"), None).is_none());
+        assert!(open_clients_refused(Some("github:1,google:2"), public).is_none());
+        assert!(open_clients_refused(None, public).is_none());
     }
 
     /// A replay server is nothing else at the same time (ADR-0059).

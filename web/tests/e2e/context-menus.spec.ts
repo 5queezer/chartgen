@@ -960,6 +960,7 @@ test.describe("the menu itself", () => {
     // A window too short for the whole menu: it scrolls instead of leaving the screen.
     await page.setViewportSize({ width: 1280, height: 260 });
     await page.waitForTimeout(300);
+    // e2e-fixed-point: any point on the chart in this 260 px window opens the menu
     await page.mouse.click(600, 200, { button: "right" });
     await expect(page.getByRole("menu")).toBeVisible();
     await expectOnScreen(page, /actions$/);

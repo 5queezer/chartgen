@@ -826,7 +826,8 @@ fn start_server(mut cmd: std::process::Command, port: u16) -> Server {
         port,
         temp_db: None,
     };
-    for _ in 0..200 {
+    // 20 s: on a loaded machine a start has taken longer than 5 s.
+    for _ in 0..800 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
             return server;
         }
@@ -3086,6 +3087,41 @@ fn test_unopenable_store_is_not_fatal() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A debug build run without `CHARTGEN_DB` leaves the default store alone: a
+/// developer's or an agent's run must not open and migrate `~/.chartgen/chartgen.db`.
+#[test]
+fn test_debug_build_without_chartgen_db_opens_no_default_store() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let db = store_path("no-chartgen-db");
+    let dir = db.parent().unwrap();
+    let (log, home) = (dir.join("stderr.log"), dir.join("home"));
+    std::fs::create_dir(&home).unwrap();
+    let port = free_port();
+    let mut cmd = server_command(port, None, &db, false);
+    cmd.env_remove("CHARTGEN_DB")
+        .env("HOME", &home)
+        .stderr(std::fs::File::create(&log).unwrap());
+    let srv = start_server(cmd, port);
+    let client = register_external(port);
+    sign_in(port, &client);
+    drop(srv);
+
+    assert!(
+        !home.join(".chartgen/chartgen.db").exists(),
+        "a debug build opened the default store"
+    );
+    if cfg!(feature = "scripting") {
+        let log = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            log.contains("a debug build opens no store without CHARTGEN_DB"),
+            "{log}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `/register` refuses schemes a browser would run, and keeps the native ones
 /// MCP clients use for their callback, which `/authorize` then redirects to.
 #[test]
@@ -4837,6 +4873,35 @@ fn test_signin_half_a_provider_refuses_to_start() {
         Some(1),
         "it must not start open"
     );
+}
+
+/// `CHARTGEN_SERVER_ALERT_CLIENTS=*` is for local use: a server with a public base URL
+/// refuses to start with it rather than give alerts and webhooks to every client.
+#[test]
+fn test_every_client_refuses_to_start_on_a_public_server() {
+    let port = free_port();
+    let db = store_path("open-clients-public");
+    let mut cmd = server_command(port, None, &db, false);
+    cmd.env("CHARTGEN_BASE_URL", "https://chartgen.example")
+        .env("CHARTGEN_SERVER_ALERT_CLIENTS", "*");
+    // A server that started anyway never exits, so this must not wait for it alone.
+    let mut child = cmd.spawn().unwrap();
+    let mut status = None;
+    for _ in 0..400 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        status.and_then(|s| s.code()),
+        Some(1),
+        "it must not start open to every client"
+    );
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
 /// The test provider is the only way past the real ones, and it takes the sample
