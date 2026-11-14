@@ -1335,7 +1335,118 @@ async fn mcp_handler(
     }
 }
 
+/// A JSON-RPC call over Streamable HTTP, and what a client must hear of tools that may
+/// have changed since it listed them (ADR-0074).
 async fn mcp_call(
+    state: State<SharedState>,
+    uri: Uri,
+    headers: HeaderMap,
+    ext: axum::http::Extensions,
+    body_bytes: axum::body::Bytes,
+) -> Response {
+    let sent = headers
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let streams = accepts_event_stream(&headers);
+    let request = body_bytes.clone();
+    let answer = mcp_answer(state, uri, headers, ext, body_bytes).await;
+    tell_of_changed_tools(sent, streams, &request, answer).await
+}
+
+/// Session ids this process gave out on `initialize`, and the older ones it has told of
+/// changed tools: at most this many, then it starts again, and a client told twice
+/// lists its tools once more.
+const KNOWN_SESSIONS: usize = 10_000;
+static SESSIONS: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+fn know_session(id: &str) {
+    let mut known = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if known.len() >= KNOWN_SESSIONS {
+        known.clear();
+    }
+    known.insert(id.to_string());
+}
+
+/// Whether the client takes an answer as an event stream, as Streamable HTTP clients do.
+fn accepts_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|range| {
+                let mut parts = range.split(';');
+                let media = parts.next().unwrap_or("").trim();
+                // `q=0` says the client does not take it.
+                media.eq_ignore_ascii_case("text/event-stream")
+                    && !parts.any(|p| is_q_zero(p.trim()))
+            })
+        })
+}
+
+/// A session id this process did not give out was given out before it started: by a
+/// build with other tools, maybe. Its client keeps the list it read then, and keeps
+/// using the session, since chartgen takes any id. So the first answer to such a
+/// session that can be an event stream is one: `notifications/tools/list_changed`,
+/// then the answer itself. A client re-reads `tools/list` on that notification. A GET
+/// stream would carry it too, but a client opens one only after `initialize` and gives
+/// it up after two failed reconnects, which a deploy outlasts; its calls and pings it
+/// keeps sending.
+async fn tell_of_changed_tools(
+    sent: Option<String>,
+    streams: bool,
+    request: &[u8],
+    answer: Response,
+) -> Response {
+    let Some(id) = sent else {
+        // `initialize` without a session: the id it got is this process's own.
+        if let Some(new) = answer
+            .headers()
+            .get("Mcp-Session-Id")
+            .and_then(|v| v.to_str().ok())
+        {
+            know_session(new);
+        }
+        return answer;
+    };
+    let json = answer
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|v| v == "application/json");
+    let known = SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&id);
+    let initialize = serde_json::from_slice::<Value>(request)
+        .ok()
+        .is_some_and(|call| call.get("method").and_then(Value::as_str) == Some("initialize"));
+    if known || !streams || !json || answer.status() != StatusCode::OK || initialize {
+        return answer;
+    }
+    let (mut parts, body) = answer.into_parts();
+    let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    know_session(&id);
+    let changed = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
+    let mut events =
+        format!("event: message\ndata: {changed}\n\nevent: message\ndata: ").into_bytes();
+    events.extend_from_slice(&body);
+    events.extend_from_slice(b"\n\n");
+    eprintln!("[MCP] session from before this start: told it of changed tools");
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    Response::from_parts(parts, axum::body::Body::from(events))
+}
+
+async fn mcp_answer(
     State(state): State<SharedState>,
     uri: Uri,
     headers: HeaderMap,
@@ -2628,6 +2739,106 @@ mod tests {
         assert_eq!(sid, "client-session-abc");
     }
 
+    /// One POST to `/mcp`: its status, content type, session id and body.
+    async fn post_mcp(
+        app: &Router,
+        accept: &str,
+        session: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, String, Option<String>, String) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", accept)
+            .header("content-type", "application/json");
+        if let Some(sid) = session {
+            req = req.header("Mcp-Session-Id", sid);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let header_of = |name| {
+            resp.headers()
+                .get(name)
+                .map(|v: &HeaderValue| v.to_str().unwrap().to_string())
+        };
+        let (kind, sid) = (
+            header_of("content-type").unwrap_or_default(),
+            header_of("Mcp-Session-Id"),
+        );
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            kind,
+            sid,
+            String::from_utf8(bytes.to_vec()).unwrap(),
+        )
+    }
+
+    const STREAMS: &str = "application/json, text/event-stream";
+    const LIST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+    const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+
+    /// ADR-0074: a session from before this start hears once that the tools may have
+    /// changed, in an event stream before its answer; after that it gets JSON again.
+    #[tokio::test]
+    async fn a_session_from_before_the_start_is_told_once_that_tools_changed() {
+        let app = test_app();
+        let (status, kind, sid, body) =
+            post_mcp(&app, STREAMS, Some("before-a-restart"), LIST).await;
+        assert_eq!(
+            (status, kind.as_str()),
+            (StatusCode::OK, "text/event-stream")
+        );
+        assert_eq!(sid.as_deref(), Some("before-a-restart"));
+        let events: Vec<Value> = body
+            .split("\n\n")
+            .filter(|e| !e.is_empty())
+            .map(|e| {
+                let data = e
+                    .strip_prefix("event: message\ndata: ")
+                    .unwrap_or_else(|| panic!("{e}"));
+                serde_json::from_str(data).unwrap()
+            })
+            .collect();
+        assert_eq!(events.len(), 2, "{body}");
+        assert_eq!(events[0]["method"], "notifications/tools/list_changed");
+        assert!(events[0].get("id").is_none(), "a notification has no id");
+        assert_eq!(events[1]["id"], 2);
+        assert!(events[1]["result"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()));
+
+        let (_, kind, _, body) = post_mcp(&app, STREAMS, Some("before-a-restart"), LIST).await;
+        assert_eq!(kind, "application/json", "told once: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_session_this_start_gave_out_and_a_json_only_client_get_json() {
+        let app = test_app();
+        let (_, kind, sid, body) = post_mcp(&app, STREAMS, None, INIT).await;
+        assert_eq!(kind, "application/json");
+        let init: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(init["result"]["capabilities"]["tools"]["listChanged"], true);
+        let sid = sid.expect("initialize gives out a session");
+        let (_, kind, _, _) = post_mcp(&app, STREAMS, Some(&sid), LIST).await;
+        assert_eq!(kind, "application/json", "its own session needs no notice");
+
+        // A client that takes no event stream cannot be told, and gets its answer.
+        let (_, kind, _, _) =
+            post_mcp(&app, "application/json", Some("json-only-before"), LIST).await;
+        assert_eq!(kind, "application/json");
+        let refused = "application/json, text/event-stream;q=0";
+        let (_, kind, _, _) = post_mcp(&app, refused, Some("q-zero-before"), LIST).await;
+        assert_eq!(kind, "application/json", "q=0 refuses the event stream");
+        // Nor is an `initialize` that carries an old id wrapped: it lists afresh anyway.
+        let (_, kind, _, _) = post_mcp(&app, STREAMS, Some("init-with-old-id"), INIT).await;
+        assert_eq!(kind, "application/json");
+    }
+
     #[tokio::test]
     async fn post_mcp_no_accept_header_defaults_to_json() {
         // Tolerant default: no Accept header → treated as application/json.
@@ -2984,6 +3195,9 @@ mod tests {
             .header("content-type", "application/json")
             .header("authorization", "Bearer push-token");
         if let Some(sid) = session {
+            // As if this server gave it out on `initialize`: a session from before the
+            // start would hear of changed tools first (ADR-0074).
+            know_session(sid);
             b = b.header("Mcp-Session-Id", sid);
         }
         b.body(Body::from(body.to_string())).unwrap()
