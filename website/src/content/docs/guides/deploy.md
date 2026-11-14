@@ -69,7 +69,7 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, for their refresh tokens, for scripted indicators, and with sign-in on for users and sessions. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. A debug build opens no store without it, so a development run never migrates that file. |
 | `CHARTGEN_ADMIN_USERS` | `src/server/admin.rs` | With [sign-in](#sign-in-through-github-and-google) on: the user ids, separated by commas (`github:<id>`, `google:<sub>`), that may open the [operator page](#the-operator-page) at `/admin`. Unset: nobody, and no such page. Anything else than such ids, or the setting with sign-in off, stops the start. |
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
-| `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks, for local use only: a server with a public `CHARTGEN_BASE_URL` refuses to start with it. |
+| `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks, for local use only: a server whose `CHARTGEN_BASE_URL` is not localhost, a tailnet or LAN address included, refuses to start with it. |
 | `CHARTGEN_AGENT_WEBHOOK_URL` | `src/webhook.rs` | The receiver that [wakes your own agent](#the-agents-receiver): its whole URL, `http` or `https`, on this host or its private network. Set all three of these or none. |
 | `CHARTGEN_AGENT_WEBHOOK_OWNER` | `src/webhook.rs` | The one owner whose alerts may ask for that receiver: an account (`github:<id>`, `google:<sub>`) with sign-in on, a client id with it off. It must also be named in `CHARTGEN_SERVER_ALERT_CLIENTS`. |
 | `CHARTGEN_AGENT_WEBHOOK_SECRET` | `src/webhook.rs` | The signing key, the same string the receiver has: `whsec_<base64>` or any string of at least 24 characters. Never logged. |
@@ -363,7 +363,7 @@ Before turning it on:
 |---|---|---|
 | A list of ids (recommended) | Those clients | Those clients |
 | Unset | Anyone | Nobody |
-| `*` (local only: refused with a public `CHARTGEN_BASE_URL`) | Anyone | Anyone |
+| `*` (local only: refused when `CHARTGEN_BASE_URL` is not localhost) | Anyone | Anyone |
 
 Unset, a stranger can hold alerts but cannot make the server send anything. Even then they can use
 up the 200 alerts or the 16 watched symbol and interval pairs until those expire, after which other

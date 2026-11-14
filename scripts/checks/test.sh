@@ -25,7 +25,7 @@ expect 1 "todo-links refuses unlinked markers" "$check" todo-links "$fx/todo.bad
 expect_lines 3 "todo-links finds all three" "$check" todo-links "$fx/todo.bad.txt"
 expect 0 "todo-links accepts linked markers" "$check" todo-links "$fx/todo.good.txt"
 expect 1 "press-points refuses literal presses" "$check" press-points "$fx/press-points.bad.spec.ts"
-expect_lines 3 "press-points finds all three" "$check" press-points "$fx/press-points.bad.spec.ts"
+expect_lines 4 "press-points finds all four" "$check" press-points "$fx/press-points.bad.spec.ts"
 expect 0 "press-points accepts measured presses" "$check" press-points "$fx/press-points.good.spec.ts"
 expect 0 "the repository passes" "$check"
 exit $fail
