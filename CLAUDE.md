@@ -43,27 +43,27 @@ Rules:
 
 ## Agent notes
 
-Traps that have cost time before, each with its reason.
+Traps that have cost time before. Where a check now catches one, the note names the check; the rest stay prose, with their reason.
 
 ### Build and test
 
-- Before a PR, run what `ci.yml` runs, not only `cargo test`: also `cargo build --no-default-features`, `cargo clippy --all-targets --no-default-features -- -D warnings` and `cargo test --no-default-features --test e2e`. Feature gates must agree: a `#[cfg(test)]` helper used only from a `scripting`-gated module needs the same feature gate, or the no-default-features job fails.
-- Set `CHARTGEN_DB` to a throwaway file for every server, example or binary you run by hand. Without it the process opens and migrates `~/.chartgen/chartgen.db`. Unit tests can't open it (only `main` opens the store on demand), and `tests/e2e.rs` sets its own.
-- Production web files must not import from outside `web/`. The Docker image builds the web app with only `web/` in its context. Tests may, since `tsconfig.build.json` leaves them out. CI's `docker-web` job catches this.
-- The server answers `/favicon.svg` and `/favicon.ico` itself from `src/server/favicon.*`, ahead of the web app. Change those together with `web/public/favicon.*`; `Wordmark.test.ts` checks that they match.
+- CI runs both feature sets: `clippy --all-targets` with default features, and the `no-default-features` job (build, `clippy --all-targets`, `--test e2e`). A `#[cfg(test)]` helper used only from a `scripting`-gated module needs the same gate. Run those commands before a PR to save a CI round.
+- A debug build without `CHARTGEN_DB` opens no store (`persistence::global`, test `test_debug_build_without_chartgen_db_opens_no_default_store`): it would migrate `~/.chartgen/chartgen.db`. Set `CHARTGEN_DB` to a file under `target/` for every server, example or binary you run by hand.
+- Production web files must not import from outside `web/`: CI's `docker-web` job builds with only `web/` in its context and fails. Tests may.
+- The server's `/favicon.svg` and `/favicon.ico` (`src/server/favicon.*`) must match `web/public/favicon.*`: `Wordmark.test.ts` fails otherwise.
+- `scripts/checks/agent-checks.sh` (CI job `agent-checks`, self-test `scripts/checks/test.sh`): a `TODO`, `FIXME` or `HACK` comment needs an issue (`#123`) or a link.
 
 ### Flaky and clock-dependent tests
 
-- Sample data (`CHARTGEN_DATA_SOURCE=sample`) is a function of the clock. The forming bar wobbles with wall-clock seconds, and the bars on screen change with the hour, so an e2e spec can pass for days and fail for an hour. Reproduce it with `scripts/e2e-at-clock.sh <offset> <spec>`. Don't assert pixel-exact positions or color shares that the forming bar or the last-price line can move.
-- In Playwright, take press points from `chart.getSize(...)`, never hard-coded pixels. A layout change moves a legend row or pane separator under a fixed point, and a press there does not pan.
-- Playwright file filters are regexes over the full path. `npx playwright test mobile` matches every spec when the worktree path contains "mobile", so pass exact paths (`tests/e2e/mobile.spec.ts`).
-- `tests/e2e.rs` gives a spawned server 5 s to listen (`start_server`). On a loaded machine a test can fail on that wait and pass on rerun. This has been seen once, in `test_streams_leave_room_for_everything_else`.
-- Sample prices are three sinusoids plus noise, so hit rates or backtests on them are inflated and say nothing about real markets.
+- Sample data (`CHARTGEN_DATA_SOURCE=sample`) is a function of the clock. The forming bar wobbles with wall-clock seconds, and the bars on screen change with the hour, so an e2e spec can pass for days and fail for an hour. Reproduce it with `scripts/e2e-at-clock.sh <offset> <spec>`. Don't assert pixel-exact positions or color shares that the forming bar or the last-price line can move. (Prose: no check can tell a stable assertion from a lucky one.)
+- In Playwright, take press points from `chart.getSize(...)` or a bounding box: `agent-checks.sh press-points` refuses literal pixels in `mouse.click`/`dblclick` and in a `mouse.move` before `mouse.down`. Mark a deliberate exception with `e2e-fixed-point: <why>`.
+- Playwright file filters are regexes over the full path. `npx playwright test mobile` matches every spec when the worktree path contains "mobile", so pass exact paths (`tests/e2e/mobile.spec.ts`). (Prose: it is Playwright's own CLI.)
+- Sample prices are three sinusoids plus noise, so hit rates or backtests on them are inflated and say nothing about real markets. (Prose: a judgment, not a rule.)
 
 ### Production and safety
 
-- Nothing builds on the production host. The arm64 image comes from the `image` job in `ci.yml` (GHCR), only for green master commits, and `scripts/autodeploy/` points Coolify at it. Its log line "triggered" means Coolify accepted the deploy, not that it ran, so check the deployment in Coolify.
-- MCP clients keep their old tool list after a deploy that adds or changes tools. chartgen sends no `notifications/tools/list_changed`, so a client must reconnect. For Hermes, turn `mcp_servers.chartgen.enabled` off and on again.
-- A replay server (`CHARTGEN_REPLAY_FIXTURES`) must never be reachable from other networks. Sign-in is off, and any client can register and move its one forward-only clock. Set `CHARTGEN_BIND` to loopback or the Tailscale address; unset, it listens on every interface.
-- Webhooks go only to public `https` addresses on port 443 (`src/webhook.rs`), because the URL comes from strangers and the server sits on a home network. A receiver on the same LAN or host needs a public hostname. Don't loosen this.
-- `CHARTGEN_SERVER_ALERT_CLIENTS=*` opens alerts and webhooks to every client. In production it lists the trusted account ids.
+- Nothing builds on the production host. The arm64 image comes from the `image` job in `ci.yml` (GHCR), only for green master commits, and `scripts/autodeploy/` points Coolify at it. Its log line "triggered" means Coolify accepted the deploy, not that it ran, so check the deployment in Coolify. (Prose: it is about operating the host.)
+- MCP clients keep their old tool list after a deploy that adds or changes tools. chartgen sends no `notifications/tools/list_changed`, so a client must reconnect. For Hermes, turn `mcp_servers.chartgen.enabled` off and on again. (Prose: the client decides.)
+- A replay server (`CHARTGEN_REPLAY_FIXTURES`) must not be reachable from other networks: sign-in is off, and any client can move its one clock. Set `CHARTGEN_BIND` to loopback or the Tailscale address. On any other address it starts with a `[replay] WARNING` but does not refuse, because ADR-0068 allows a container that publishes the port on a private address only.
+- Webhooks go only to public `https` addresses on port 443, enforced in `src/webhook.rs` and its tests, because the URL comes from strangers and the server sits on a home network. Don't loosen this.
+- `CHARTGEN_SERVER_ALERT_CLIENTS=*` opens alerts, webhooks and setups to every client. A server with a public `CHARTGEN_BASE_URL` refuses to start with it (`open_clients_refused` in `src/server.rs`); production lists the trusted account ids.

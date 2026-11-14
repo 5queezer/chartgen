@@ -1642,7 +1642,9 @@ fn restrict(path: &Path) {
 
 /// `CHARTGEN_DB`, else `~/.chartgen/chartgen.db`.
 pub fn db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("CHARTGEN_DB") {
+    // `var_os`, as the debug guard in `global()` reads it: a path that is not Unicode is
+    // still the one asked for, never a reason to fall back to the default.
+    if let Some(p) = std::env::var_os("CHARTGEN_DB") {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME")
@@ -1694,8 +1696,20 @@ pub fn open_global_in_memory() -> bool {
 /// The process-wide store: the one at `db_path()`, opened on first use, in a process
 /// that called `open_on_demand()`. Anywhere else, only a store that `open_global`
 /// already opened, and never a file of its own choosing.
+///
+/// A debug build without `CHARTGEN_DB` opens none: it is a developer's or an agent's
+/// run, and the default path is the developer's own `~/.chartgen/chartgen.db`, which it
+/// would migrate. It runs without a store and says so once.
 pub fn global() -> Option<&'static Store> {
     if OPENS_ON_DEMAND.load(std::sync::atomic::Ordering::Relaxed) {
+        if cfg!(debug_assertions) && std::env::var_os("CHARTGEN_DB").is_none() {
+            return STORE
+                .get_or_init(|| {
+                    eprintln!("[store] a debug build opens no store without CHARTGEN_DB, as it would migrate {}. Set CHARTGEN_DB to a throwaway file, e.g. target/dev.db; running without a store.", db_path().display());
+                    None
+                })
+                .as_ref();
+        }
         return open_global(&db_path());
     }
     STORE.get().and_then(Option::as_ref)
