@@ -263,7 +263,7 @@ async fn every_problem_is_reported_at_once_and_nothing_is_stored() {
     let s = live();
     let mut args = long();
     args.as_object_mut().unwrap().remove("invalidation");
-    args["symbol"] = json!("AAPL");
+    args["symbol"] = json!("NOT A SYMBOL");
     args["status"] = json!("won");
     args["drawings"] = json!([{ "tool": "no_such_tool", "points": [] }]);
     let text = call(&s, "create_setup", args, "owner").unwrap_err();
@@ -353,10 +353,33 @@ async fn another_owner_cannot_read_revise_or_cancel() {
 }
 
 #[tokio::test]
-async fn non_binance_symbol_is_refused() {
-    let s = live();
-    let text = call(&s, "create_setup", long_on("AAPL"), "owner").unwrap_err();
-    assert_eq!(errors(&text), ["symbol"]);
+async fn a_stock_setup_is_made_with_its_market_and_costs_and_polls_without_the_hub() {
+    let hub = hub();
+    let s = live_on(
+        mem(),
+        hub.clone(),
+        Access::parse(None),
+        Limits::default(),
+        None,
+    );
+    let made = call(&s, "create_setup", long_on("AAPL"), "owner").unwrap();
+    assert_eq!(made["market"], "us_equity");
+    assert_eq!(
+        made["costs"],
+        json!({ "fee_bps_per_side": 1.0, "slippage_bps_per_side": 3.0 })
+    );
+    // It counts as a watched symbol, and the hub opened no feed for it.
+    assert_eq!(
+        s.pairs(),
+        HashSet::from([("AAPL".to_string(), "1m".to_string())])
+    );
+    assert_eq!(hub.in_use().2, 0);
+    assert!(s.lock().watches[&("AAPL".to_string(), "1m".to_string())]
+        ._lease
+        .is_none());
+    // A Binance setup still has no market.
+    let crypto = call(&s, "create_setup", long(), "owner").unwrap();
+    assert!(crypto.get("market").is_none());
 }
 
 #[tokio::test]
@@ -3083,4 +3106,856 @@ async fn a_refused_track_record_does_not_speak_of_storing() {
         "{refused}"
     );
     assert!(refused.contains("nothing was read"), "{refused}");
+}
+
+// Stock setups (ADR-0070): the 1m bars of the session, polled from Yahoo.
+
+/// ms of a New York local time in November 2026.
+fn ny(day: u32, hour: u32, minute: u32) -> i64 {
+    use chrono::TimeZone;
+    chrono_tz::America::New_York
+        .with_ymd_and_hms(2026, 11, day, hour, minute, 0)
+        .single()
+        .unwrap()
+        .timestamp_millis()
+}
+
+/// Flat 1m bars of NVDA at 101 at `times`, dipping into a long's zone at `dip`.
+fn nvda_minutes(times: &[i64], dip: i64) -> Replay {
+    let bars = times
+        .iter()
+        .map(|&t| Bar {
+            open: 101.0,
+            high: 101.2,
+            low: if t == dip { 99.5 } else { 100.8 },
+            close: 101.0,
+            volume: 1.0,
+            date: (t / 1000).to_string(),
+        })
+        .collect();
+    Replay::of(BTreeMap::from([("NVDA".to_string(), bars)]))
+}
+
+/// Friday's last ten minutes, and Monday's first eleven without 09:33 and 09:34,
+/// which had no trade.
+fn friday_and_monday() -> Vec<i64> {
+    let friday = (50..60).map(|m| ny(6, 15, m));
+    let monday = (30..41)
+        .filter(|m| ![33, 34].contains(m))
+        .map(|m| ny(9, 9, m));
+    friday.chain(monday).collect()
+}
+
+fn stock_service(source: DataSource) -> Arc<Setups> {
+    Setups::new(
+        mem(),
+        Some(hub()),
+        None,
+        source,
+        Access::parse(None),
+        Limits::default(),
+        None,
+    )
+}
+
+/// A long on NVDA at 99 to 100, wrong at 97, made at 15:49 on Friday.
+fn nvda_long(s: &Setups, expires_at: i64) -> String {
+    let made = ny(6, 15, 49);
+    crate::replay::at(Some(made), || {
+        let args = json!({
+            "symbol": "NVDA", "interval": "1h", "direction": "long",
+            "thesis": "example thesis", "entry": { "low": 99.0, "high": 100.0 },
+            "invalidation": 97.0, "targets": [106.0], "expires_at": expires_at,
+        });
+        id_of(&call(s, "create_setup", args, "owner").unwrap())
+    })
+}
+
+fn poll_at(s: &Setups, t: i64) -> Result<(), String> {
+    crate::replay::at(Some(t), || s.poll("NVDA"))
+}
+
+fn nvda_setup(s: &Setups, id: &str) -> Value {
+    call(s, "get_setup", json!({ "id": id }), "owner").unwrap()
+}
+
+#[tokio::test]
+async fn a_stock_setup_moves_on_polled_minutes_and_nights_and_quiet_minutes_are_no_gap() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(20, 16, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        let friday = nvda_setup(&s, &id);
+        assert_eq!(friday["status"], "triggered");
+        assert_eq!(
+            friday["fill"],
+            json!({ "price": 100.0, "bar_time": ny(6, 15, 55) })
+        );
+        assert_eq!(
+            friday["last_close"],
+            json!({ "price": 101.0, "bar_time": ny(6, 15, 59) })
+        );
+        // The weekend: nothing to read, nothing changes.
+        poll_at(&s, ny(7, 12, 0)).unwrap();
+        poll_at(&s, ny(9, 9, 45)).unwrap();
+        let monday = nvda_setup(&s, &id);
+        assert_eq!(kinds(&monday), ["created", "status"]);
+        assert_eq!(monday["gap"], false);
+        assert_eq!(monday["scored_through"], json!(ny(9, 9, 40)));
+        // A minute is applied once it is a minute old.
+        assert_eq!(monday["status"], "triggered");
+    });
+}
+
+#[tokio::test]
+async fn a_stock_setup_expiring_on_the_weekend_ends_at_fridays_close() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(7, 12, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        poll_at(&s, ny(7, 12, 0)).unwrap();
+        assert_eq!(
+            nvda_setup(&s, &id)["status"],
+            "triggered",
+            "not read past yet"
+        );
+        poll_at(&s, ny(7, 12, 1)).unwrap();
+        let ended = nvda_setup(&s, &id);
+        assert_eq!(ended["status"], "expired");
+        assert_eq!(
+            ended["exit"],
+            json!({ "price": 101.0, "bar_time": ny(6, 15, 59) })
+        );
+        assert_eq!(ended["log"][2]["at"], json!(ny(7, 12, 0)));
+        assert!(ended["result_r"].as_f64().unwrap() > 0.0);
+    });
+}
+
+#[tokio::test]
+async fn a_failed_read_of_a_stock_moves_nothing_and_is_no_gap() {
+    let s = stock_service(DataSource::Unavailable);
+    let id = nvda_long(&s, ny(20, 16, 0));
+    assert!(poll_at(&s, ny(9, 10, 0)).is_err());
+    let unmoved = nvda_setup(&s, &id);
+    assert_eq!(kinds(&unmoved), ["created"]);
+    assert_eq!(unmoved["gap"], false);
+    assert_eq!(unmoved["scored_through"], Value::Null);
+}
+
+#[tokio::test]
+async fn stock_bars_older_than_yahoo_keeps_are_a_gap() {
+    crate::replay::on(nvda_minutes(&[], 0), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(20, 16, 0));
+        // 34 days on, Yahoo's 1m bars reach back 29.
+        let now = ny(6, 15, 49) + 34 * 86_400_000;
+        crate::replay::at(Some(now), || s.poll("NVDA")).unwrap();
+        let gapped = nvda_setup(&s, &id);
+        assert_eq!(kinds(&gapped), ["created", "gap"]);
+        assert_eq!(gapped["gap"], true);
+        let reach = (now - 29 * 86_400_000).div_euclid(MINUTE_MS) * MINUTE_MS;
+        assert_eq!(
+            gapped["log"][1]["changes"]["not_scored"],
+            json!({ "from": ny(6, 15, 49), "to": reach })
+        );
+    });
+}
+
+// Stock setups in a replay, on NVDA's and O's 1m bars recorded from Yahoo with
+// `chartgen replay-fixtures` on 2026-11-14 (ADR-0070).
+
+/// A replay service on the replay this test turned on.
+fn replaying_any() -> Arc<Setups> {
+    replaying(crate::replay::global().unwrap())
+}
+
+fn recorded_replay(dir: &str) -> Replay {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(dir);
+    Replay::load(&path).unwrap()
+}
+
+/// A long at `zone`, wrong at `invalidation`, made at `made` (as_of).
+fn replayed_long(
+    s: &Setups,
+    symbol: &str,
+    made: i64,
+    zone: (f64, f64),
+    invalidation: f64,
+    expires_at: i64,
+) -> Value {
+    let args = json!({
+        "symbol": symbol, "interval": "1h", "direction": "long", "thesis": "example thesis",
+        "entry": { "low": zone.0, "high": zone.1 }, "invalidation": invalidation,
+        "targets": [invalidation * 1.2], "expires_at": expires_at, "as_of": made,
+    });
+    call(s, "create_setup", args, "agent").unwrap()
+}
+
+/// A recorded price, to the cent: Yahoo's prices are 32-bit floats widened.
+fn cents(v: &Value) -> f64 {
+    (v.as_f64().unwrap() * 100.0).round() / 100.0
+}
+
+/// An exit as (price to the cent, bar time).
+fn exit_of(setup: &Value) -> (f64, Value) {
+    (
+        cents(&setup["exit"]["price"]),
+        setup["exit"]["bar_time"].clone(),
+    )
+}
+
+fn replayed(s: &Setups, setup: &Value, as_of: i64) -> Value {
+    call(
+        s,
+        "get_setup",
+        json!({ "id": setup["id"], "as_of": as_of }),
+        "agent",
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn nvdas_weekend_ends_one_long_at_fridays_close_and_stops_another_at_mondays_gap() {
+    crate::replay::on(recorded_replay("replay_stocks"), |_| {
+        let s = replaying_any();
+        // Friday 2026-11-06 15:00: NVDA opens the minute at 188.44 and closes the
+        // session at 186.68. Monday opens at 173.04.
+        let made = ny(6, 15, 0);
+        let weekend = replayed_long(&s, "NVDA", made, (188.0, 188.5), 182.0, ny(7, 12, 0));
+        let monday = replayed_long(&s, "NVDA", made, (188.0, 188.5), 182.0, ny(9, 16, 0));
+        let weekend = replayed(&s, &weekend, ny(9, 10, 0));
+        let monday = replayed(&s, &monday, ny(9, 10, 0));
+        assert_eq!(cents(&weekend["fill"]["price"]), 188.44);
+        assert_eq!(weekend["status"], "expired");
+        assert_eq!(exit_of(&weekend), (186.68, json!(ny(6, 15, 59))));
+        assert_eq!(monday["status"], "invalidated");
+        assert_eq!(exit_of(&monday), (173.04, json!(ny(9, 9, 30))));
+        let r = |v: &Value| v["result_r"].as_f64().unwrap();
+        assert!(
+            r(&weekend) > -0.3 && r(&monday) < -2.3,
+            "{} {}",
+            r(&weekend),
+            r(&monday)
+        );
+        assert_eq!(kinds(&monday), ["created", "status", "status"]);
+    });
+}
+
+#[tokio::test]
+async fn a_skip_on_nvda_is_bracketed_on_session_bars_and_runs_24_trading_hours() {
+    let replay = recorded_replay("replay_stocks");
+    // The replay builds NVDA's hours from the session's open, as Yahoo does: 09:30 to
+    // 15:30, the last a half hour.
+    let (hours, _) = replay.bars("NVDA", "1h", 7, ny(10, 16, 0), None).unwrap();
+    let opens: Vec<i64> = hours
+        .iter()
+        .map(|b| b.date.parse::<i64>().unwrap() * 1000)
+        .collect();
+    let expected: Vec<i64> = [
+        (9, 30),
+        (10, 30),
+        (11, 30),
+        (12, 30),
+        (13, 30),
+        (14, 30),
+        (15, 30),
+    ]
+    .iter()
+    .map(|&(h, m)| ny(10, h, m))
+    .collect();
+    assert_eq!(opens, expected);
+    crate::replay::on(replay, |_| {
+        let s = replaying_any();
+        let args = json!({ "symbol": "NVDA", "interval": "1h", "direction": "long",
+            "decision": "skip", "thesis": "example reason", "as_of": ny(10, 15, 0) });
+        let skip = call(&s, "create_setup", args, "agent").unwrap();
+        assert_eq!(skip["bracket"], "atr");
+        // 24 bars of the session grid, the 14:30 bar the first: two on Tuesday, seven on
+        // each of Wednesday to Friday, and Monday's 09:30 bar, which closes at 10:30.
+        assert_eq!(skip["expires_at"], json!(ny(16, 10, 30)));
+        assert_eq!(skip["costs"]["slippage_bps_per_side"], 3.0);
+    });
+}
+
+#[tokio::test]
+async fn a_dividend_of_o_is_paid_to_a_long_held_over_its_ex_date() {
+    crate::replay::on(recorded_replay("replay_stocks_dividend"), |_| {
+        let s = replaying_any();
+        // O on 2026-10-29 at 15:00 opens the minute at 57.08, and goes ex 0.272 at the
+        // open on the 30th.
+        let ny_oct = |day: u32, hour: u32, minute: u32| {
+            use chrono::TimeZone;
+            chrono_tz::America::New_York
+                .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+        };
+        let long = replayed_long(
+            &s,
+            "O",
+            ny_oct(29, 15, 0),
+            (57.0, 57.1),
+            56.5,
+            ny_oct(30, 15, 0),
+        );
+        let ended = replayed(&s, &long, ny_oct(30, 16, 0));
+        assert_eq!(ended["status"], "expired");
+        assert_eq!(kinds(&ended), ["created", "status", "adjusted", "status"]);
+        assert_eq!(
+            ended["adjustments"],
+            json!([{ "kind": "dividend", "at": ny_oct(30, 9, 30), "amount": 0.272 }])
+        );
+        let (fill, exit) = (
+            ended["fill"]["price"].as_f64().unwrap(),
+            ended["exit"]["price"].as_f64().unwrap(),
+        );
+        assert_eq!(cents(&ended["fill"]["price"]), 57.08);
+        assert_eq!(ended["exit"]["bar_time"], json!(ny_oct(30, 14, 59)));
+        let risk = fill - 56.5;
+        let r = (exit - fill + 0.272) / risk - (fill + exit) * 0.0008 / 2.0 / risk;
+        assert_eq!(ended["result_r"], json!((r * 10_000.0).round() / 10_000.0));
+    });
+}
+
+/// NVDA's recorded sessions of Tuesday 2026-11-10 to Friday 2026-11-13, moved 14 days
+/// onto Thanksgiving week: Thursday's session is left out for the holiday and Friday's
+/// cut at its 13:00 close. No NYSE holiday lies within Yahoo's 30 days of 1m bars, so
+/// the prices are real and the dates are not.
+fn thanksgiving_week() -> Replay {
+    let recorded = recorded_replay("replay_stocks");
+    let fortnight = 14 * 86_400;
+    let bars = recorded
+        .minute_bars("NVDA", ny(10, 9, 30), ny(14, 0, 0))
+        .iter()
+        .map(|b| Bar {
+            date: (b.date.parse::<i64>().unwrap() + fortnight).to_string(),
+            ..b.clone()
+        })
+        .filter(|b| {
+            let t = b.date.parse::<i64>().unwrap() * 1000;
+            !(ny(26, 0, 0)..ny(27, 0, 0)).contains(&t)
+                && !(ny(27, 13, 0)..ny(28, 0, 0)).contains(&t)
+        })
+        .collect();
+    Replay::of(BTreeMap::from([("NVDA".to_string(), bars)]))
+}
+
+#[tokio::test]
+async fn thanksgiving_ends_a_long_at_wednesdays_close_and_fridays_early_close_ends_another() {
+    crate::replay::on(thanksgiving_week(), |_| {
+        let s = replaying_any();
+        // Wednesday at 15:00 the minute opens at 175.57; the session closes at 173.85.
+        let made = ny(25, 15, 0);
+        let holiday = replayed_long(&s, "NVDA", made, (175.0, 175.6), 155.0, ny(26, 12, 0));
+        let early = replayed_long(&s, "NVDA", made, (175.0, 175.6), 155.0, ny(27, 14, 0));
+        let holiday = replayed(&s, &holiday, ny(27, 16, 0));
+        let early = replayed(&s, &early, ny(27, 16, 0));
+        assert_eq!(holiday["status"], "expired");
+        assert_eq!(exit_of(&holiday), (173.85, json!(ny(25, 15, 59))));
+        assert_eq!(early["status"], "expired");
+        assert_eq!(early["exit"]["bar_time"], json!(ny(27, 12, 59)));
+        // Neither the holiday nor the afternoon after the early close is a gap.
+        assert_eq!(
+            (holiday["gap"].clone(), early["gap"].clone()),
+            (json!(false), json!(false))
+        );
+        assert_eq!(kinds(&early), ["created", "status", "status"]);
+    });
+}
+
+/// A stock setup's answers, as the web types are tested against them: its market, last
+/// close and a dividend, logged as adjusted.
+#[tokio::test]
+async fn stock_setup_answers_match_the_file_the_web_types_are_tested_against() {
+    let answers = crate::replay::on(recorded_replay("replay_stocks_dividend"), |_| {
+        let s = replaying_any();
+        let ny_oct = |day: u32, hour: u32| {
+            use chrono::TimeZone;
+            chrono_tz::America::New_York
+                .with_ymd_and_hms(2026, 10, day, hour, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+        };
+        let created = replayed_long(&s, "O", ny_oct(29, 15), (57.0, 57.1), 56.5, ny_oct(30, 15));
+        let ended = replayed(&s, &created, ny_oct(30, 16));
+        json!({ "create_setup": created, "get_setup": ended })
+    });
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/stock_setup_responses.json");
+    let text = serde_json::to_string_pretty(&answers).unwrap() + "\n";
+    if std::env::var("CHARTGEN_WRITE_FIXTURES").is_ok() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
+}
+
+// Review fixes of stock setups (ADR-0070): what a read may count as read, a split whose
+// event comes late, a split after a catch-up page, the calendar on a skip, and a stock
+// whose symbol looks like a Binance one.
+
+/// A live service on `store` whose reads come from the bars a test chose.
+fn reading_chosen_bars_on(store: &'static Store) -> Arc<Setups> {
+    Setups::new(
+        store,
+        Some(hub()),
+        None,
+        DataSource::Replay {
+            as_of: Some(i64::MAX / 4),
+        },
+        Access::parse(None),
+        Limits::default(),
+        None,
+    )
+}
+
+#[tokio::test]
+async fn minutes_whose_setups_could_not_be_stored_are_read_again() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let (store, dir) = store_at("stock-write");
+        let s = reading_chosen_bars_on(store);
+        let id = nvda_long(&s, ny(20, 16, 0));
+        // The store refuses the next write, as a full disk would.
+        let side = rusqlite::Connection::open(dir.db()).unwrap();
+        side.execute_batch(
+            "CREATE TRIGGER refuse BEFORE INSERT ON setup_revisions BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+        assert!(poll_at(&s, ny(6, 16, 5)).is_err());
+        assert_eq!(nvda_setup(&s, &id)["status"], "watching");
+        side.execute_batch("DROP TRIGGER refuse;").unwrap();
+        // The same minutes again: the dip at 15:55 fills it.
+        poll_at(&s, ny(6, 16, 6)).unwrap();
+        let filled = nvda_setup(&s, &id);
+        assert_eq!(
+            filled["fill"],
+            json!({ "price": 100.0, "bar_time": ny(6, 15, 55) })
+        );
+        assert_eq!(filled["gap"], false);
+    });
+}
+
+#[tokio::test]
+async fn a_minute_yahoo_had_not_published_yet_is_read_by_the_next_poll() {
+    crate::replay::on(
+        nvda_minutes(&friday_and_monday(), ny(6, 15, 55)),
+        |replay| {
+            let s = live_reading_chosen_bars();
+            let id = nvda_long(&s, ny(20, 16, 0));
+            // Yahoo answered for 15:49 to 15:53 only, though the read asked up to 16:04.
+            let early = fetch::StockMinutes {
+                bars: replay
+                    .minute_bars("NVDA", ny(6, 15, 49), ny(6, 15, 54))
+                    .to_vec(),
+                adjustments: Vec::new(),
+                reached: Some(ny(6, 15, 54)),
+            };
+            s.apply_read("NVDA", &early, ny(6, 15, 49), ny(6, 16, 4), ny(6, 16, 5))
+                .unwrap();
+            assert_eq!(s.lock().stock_reads["NVDA"], ny(6, 15, 54));
+            assert_eq!(nvda_setup(&s, &id)["status"], "watching");
+            // The next poll reads from there, and the dip at 15:55 fills it.
+            poll_at(&s, ny(6, 16, 6)).unwrap();
+            assert_eq!(nvda_setup(&s, &id)["status"], "triggered");
+        },
+    );
+}
+
+/// A read of `bars` of NVDA, each at `price`, from `from` on, with `adjustments`.
+fn nvda_read(
+    from: i64,
+    minutes: i64,
+    price: f64,
+    adjustments: Vec<setups::Adjustment>,
+) -> fetch::StockMinutes {
+    let bars = (0..minutes)
+        .map(|m| Bar {
+            open: price,
+            high: price * 1.001,
+            low: price * 0.999,
+            close: price,
+            volume: 1.0,
+            date: ((from + m * MINUTE_MS) / 1000).to_string(),
+        })
+        .collect();
+    fetch::StockMinutes {
+        bars,
+        adjustments,
+        reached: Some(from + minutes * MINUTE_MS),
+    }
+}
+
+#[tokio::test]
+async fn a_split_whose_event_comes_late_is_held_until_it_does_and_not_read_as_a_crash() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(20, 16, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        assert_eq!(nvda_setup(&s, &id)["last_close"]["price"], 101.0);
+        // Monday after a 10:1 split: the bars come in the new terms before the event.
+        let monday = ny(9, 9, 30);
+        let (from, to, now) = (ny(6, 16, 0), ny(9, 9, 35), ny(9, 9, 36));
+        let early = nvda_read(monday, 5, 10.1, Vec::new());
+        s.apply_read("NVDA", &early, from, to, now).unwrap();
+        let held = nvda_setup(&s, &id);
+        assert_eq!(
+            (held["status"].clone(), held["scored_through"].clone()),
+            (json!("triggered"), json!(ny(6, 15, 59)))
+        );
+        assert_eq!(
+            s.lock().stock_reads["NVDA"],
+            ny(6, 16, 4),
+            "not read past the held bars"
+        );
+        // The event arrives with the next read: scaled first, then the same bars.
+        let split = setups::Adjustment::Split {
+            at: monday,
+            ratio: 10.0,
+        };
+        let late = nvda_read(monday, 5, 10.1, vec![split]);
+        s.apply_read("NVDA", &late, from, to, now).unwrap();
+        let scored = nvda_setup(&s, &id);
+        assert_eq!(scored["status"], "triggered");
+        assert_eq!(scored["invalidation"], 9.7);
+        assert_eq!(kinds(&scored), ["created", "status", "adjusted"]);
+    });
+}
+
+#[tokio::test]
+async fn an_implausible_open_with_no_split_is_taken_as_a_real_gap_after_half_an_hour() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(20, 16, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        // A real 40 % gap down through the stop at 97.
+        let crash = nvda_read(ny(9, 9, 30), 5, 60.0, Vec::new());
+        for _ in 0..30 {
+            s.apply_read("NVDA", &crash, ny(6, 16, 0), ny(9, 9, 35), ny(9, 9, 36))
+                .unwrap();
+            assert_eq!(nvda_setup(&s, &id)["status"], "triggered");
+        }
+        s.apply_read("NVDA", &crash, ny(6, 16, 0), ny(9, 9, 35), ny(9, 9, 36))
+            .unwrap();
+        let stopped = nvda_setup(&s, &id);
+        assert_eq!(stopped["status"], "invalidated");
+        assert_eq!(
+            stopped["exit"],
+            json!({ "price": 60.0, "bar_time": ny(9, 9, 30) })
+        );
+    });
+}
+
+#[test]
+fn a_catch_up_page_is_scored_in_the_terms_of_a_split_after_it() {
+    // Yahoo answers an old page in the terms of today's split: the split comes with the
+    // page (`fetch_stock_minutes` asks for the splits since its end) and is applied first.
+    let made = ny(2, 15, 0);
+    let args = json!({
+        "symbol": "NVDA", "interval": "1h", "direction": "long", "thesis": "example thesis",
+        "entry": { "low": 99.0, "high": 100.0 }, "invalidation": 97.0,
+        "targets": [106.0], "expires_at": ny(30, 16, 0),
+    });
+    let mut problems = Vec::new();
+    let draft =
+        Draft::parse_for(&args, Some(setups::Market::UsEquity), made, &mut problems).unwrap();
+    let levels = draft.levels.clone().unwrap();
+    let (mut record, _) = Record::new("s".into(), "o", "NVDA".into(), draft, levels, vec![], made);
+    record.market = Some(setups::Market::UsEquity);
+    let split = setups::Adjustment::Split {
+        at: ny(16, 9, 30),
+        ratio: 10.0,
+    };
+    // The first page, the 3rd to the 9th, in the new terms.
+    let page = nvda_read(ny(3, 9, 30), 5, 10.1, vec![split]);
+    stocks::score(&mut record, &page, ny(3, 9, 35));
+    assert_eq!(record.status, Status::Watching);
+    assert_eq!(record.levels.invalidation, 9.7);
+}
+
+#[tokio::test]
+async fn a_stock_skip_that_would_expire_past_the_calendar_is_refused() {
+    // Three sessions of NVDA minutes before New Year 2029, at 100.
+    let mut bars = Vec::new();
+    for day in [26, 27, 28] {
+        let open = {
+            use chrono::TimeZone;
+            chrono_tz::America::New_York
+                .with_ymd_and_hms(2028, 12, day, 9, 30, 0)
+                .single()
+                .unwrap()
+                .timestamp()
+        };
+        for m in 0..390 {
+            let p = 100.0 + (m % 7) as f64 * 0.1;
+            bars.push(Bar {
+                open: p,
+                high: p + 0.3,
+                low: p - 0.3,
+                close: p,
+                volume: 1.0,
+                date: (open + m * 60).to_string(),
+            });
+        }
+    }
+    let replay = Replay::of(BTreeMap::from([("NVDA".to_string(), bars)]));
+    crate::replay::on(replay, |replay| {
+        let s = replaying(replay);
+        let as_of = {
+            use chrono::TimeZone;
+            chrono_tz::America::New_York
+                .with_ymd_and_hms(2028, 12, 28, 15, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+        };
+        let args = json!({ "symbol": "NVDA", "interval": "1h", "direction": "long",
+            "decision": "skip", "thesis": "example reason", "as_of": as_of });
+        let text = call(&s, "create_setup", args, "agent").unwrap_err();
+        assert_eq!(errors(&text), ["expires_at"]);
+        assert!(text.contains("calendar here ends with 2028"), "{text}");
+    });
+}
+
+/// A hub source like Binance's that does not list ABNB.
+struct WithoutAbnb;
+
+impl PushSource for WithoutAbnb {
+    fn feed_interval(&self, _symbol: &str, timeframe: &str) -> Result<String, String> {
+        Ok(timeframe.to_string())
+    }
+    fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
+        if symbol == "ABNB" {
+            return Err("Invalid symbol".into());
+        }
+        data::sample_ohlcv(symbol, timeframe, count, None, fetch::now_ms())
+    }
+    fn run(&self, _: String, _: String, tx: mpsc::Sender<FeedEvent>) -> BoxFuture<'static, ()> {
+        Box::pin(async move { tx.closed().await })
+    }
+}
+
+#[tokio::test]
+async fn a_us_stock_whose_ticker_ends_like_a_binance_quote_is_refused_with_a_hint() {
+    let hub = ChartHub::new(Arc::new(WithoutAbnb), HubLimits::default());
+    let s = live_on(mem(), hub, Access::parse(None), Limits::default(), None);
+    // ABNB ends in BNB, so it is read from Binance, which does not list it.
+    assert_eq!(fetch::market_of("ABNB"), None);
+    let text = call(&s, "create_setup", long_on("ABNB"), "owner").unwrap_err();
+    assert!(
+        text.starts_with("Cannot watch ABNB: Invalid symbol. If ABNB is a US stock"),
+        "{text}"
+    );
+    assert!(text.contains("setups do not take it yet"), "{text}");
+    assert!(s.store.setups().unwrap().is_empty());
+    // A Binance symbol Binance lists is made as before.
+    let crypto = call(&s, "create_setup", long(), "owner").unwrap();
+    assert!(crypto.get("market").is_none());
+}
+
+// Round 2 (ADR-0070): a symbol Yahoo stops answering, a page it answered nothing for, and
+// a late split before any close was scored.
+
+/// A long on `symbol` at `zone`, made at `made`, expiring at `expires_at`.
+fn stock_long_on(s: &Setups, symbol: &str, made: i64, zone: (f64, f64), expires_at: i64) -> String {
+    crate::replay::at(Some(made), || {
+        let args = json!({
+            "symbol": symbol, "interval": "1h", "direction": "long",
+            "thesis": "example thesis", "entry": { "low": zone.0, "high": zone.1 },
+            "invalidation": zone.0 * 0.97, "targets": [zone.1 * 1.06], "expires_at": expires_at,
+        });
+        id_of(&call(s, "create_setup", args, "owner").unwrap())
+    })
+}
+
+fn poll_symbol_at(s: &Setups, symbol: &str, t: i64) -> Result<(), String> {
+    crate::replay::at(Some(t), || s.poll(symbol))
+}
+
+#[tokio::test]
+async fn a_delisted_symbol_ends_its_setups_a_session_after_their_expiry() {
+    // Yahoo answers 404 for a delisted symbol, for good.
+    let s = stock_service(DataSource::Unavailable);
+    let id = stock_long_on(&s, "DELISTED", ny(6, 15, 49), (99.0, 100.0), ny(6, 15, 55));
+    assert!(poll_symbol_at(&s, "DELISTED", ny(9, 15, 0)).is_err());
+    assert_eq!(
+        nvda_setup(&s, &id)["status"],
+        "watching",
+        "Monday's session is not over"
+    );
+    assert!(poll_symbol_at(&s, "DELISTED", ny(9, 16, 1)).is_err());
+    let ended = nvda_setup(&s, &id);
+    assert_eq!(ended["status"], "expired");
+    assert_eq!(ended["result_r"], 0.0);
+    assert_eq!(ended["gap"], true);
+    assert_eq!(kinds(&ended), ["created", "gap", "status"]);
+    assert!(ended["log"][2]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("could not be read"));
+}
+
+#[tokio::test]
+async fn reads_that_fail_otherwise_end_nothing_until_yahoo_no_longer_keeps_the_bars() {
+    // A timeout or a 5xx, as when our own network is down over a weekend.
+    let s = stock_service(DataSource::Unavailable);
+    let id = nvda_long(&s, ny(6, 15, 55));
+    assert!(poll_at(&s, ny(10, 16, 1)).is_err());
+    assert_eq!(
+        nvda_setup(&s, &id)["status"],
+        "watching",
+        "Yahoo still has the bars"
+    );
+    // 29 days past the expiry, they are out of its reach.
+    assert!(poll_at(&s, ny(6, 15, 56) + 29 * 86_400_000).is_err());
+    assert_eq!(nvda_setup(&s, &id)["status"], "expired");
+}
+
+#[tokio::test]
+async fn an_extended_expiry_counts_for_a_symbol_yahoo_no_longer_answers() {
+    let s = stock_service(DataSource::Unavailable);
+    let id = stock_long_on(&s, "DELISTED", ny(6, 15, 49), (99.0, 100.0), ny(6, 16, 0));
+    // Extended to the 20th before the first expiry passed; no bar came to apply it.
+    crate::replay::at(Some(ny(6, 15, 50)), || {
+        let args = json!({ "id": id, "reason": "more time", "expires_at": ny(20, 16, 0) });
+        call(&s, "revise_setup", args, "owner").unwrap()
+    });
+    assert!(poll_symbol_at(&s, "DELISTED", ny(9, 16, 1)).is_err());
+    assert!(poll_symbol_at(&s, "DELISTED", ny(20, 16, 1)).is_err());
+    assert_eq!(
+        nvda_setup(&s, &id)["status"],
+        "watching",
+        "the 20th's session is the expiry's own"
+    );
+    assert!(poll_symbol_at(&s, "DELISTED", ny(23, 16, 1)).is_err());
+    let ended = nvda_setup(&s, &id);
+    assert_eq!(ended["status"], "expired");
+    assert_eq!(ended["expires_at"], json!(ny(20, 16, 0)));
+}
+
+#[tokio::test]
+async fn a_filled_stock_setup_yahoo_answers_nothing_for_expires_with_no_invented_exit() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(9, 12, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        assert_eq!(nvda_setup(&s, &id)["status"], "triggered");
+        // A halt: Yahoo answers 200 with no row for the session that is open.
+        let silent = fetch::StockMinutes::default();
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(9, 15, 0), ny(9, 15, 1))
+            .unwrap();
+        assert_eq!(nvda_setup(&s, &id)["status"], "triggered");
+        assert_eq!(
+            s.lock().stock_reads["NVDA"],
+            ny(9, 9, 30),
+            "the open session waits"
+        );
+        // A whole session after the expiry (Tuesday's close), still nothing.
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(10, 15, 0), ny(10, 16, 1))
+            .unwrap();
+        let ended = nvda_setup(&s, &id);
+        assert_eq!(ended["status"], "expired");
+        assert_eq!(
+            (ended["exit"].clone(), ended["result_r"].clone()),
+            (Value::Null, Value::Null)
+        );
+        assert_eq!(ended["gap"], true);
+    });
+}
+
+#[tokio::test]
+async fn a_past_page_yahoo_answered_nothing_for_is_read_past_as_a_gap() {
+    crate::replay::on(nvda_minutes(&friday_and_monday(), ny(6, 15, 55)), |_| {
+        let s = live_reading_chosen_bars();
+        let id = nvda_long(&s, ny(20, 16, 0));
+        poll_at(&s, ny(6, 16, 5)).unwrap();
+        // Monday's session is over by Tuesday 10:00, and Yahoo answered no row for it.
+        let silent = fetch::StockMinutes::default();
+        // Once may be a hiccup: the page is read again.
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(10, 9, 30), ny(10, 10, 0))
+            .unwrap();
+        assert_eq!(s.lock().stock_reads["NVDA"], ny(6, 16, 4));
+        s.apply_read("NVDA", &silent, ny(9, 9, 30), ny(10, 9, 30), ny(10, 10, 1))
+            .unwrap();
+        assert_eq!(s.lock().stock_reads["NVDA"], ny(10, 9, 30));
+        let gapped = nvda_setup(&s, &id);
+        assert_eq!(kinds(&gapped), ["created", "status", "gap"]);
+        assert_eq!(
+            gapped["log"][2]["changes"]["not_scored"],
+            json!({ "from": ny(6, 16, 4), "to": ny(10, 9, 30) })
+        );
+        assert_eq!(gapped["status"], "triggered");
+    });
+}
+
+#[tokio::test]
+async fn a_late_split_is_held_for_a_setup_with_no_close_scored_yet() {
+    crate::replay::on(nvda_minutes(&[], 0), |_| {
+        let s = live_reading_chosen_bars();
+        // Made on Saturday: no bar scored before Monday's split.
+        let id = crate::replay::at(Some(ny(7, 12, 0)), || {
+            let args = json!({
+                "symbol": "NVDA", "interval": "1h", "direction": "long",
+                "thesis": "example thesis", "entry": { "low": 99.0, "high": 100.0 },
+                "invalidation": 97.0, "targets": [106.0], "expires_at": ny(20, 16, 0),
+            });
+            id_of(&call(&s, "create_setup", args, "owner").unwrap())
+        });
+        assert_eq!(nvda_setup(&s, &id)["last_close"], Value::Null);
+        let monday = ny(9, 9, 30);
+        let (from, to, now) = (ny(7, 12, 0), ny(9, 9, 35), ny(9, 9, 36));
+        s.apply_read(
+            "NVDA",
+            &nvda_read(monday, 5, 10.1, Vec::new()),
+            from,
+            to,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            nvda_setup(&s, &id)["status"],
+            "watching",
+            "held, not invalidated"
+        );
+        let split = setups::Adjustment::Split {
+            at: monday,
+            ratio: 10.0,
+        };
+        s.apply_read(
+            "NVDA",
+            &nvda_read(monday, 5, 10.1, vec![split]),
+            from,
+            to,
+            now,
+        )
+        .unwrap();
+        let scored = nvda_setup(&s, &id);
+        assert_eq!(scored["status"], "watching");
+        assert_eq!(scored["invalidation"], 9.7);
+    });
+}
+
+#[tokio::test]
+async fn a_late_split_is_held_for_an_old_setup_when_a_newer_one_is_in_the_new_terms() {
+    crate::replay::on(nvda_minutes(&[], 0), |_| {
+        let s = live_reading_chosen_bars();
+        // One made on Saturday in the old terms, one on Sunday in the new ones.
+        let old = stock_long_on(&s, "NVDA", ny(7, 12, 0), (99.0, 100.0), ny(20, 16, 0));
+        let new = stock_long_on(&s, "NVDA", ny(8, 12, 0), (10.0, 10.2), ny(20, 16, 0));
+        let read = nvda_read(ny(9, 9, 30), 5, 10.1, Vec::new());
+        s.apply_read("NVDA", &read, ny(7, 12, 0), ny(9, 9, 35), ny(9, 9, 36))
+            .unwrap();
+        assert_eq!(
+            nvda_setup(&s, &old)["status"],
+            "watching",
+            "held, not invalidated"
+        );
+        assert_eq!(
+            nvda_setup(&s, &new)["scored_through"],
+            Value::Null,
+            "nothing applied"
+        );
+    });
 }

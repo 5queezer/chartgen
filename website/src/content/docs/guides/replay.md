@@ -18,7 +18,7 @@ chartgen replay-fixtures --symbols BTCUSDT,ETHUSDT \
 
 | Flag | Meaning |
 |------|---------|
-| `--symbols` | Binance spot symbols, comma-separated. |
+| `--symbols` | Binance spot symbols, or US stocks and ETFs such as `NVDA`, comma-separated. |
 | `--from` | First day of the window, UTC (`YYYY-MM-DD`). |
 | `--to` | Last day, UTC, included. It must have ended: a fixture holds closed bars only. |
 | `--out` | Directory for one `<SYMBOL>.json` per symbol. Created if missing. Use one directory per window. |
@@ -47,6 +47,19 @@ each gap in real time (the first 20).
 - **One window per directory.** A replay server loads every `*.json` in its directory as one run.
   So a run refuses an `--out` that holds a `*.json` of another window, or one that records no
   window (a hand-made fixture). Write each window to a fresh directory.
+- **Stocks** ([ADR-0070](/chartgen/decisions/0070-stock-setups/)). A symbol that is not a
+  Binance symbol is read from Yahoo:
+  - only its 1m bars of the regular session, one 7-day page per request, 2 s apart;
+  - the window must start within the last 29 days, since Yahoo keeps 1m bars for 30;
+  - `--shift-days` is refused, because the sessions follow the exchange's calendar;
+  - the window's dividends are written to the fixture as `"dividends": [[ex_date_s, amount]]`,
+    and a stock setup in the replay is paid them;
+  - splits are not written: Yahoo's bars are already adjusted for them;
+  - a minute without a trade is no bar;
+  - the replay builds a stock's intraday bars from the session's open, as Yahoo does;
+  - a symbol `create_setup` would refuse (an index, OTC, another exchange) is refused;
+  - every symbol whose quote is not one `detect_source` knows (USDT, BUSD, BTC, ETH, BNB, USDC,
+    FDUSD) is taken for a stock: BTCEUR or ETHTRY is read from Yahoo, not from Binance.
 - **Gaps.** A minute Binance has no kline for (an outage, or no trade on a small symbol) stays
   missing. The replay builds each longer bar from the minutes it has, and a bar with no minute at
   all is not there, as on Binance. If the window's first minutes are missing, the first bar of

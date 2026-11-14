@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import answers from "../../../tests/fixtures/setup_responses.json";
+import stock from "../../../tests/fixtures/stock_setup_responses.json";
 import record from "../../../tests/fixtures/track_record_responses.json";
 import {
   EventsPayloadSchema,
@@ -183,6 +184,24 @@ describe("setups (ADR-0059), against the server's own answers", () => {
     expect(SetupPayloadSchema.parse(answers.create_setup_skip).bracket).not.toBe("agent");
     expect(SetupPayloadSchema.parse(answers.revise_setup).pending[0]?.kind).toBe("levels");
     expect(SetupPayloadSchema.parse(answers.cancel_setup).pending[0]?.kind).toBe("cancel");
+  });
+
+  it("parses a stock setup (ADR-0070): its market, last close and an adjusted dividend", () => {
+    const made = SetupPayloadSchema.strict().parse(stock.create_setup);
+    expect(made.market).toBe("us_equity");
+    expect(made.adjustments).toBeUndefined();
+    const ended = SetupPayloadSchema.strict().parse(stock.get_setup);
+    expect(ended.costs).toEqual({ fee_bps_per_side: 1, slippage_bps_per_side: 3 });
+    expect(ended.last_close?.price).toBeGreaterThan(0);
+    expect(ended.adjustments?.[0]?.kind).toBe("dividend");
+    expect(ended.log.map((e) => e.kind)).toContain("adjusted");
+    // A Binance setup has none of the stock fields.
+    const binance = SetupPayloadSchema.parse(answers.get_setup);
+    expect([binance.market, binance.last_close, binance.adjustments]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 
   it("parses the list, with closed setups scored", () => {

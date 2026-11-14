@@ -911,6 +911,15 @@ export const SetupShadowsSchema = z
   .strict();
 export type SetupShadows = z.infer<typeof SetupShadowsSchema>;
 
+/** A split or a dividend applied to a stock setup (ADR-0070); `at` is when it took effect, ms. */
+export const SetupAdjustmentSchema = z.discriminatedUnion("kind", [
+  // Every price of the setup was divided by the ratio (a 10:1 split is 10).
+  z.object({ kind: z.literal("split"), at: z.number(), ratio: z.number().positive() }),
+  // Per share: paid to a long, by a short, from its exit on.
+  z.object({ kind: z.literal("dividend"), at: z.number(), amount: z.number().positive() }),
+]);
+export type SetupAdjustment = z.infer<typeof SetupAdjustmentSchema>;
+
 export const SetupSchema = SetupLevelsSchema.extend({
   id: z.string(),
   symbol: z.string(),
@@ -972,6 +981,12 @@ export const SetupSchema = SetupLevelsSchema.extend({
   features: z.record(z.string(), z.union([z.number(), z.boolean(), z.string()])).optional(),
   probability: z.number().min(0).max(1).optional(),
   playbook_version: z.string().optional(),
+  // A stock setup only (ADR-0070): its market, its newest 1m close scored (where it ends
+  // when its expiry falls in a stretch with no bar) and the splits and dividends applied.
+  // Absent on a Binance setup.
+  market: z.literal("us_equity").optional(),
+  last_close: SetupMarkSchema.optional(),
+  adjustments: z.array(SetupAdjustmentSchema).optional(),
 });
 export type Setup = z.infer<typeof SetupSchema>;
 
@@ -980,7 +995,7 @@ export const SetupRevisionSchema = z.object({
   seq: z.number().int(),
   at: z.number(),
   by: z.enum(["agent", "server"]),
-  kind: z.enum(["created", "revised", "cancelled", "status", "voided", "gap"]),
+  kind: z.enum(["created", "revised", "cancelled", "status", "voided", "gap", "adjusted"]),
   reason: z.string().nullable(),
   changes: z.record(z.string(), z.object({ from: z.unknown(), to: z.unknown() })),
 });

@@ -3,6 +3,9 @@
 //! Reads the 1m klines of a window over Binance REST, through the spot gate, and writes
 //! one `<SYMBOL>.json` per symbol in the format `CHARTGEN_REPLAY_FIXTURES` loads
 //! (`replay.rs`). A minute Binance has no kline for stays missing: no bar is invented.
+//!
+//! A US stock's fixture (ADR-0070) is read from Yahoo instead: its 1m bars of the
+//! regular session, a minute without a trade left out, and the dividends of the window.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,10 +35,17 @@ const MAX_SHIFT_DAYS: i64 = 36_500;
 const ATTEMPTS: u32 = 5;
 /// The longest wait for those limits before reading again; a longer one ends the run.
 const MAX_WAIT: Duration = Duration::from_secs(300);
+/// Pause before each read of a stock from Yahoo, which is behind no gate: far below any
+/// rate at which it has refused one (ADR-0070).
+const STOCK_PACE: Duration = Duration::from_secs(2);
+/// One read of a stock: Yahoo's 7-day page of 1m bars.
+const STOCK_PAGE_MS: i64 = 7 * DAY_S * 1000;
+/// How far back Yahoo's 1m bars reach: a day short of its 30.
+const STOCK_REACH_MS: i64 = 29 * DAY_S * 1000;
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Binance spot symbols, comma-separated (e.g. BTCUSDT,ETHUSDT)
+    /// Binance spot symbols or US stocks, comma-separated (e.g. BTCUSDT,ETHUSDT,NVDA)
     #[arg(long, value_delimiter = ',', required = true)]
     symbols: Vec<String>,
     /// First day of the window, UTC (YYYY-MM-DD)
@@ -65,12 +75,15 @@ struct Window {
     shift_days: i64,
 }
 
-/// A fixture as written: `replay.rs` reads `symbol` and `bars`.
+/// A fixture as written: `replay.rs` reads `symbol`, `bars` and a stock's `dividends`.
 #[derive(Serialize)]
 struct Written<'a> {
     symbol: &'a str,
     window: &'a Window,
     bars: Vec<(i64, f64, f64, f64, f64, f64)>,
+    /// (ex-date s, amount) of a stock.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    dividends: &'a [(i64, f64)],
 }
 
 /// The part of a `*.json` in `--out` that says which window it holds.
@@ -100,12 +113,18 @@ fn plan(args: &Args, now_ms: i64) -> Result<Plan, String> {
     let mut symbols: Vec<String> = Vec::new();
     for given in &args.symbols {
         let symbol = given.trim().to_uppercase();
-        // It names a file, so nothing but letters and digits.
+        // It names a file, so nothing but letters and digits, and for a stock - and .
+        // inside, as in BRK-B.
+        let stock = crate::fetch::market_of(&symbol).is_some();
+        let allowed = |c: char| c.is_ascii_alphanumeric() || (stock && "-.".contains(c));
         if symbol.is_empty()
             || symbol.len() > 20
-            || !symbol.chars().all(|c| c.is_ascii_alphanumeric())
+            || !symbol.chars().all(allowed)
+            || !symbol.starts_with(|c: char| c.is_ascii_alphanumeric())
         {
-            return Err(format!("{given:?} is not a Binance spot symbol"));
+            return Err(format!(
+                "{given:?} is not a Binance spot symbol or a US stock"
+            ));
         }
         if symbols.contains(&symbol) {
             return Err(format!("{symbol} is named twice"));
@@ -146,6 +165,25 @@ fn plan(args: &Args, now_ms: i64) -> Result<Plan, String> {
             args.shift_days
         ));
     }
+    let stocks: Vec<&String> = symbols
+        .iter()
+        .filter(|s| crate::fetch::market_of(s).is_some())
+        .collect();
+    if let Some(stock) = stocks.first() {
+        if args.shift_days != 0 {
+            return Err(format!(
+                "--shift-days is refused with a stock such as {stock}: its sessions follow the \
+                 exchange's calendar, and shifted they would fall on holidays and weekends"
+            ));
+        }
+        if from_s * 1000 < now_ms - STOCK_REACH_MS {
+            return Err(format!(
+                "{} is too long ago for {stock}: Yahoo keeps 1m bars for 30 days, so --from \
+                 must be within the last 29",
+                args.from
+            ));
+        }
+    }
     if args.shift_days % 7 != 0 && !args.shift_any {
         return Err(format!(
             "--shift-days {} is not a multiple of 7: the weekdays would move, so the agent would see \
@@ -179,6 +217,37 @@ fn build(args: &Args, now_ms: i64, sleep: &dyn Fn(Duration)) -> Result<(), Strin
             continue;
         }
         let began = Instant::now();
+        if crate::fetch::market_of(symbol).is_some() {
+            // What create_setup takes, and only that: a replay scores it as a US stock.
+            crate::fetch::check_us_stock(crate::fetch::DataSource::Live, symbol)
+                .map_err(|(problem, hint)| format!("{problem}: {hint}"))?;
+            let read = |start, end| {
+                sleep(STOCK_PACE);
+                crate::fetch::fetch_stock_minutes(
+                    crate::fetch::DataSource::Live,
+                    symbol,
+                    start,
+                    end,
+                )
+            };
+            let (bars, dividends) = stock_minutes(plan.from_ms, plan.end_ms, read)
+                .map_err(|e| format!("{symbol}: {e}. The fixtures already written are kept, and a rerun reads only the rest"))?;
+            if bars.is_empty() {
+                return Err(format!(
+                    "{symbol}: Yahoo has no 1m bars of a session in this window"
+                ));
+            }
+            let bytes = write(&path, symbol, &plan.window, &bars, &dividends)?;
+            println!(
+                "{symbol}: {} bars of the regular session, {} dividends, {:.1} MB, {:.1} s -> {}",
+                bars.len(),
+                dividends.len(),
+                bytes as f64 / 1e6,
+                began.elapsed().as_secs_f64(),
+                path.display()
+            );
+            continue;
+        }
         let bars = minutes(plan.from_ms, plan.end_ms, |start, last| {
             retried(
                 || {
@@ -197,7 +266,7 @@ fn build(args: &Args, now_ms: i64, sleep: &dyn Fn(Duration)) -> Result<(), Strin
                 "{symbol}: Binance has no 1m bars in this window. Is it a spot symbol, listed by then?"
             ));
         }
-        let bytes = write(&path, symbol, &plan.window, &bars)?;
+        let bytes = write(&path, symbol, &plan.window, &bars, &[])?;
         let found = gaps(&bars, plan.from_ms, plan.end_ms);
         let missing = (plan.end_ms - plan.from_ms) / MINUTE_MS - bars.len() as i64;
         println!(
@@ -305,6 +374,36 @@ fn minutes(
     Ok(bars)
 }
 
+/// A stock's dividends as (ex-date s, amount).
+type Dividends = Vec<(i64, f64)>;
+
+/// A stock's 1m bars opening in [`from_ms`, `end_ms`), read one 7-day page at a time by
+/// `read(start, end)`, and the dividends that went ex in the window as (s, amount).
+fn stock_minutes(
+    from_ms: i64,
+    end_ms: i64,
+    mut read: impl FnMut(i64, i64) -> Result<crate::fetch::StockMinutes, String>,
+) -> Result<(Vec<Bar>, Dividends), String> {
+    let mut bars = Vec::new();
+    let mut dividends: Dividends = Vec::new();
+    let mut start = from_ms;
+    while start < end_ms {
+        let end = (start + STOCK_PAGE_MS).min(end_ms);
+        let page = read(start, end)?;
+        bars.extend(page.bars);
+        for action in page.adjustments {
+            if let chartgen::setups::Adjustment::Dividend { at, amount } = action {
+                if (from_ms..end_ms).contains(&at) && !dividends.iter().any(|d| d.0 * 1000 == at) {
+                    dividends.push((at / 1000, amount));
+                }
+            }
+        }
+        start = end;
+    }
+    dividends.sort_by_key(|d| d.0);
+    Ok((bars, dividends))
+}
+
 /// The runs of more than `REPORTED_GAP_MIN` missing minutes in [`from_ms`, `end_ms`):
 /// (the first missing minute in ms, how many minutes).
 fn gaps(bars: &[Bar], from_ms: i64, end_ms: i64) -> Vec<(i64, i64)> {
@@ -322,11 +421,18 @@ fn gaps(bars: &[Bar], from_ms: i64, end_ms: i64) -> Vec<(i64, i64)> {
 
 /// Write the fixture through a `.part` file, so an interrupted write leaves no fixture.
 /// Returns its size in bytes.
-fn write(path: &Path, symbol: &str, window: &Window, bars: &[Bar]) -> Result<u64, String> {
+fn write(
+    path: &Path,
+    symbol: &str,
+    window: &Window,
+    bars: &[Bar],
+    dividends: &[(i64, f64)],
+) -> Result<u64, String> {
     let shift_s = window.shift_days * DAY_S;
     let fixture = Written {
         symbol,
         window,
+        dividends,
         bars: bars
             .iter()
             .map(|b| {
@@ -409,8 +515,21 @@ mod tests {
                 "symbol-days",
             ),
             (
-                "--symbols A1,A2,A3,A4,A5,A6 --from 2025-10-01 --to 2025-12-31",
+                "--symbols A1USDT,A2USDT,A3USDT,A4USDT,A5USDT,A6USDT --from 2025-10-01 --to 2025-12-31",
                 "symbol-days",
+            ),
+            // A stock: Yahoo's 1m bars reach back 30 days, and its sessions are not shifted.
+            (
+                "--symbols NVDA --from 2025-12-01 --to 2025-12-01",
+                "30 days",
+            ),
+            (
+                "--symbols BTCUSDT,NVDA --from 2026-01-20 --to 2026-01-20 --shift-days 7",
+                "calendar",
+            ),
+            (
+                "--symbols .NVDA --from 2026-01-20 --to 2026-01-20",
+                "not a Binance",
             ),
             (
                 "--symbols BTCUSDT --from 2026-01-01 --to 2026-01-01 --shift-days -30000",
@@ -427,7 +546,10 @@ mod tests {
         let p = "--symbols BTCUSDT --from 2026-01-01 --to 2026-01-01 --shift-days 10 --shift-any";
         assert_eq!(planned(p).unwrap().window.shift_days, 10);
         // 5 symbols over a 92-day quarter is the most there is.
-        planned("--symbols A1,A2,A3,A4,A5 --from 2025-08-01 --to 2025-10-31").unwrap();
+        planned("--symbols A1USDT,A2USDT,A3USDT,A4USDT,A5USDT --from 2025-08-01 --to 2025-10-31")
+            .unwrap();
+        let p = planned("--symbols NVDA,brk-b --from 2026-01-20 --to 2026-01-30").unwrap();
+        assert_eq!(p.symbols, ["NVDA", "BRK-B"]);
         assert!(
             Cli::try_parse_from(["x", "--out", "o", "--from", "2026-01-01", "--to", "x"]).is_err()
         );
@@ -609,6 +731,59 @@ mod tests {
         let err = build(&one_day(&dir), NOW_MS, &sleep).unwrap_err();
         assert!(err.contains("wait 2 s before running again"), "{err}");
         assert_eq!(requests.load(Ordering::SeqCst), ATTEMPTS as usize);
+    }
+
+    #[test]
+    fn a_stocks_fixture_is_read_a_week_a_page_with_its_dividends_and_loads_back() {
+        let from = JAN_1 * 1000;
+        let end = from + 10 * DAY_S * 1000;
+        let ex = from + 8 * DAY_S * 1000;
+        let mut pages = Vec::new();
+        let (bars, dividends) = stock_minutes(from, end, |start, stop| {
+            pages.push((start, stop));
+            let bar = Bar {
+                open: 10.0,
+                high: 11.0,
+                low: 9.0,
+                close: 10.5,
+                volume: 1.0,
+                date: (start / 1000).to_string(),
+            };
+            let paid = chartgen::setups::Adjustment::Dividend {
+                at: ex,
+                amount: 0.25,
+            };
+            Ok(crate::fetch::StockMinutes {
+                bars: vec![bar],
+                // Yahoo may report it on both pages around it; it is kept once.
+                adjustments: vec![paid],
+                reached: Some(stop),
+            })
+        })
+        .unwrap();
+        let week = 7 * DAY_S * 1000;
+        assert_eq!(pages, [(from, from + week), (from + week, end)]);
+        assert_eq!(bars.len(), 2);
+        assert_eq!(dividends, [(ex / 1000, 0.25)]);
+
+        let dir = crate::test_dir::new("replay_fixtures_stock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let window = Window {
+            from: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            to: NaiveDate::from_ymd_opt(2026, 1, 10).unwrap(),
+            shift_days: 0,
+        };
+        write(&dir.join("NVDA.json"), "NVDA", &window, &bars, &dividends).unwrap();
+        let replay = Replay::load(&dir).unwrap();
+        assert_eq!(
+            replay.dividends("NVDA", from, end),
+            [chartgen::setups::Adjustment::Dividend {
+                at: ex,
+                amount: 0.25
+            }]
+        );
+        assert!(replay.dividends("NVDA", ex + 1, end).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

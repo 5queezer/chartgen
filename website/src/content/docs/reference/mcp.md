@@ -1567,13 +1567,18 @@ setups; `can_create` in the list says so.
 | `cancel_setup` | `id`, `reason` | The setup with its log |
 | `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature` | `{replay, closed, open, truncated, group_by, feature, total, groups: [...], shadows}` |
 
-- `symbol`: a Binance symbol. Anything else is refused.
+- `symbol`: a Binance symbol, or a stock or ETF listed in the US (Nasdaq, NYSE, NYSE American,
+  NYSE Arca or Cboe BZX) as Yahoo reports it, such as `NVDA` or `SPY`. An index (`^GSPC`), an
+  OTC stock, a stock listed elsewhere and Yahoo's crypto, FX and futures are refused, each with a
+  hint. A stock setup has its own costs and session rules; see
+  [stock setups](/chartgen/guides/setups/#stock-setups).
 - `direction`: `long` or `short`. `decision`: `take` (default), or `skip` for a decision not to
   trade, which takes no levels and is scored with the server's bracket.
 - `entry`: `{low, high}`. `invalidation`: below the entry zone of a long, above that of a
-  short, and at least 42 bps of the price from it. `targets`: 1 to 4 prices beyond the zone,
+  short, and at least 42 bps of the price from it (24 bps on a stock). `targets`: 1 to 4 prices beyond the zone,
   nearest first; the first decides a win. `expires_at`: unix seconds, unix ms or ISO 8601,
-  ahead and at most 90 days.
+  ahead and at most 90 days, and on a stock not past 2028, the last year the exchange calendar
+  here holds.
 - `thesis`: at most 2000 characters. `reason`: at most 500.
 - `drawings`: as [`generate_chart`'s](#drawings), at most 50, on the bars of the setup's
   symbol and interval.
@@ -1607,9 +1612,13 @@ setup scored with three fixed exit variants for comparison, `v1_half_t1_be`, `v2
 null before the fill; see [shadow results](/chartgen/guides/setups/#shadow-results)), `tags`,
 `scored_through` (still moving after the close while a shadow result is open), `gap` (true if bars were missed and could
 not be read afterwards, so the result is incomplete), `pending`
-(changes that count from the next 1m bar), `revisions` and `agent_revisions`. `log` holds every
+(changes that count from the next 1m bar), `revisions` and `agent_revisions`. A stock setup
+also has `market` (`us_equity`), `last_close` (its newest 1m close scored, `{price, bar_time}`)
+and `adjustments` once a split or a dividend applied (`{kind: "split", at, ratio}` or
+`{kind: "dividend", at, amount}`); a Binance setup has none of the three. `log` holds every
 entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `cancelled`,
-`status`, `voided`, `gap`), `reason` and `changes` (`{field: {from, to}}`). Times are in ms.
+`status`, `voided`, `gap`, `adjusted`), `reason` and `changes` (`{field: {from, to}}`). Times
+are in ms.
 
 A call that fails a check answers with an error whose text is JSON:
 `{error, setup_errors: [{field, message, hint}]}`, one entry per problem, and stores nothing.

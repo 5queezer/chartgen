@@ -1,0 +1,235 @@
+{
+  "create_setup": {
+    "agent_revisions": 0,
+    "bars_to_exit": null,
+    "bars_to_fill": null,
+    "bars_to_mae": null,
+    "bars_to_mfe": null,
+    "bracket": "agent",
+    "closest_approach_r": null,
+    "costs": {
+      "fee_bps_per_side": 1.0,
+      "slippage_bps_per_side": 3.0
+    },
+    "created_at": 1793300400000,
+    "decision": "take",
+    "direction": "long",
+    "drawings": [],
+    "entry": {
+      "high": 57.1,
+      "low": 57.0
+    },
+    "exit": null,
+    "expires_at": 1793386800000,
+    "fill": null,
+    "gap": false,
+    "id": "setup-000001",
+    "interval": "1h",
+    "invalidation": 56.5,
+    "log": [
+      {
+        "at": 1793300400000,
+        "by": "agent",
+        "changes": {},
+        "kind": "created",
+        "reason": null,
+        "seq": 1
+      }
+    ],
+    "mae_at": null,
+    "mae_r": null,
+    "market": "us_equity",
+    "mfe_at": null,
+    "mfe_r": null,
+    "pending": [],
+    "result_r": null,
+    "revisions": 1,
+    "scored_through": null,
+    "shadow_results": null,
+    "status": "watching",
+    "symbol": "O",
+    "tags": [],
+    "targets": [
+      67.8
+    ],
+    "thesis": "example thesis"
+  },
+  "get_setup": {
+    "adjustments": [
+      {
+        "amount": 0.272,
+        "at": 1793367000000,
+        "kind": "dividend"
+      }
+    ],
+    "agent_revisions": 0,
+    "bars_to_exit": 6.98,
+    "bars_to_fill": 0.0,
+    "bars_to_mae": 2.07,
+    "bars_to_mfe": 1.58,
+    "bracket": "agent",
+    "closest_approach_r": 0.0,
+    "costs": {
+      "fee_bps_per_side": 1.0,
+      "slippage_bps_per_side": 3.0
+    },
+    "created_at": 1793300400000,
+    "decision": "take",
+    "direction": "long",
+    "drawings": [],
+    "entry": {
+      "high": 57.1,
+      "low": 57.0
+    },
+    "exit": {
+      "bar_time": 1793386740000,
+      "price": 57.139801025390625
+    },
+    "expires_at": 1793386800000,
+    "fill": {
+      "bar_time": 1793300400000,
+      "price": 57.084999084472656
+    },
+    "gap": false,
+    "id": "setup-000001",
+    "interval": "1h",
+    "invalidation": 56.5,
+    "last_close": {
+      "bar_time": 1793386740000,
+      "price": 57.139801025390625
+    },
+    "log": [
+      {
+        "at": 1793300400000,
+        "by": "agent",
+        "changes": {},
+        "kind": "created",
+        "reason": null,
+        "seq": 1
+      },
+      {
+        "at": 1793300400000,
+        "by": "server",
+        "changes": {
+          "fill": {
+            "from": null,
+            "to": {
+              "bar_time": 1793300400000,
+              "price": 57.084999084472656
+            }
+          },
+          "status": {
+            "from": "watching",
+            "to": "triggered"
+          }
+        },
+        "kind": "status",
+        "reason": null,
+        "seq": 2
+      },
+      {
+        "at": 1793367000000,
+        "by": "server",
+        "changes": {
+          "adjustments": {
+            "from": [],
+            "to": [
+              {
+                "amount": 0.272,
+                "at": 1793367000000,
+                "kind": "dividend"
+              }
+            ]
+          }
+        },
+        "kind": "adjusted",
+        "reason": "a dividend of 0.272 per share went ex at 2026-10-30T13:30:00Z: a long is paid it and a short pays it, from its exit on",
+        "seq": 3
+      },
+      {
+        "at": 1793386800000,
+        "by": "server",
+        "changes": {
+          "exit": {
+            "from": null,
+            "to": {
+              "bar_time": 1793386740000,
+              "price": 57.139801025390625
+            }
+          },
+          "result_r": {
+            "from": null,
+            "to": 0.4805
+          },
+          "status": {
+            "from": "triggered",
+            "to": "expired"
+          }
+        },
+        "kind": "status",
+        "reason": null,
+        "seq": 4
+      }
+    ],
+    "mae_at": 1793369040000,
+    "mae_r": -0.2137,
+    "market": "us_equity",
+    "mfe_at": 1793367300000,
+    "mfe_r": 0.9658,
+    "pending": [],
+    "result_r": 0.4805,
+    "revisions": 4,
+    "scored_through": 1793386740000,
+    "shadow_results": {
+      "v1_half_t1_be": {
+        "exited_at": 1793386740000,
+        "exits": [
+          {
+            "bar_time": 1793386740000,
+            "fraction": 1.0,
+            "price": 57.139801025390625
+          }
+        ],
+        "result_r": 0.4805,
+        "status": "expired",
+        "stop": 56.5,
+        "time_stop_at": null
+      },
+      "v2_be_at_1r": {
+        "exited_at": 1793386740000,
+        "exits": [
+          {
+            "bar_time": 1793386740000,
+            "fraction": 1.0,
+            "price": 57.139801025390625
+          }
+        ],
+        "result_r": 0.4805,
+        "status": "expired",
+        "stop": 56.5,
+        "time_stop_at": null
+      },
+      "v3_time_stop": {
+        "exited_at": 1793386740000,
+        "exits": [
+          {
+            "bar_time": 1793386740000,
+            "fraction": 1.0,
+            "price": 57.139801025390625
+          }
+        ],
+        "result_r": 0.4805,
+        "status": "expired",
+        "stop": 56.5,
+        "time_stop_at": 1793644200000
+      }
+    },
+    "status": "expired",
+    "symbol": "O",
+    "tags": [],
+    "targets": [
+      67.8
+    ],
+    "thesis": "example thesis"
+  }
+}

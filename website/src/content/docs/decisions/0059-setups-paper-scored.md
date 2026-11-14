@@ -5,7 +5,7 @@ sidebar:
   order: 59
 ---
 
-**Status:** Accepted; amended by [ADR-0066](/chartgen/decisions/0066-shadow-exit-variants/) (a closed setup is still scored for its open shadow results, and holds its feed while it is) and [ADR-0068](/chartgen/decisions/0068-replay-over-real-history/) (a replay's fixtures may be real Binance history, written by `chartgen replay-fixtures`)
+**Status:** Accepted; amended by [ADR-0066](/chartgen/decisions/0066-shadow-exit-variants/) (a closed setup is still scored for its open shadow results, and holds its feed while it is) and [ADR-0068](/chartgen/decisions/0068-replay-over-real-history/) (a replay's fixtures may be real Binance history, written by `chartgen replay-fixtures`) and [ADR-0070](/chartgen/decisions/0070-stock-setups/) (a setup may be on a US stock or ETF, scored on Yahoo's 1m bars with session rules)
 **Date:** 2026-11-11
 **Amends:** [ADR-0054](/chartgen/decisions/0054-agent-drawings/) (a setup stores drawings on the
 server) and [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (its limit of 16 watched pairs
