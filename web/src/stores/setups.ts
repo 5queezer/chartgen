@@ -38,20 +38,28 @@ function reason(err: unknown): string {
   return text.replace(/^MCP tool error: /, "");
 }
 
+/** Refreshes started, and setups opened: only the latest one's answer is taken. */
+let refreshes = 0;
+let opens = 0;
+
 /**
  * Ask the server for the caller's setups and their track record. What was shown stays
  * while a refresh fails; the totals are left out alone when only they could not be read.
+ * A refresh that answers after a later one is dropped: its statuses would be older.
  */
 export async function refreshSetups(session: McpSession): Promise<void> {
+  const mine = ++refreshes;
+  const latest = () => mine === refreshes;
   try {
     const list = await session.callListSetups({ limit: LIST_LIMIT });
     if (!list.enabled) {
-      setState({ kind: "off" });
+      if (latest()) setState({ kind: "off" });
       return;
     }
     const record = (decision: "take" | "skip") =>
       session.callGetTrackRecord({ decision }).catch(() => null);
     const [takes, skips] = await Promise.all([record("take"), record("skip")]);
+    if (!latest()) return;
     setState({
       kind: "ready",
       setups: list.setups,
@@ -60,7 +68,9 @@ export async function refreshSetups(session: McpSession): Promise<void> {
       skips,
     });
   } catch (err) {
-    if (state().kind !== "ready") setState({ kind: "error", message: reason(err) });
+    if (latest() && state().kind !== "ready") {
+      setState({ kind: "error", message: reason(err) });
+    }
   }
 }
 
@@ -69,16 +79,19 @@ export async function refreshSetups(session: McpSession): Promise<void> {
  * the server's bracket. They join the symbol's drawings as the user's own, as a link's do
  * (ADR-0054), under ids of the setup's own, and replace what an earlier click drew: a setup
  * that moved on is shown once, as it is now. The setup is read again first, so the chart
- * shows it as the server has it now.
+ * shows it as the server has it now. Only the setup clicked last is opened: one whose read
+ * answers after a later click's is dropped.
  */
 export async function openSetup(session: McpSession, id: string): Promise<void> {
+  const mine = ++opens;
   let setup: Setup;
   try {
     setup = await session.callGetSetup({ id });
   } catch (err) {
-    showToast(`Setup could not be read: ${reason(err)}`);
+    if (mine === opens) showToast(`Setup could not be read: ${reason(err)}`);
     return;
   }
+  if (mine !== opens) return;
   const records = setupDrawings(setup);
   const put = replaceDrawings(setup.symbol, setupDrawingPrefix(setup.id), records);
   if (put === null) showToast("The setup's drawings could not be saved");
