@@ -1865,17 +1865,7 @@ pub fn fetch_stock_minutes(
     from_ms: i64,
     to_ms: i64,
 ) -> Result<StockMinutes, String> {
-    let keep = |bars: &[Bar]| -> Vec<Bar> {
-        bars.iter()
-            .filter(|b| {
-                bar_ts(*b).is_some_and(|t| {
-                    let t = t * 1000;
-                    t >= from_ms && t + 60_000 <= to_ms && Market::UsEquity.in_session(t)
-                })
-            })
-            .cloned()
-            .collect()
-    };
+    let keep = |bars: &[Bar]| session_minutes(bars, from_ms, to_ms);
     match source {
         DataSource::Live => {
             let url = format!(
@@ -1920,6 +1910,25 @@ pub fn fetch_stock_minutes(
         #[cfg(test)]
         DataSource::Unavailable => Err("upstream unavailable".into()),
     }
+}
+
+/// The bars of `bars` that are whole minutes of the regular session and closed in
+/// [`from_ms`, `to_ms`]. Yahoo's newest row may be the last price, stamped with its
+/// trade's time, and after the close a 16:00 row holds the official close: neither is a
+/// minute of the session.
+fn session_minutes(bars: &[Bar], from_ms: i64, to_ms: i64) -> Vec<Bar> {
+    bars.iter()
+        .filter(|b| {
+            bar_ts(*b).is_some_and(|t| {
+                let t = t * 1000;
+                t % 60_000 == 0
+                    && t >= from_ms
+                    && t + 60_000 <= to_ms
+                    && Market::UsEquity.in_session(t)
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// The 1m rows of a Yahoo chart answer that have prices, and its splits and dividends.
@@ -2838,12 +2847,21 @@ mod tests {
             [open, open + 60, open + 23_280, open + 23_340, open + 23_400]
         );
         assert!(read.adjustments.is_empty());
-        // The 16:00 row is a price, not a minute of the session.
-        let session: Vec<bool> = times
+        // The 16:00 row is a price, not a minute of the session, and so is a last-price
+        // row stamped inside a minute, as Yahoo sends one while the minute forms.
+        let mut rows = read.bars.clone();
+        rows.push(Bar {
+            date: (open + 23_364).to_string(),
+            ..rows[4].clone()
+        });
+        let kept: Vec<i64> = session_minutes(&rows, 0, i64::MAX / 2)
             .iter()
-            .map(|t| Market::UsEquity.in_session(t * 1000))
+            .map(|b| bar_ts(b).unwrap())
             .collect();
-        assert_eq!(session, [true, true, true, true, false]);
+        assert_eq!(kept, [open, open + 60, open + 23_280, open + 23_340]);
+        // And only those that closed by the end of the read.
+        let read_to = (open + 23_340) * 1000;
+        assert_eq!(session_minutes(&rows, 0, read_to).len(), 3);
         // BRT, thinly traded: minutes without a trade come as nulls and are no bars.
         let thin = parse_stock_minutes(&recorded("yahoo_brt_1m_nulls.json")).unwrap();
         assert_eq!(thin.bars.len(), 1);
