@@ -105,6 +105,17 @@ pub fn fetch_ohlcv(
                 has_more,
             })
         }
+        // As Binance still serves a delisted symbol's last bars, for a test's symbol
+        // named so: they end on 2024-02-20.
+        #[cfg(test)]
+        DataSource::Unavailable if symbol.starts_with("STALE") => {
+            let data =
+                data::sample_ohlcv(symbol, interval, limit, Some(1_708_387_200_000), now_ms())?;
+            Ok(Fetched {
+                data,
+                has_more: false,
+            })
+        }
         #[cfg(test)]
         DataSource::Unavailable => Err("upstream unavailable".into()),
     }
