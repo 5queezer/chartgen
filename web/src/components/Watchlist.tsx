@@ -748,7 +748,7 @@ function WatchlistRow(props: WatchlistRowProps): JSX.Element {
   const last = () => quote()?.last ?? null;
   const change = () => quote()?.change ?? null;
   const dir = () => trend(change());
-  // Not trading, e.g. delisted (ADR-0076): the price stays, dimmed.
+  // Stale, usually not trading, e.g. delisted (ADR-0076): the price stays, dimmed.
   const staleSince = () => (quote()?.stale ? (quote()?.last_bar_at ?? "unknown") : null);
 
   // Flash the Last cell when the price ticks; the first value never flashes.
@@ -814,7 +814,7 @@ function WatchlistRow(props: WatchlistRowProps): JSX.Element {
           ],
         });
       }}
-      title={error() ?? (staleSince() ? `Not trading: no update since ${staleSince()}` : undefined)}
+      title={error() ?? (staleSince() ? `Stale: no update since ${staleSince()}` : undefined)}
     >
       <span role="cell" class="wl-symbol min-w-0" title={props.symbol}>
         <button

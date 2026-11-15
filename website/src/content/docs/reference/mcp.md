@@ -919,9 +919,12 @@ unreachable upstream. `change = last - prev_close` and
 `change_pct = change / prev_close × 100`. `high`, `low` and `volume` are
 `null` when upstream omits them. Numbers that are not finite are `null`.
 
-A **stale** quote is one its market has not updated for longer than that
-market is ever shut, such as a delisted coin's: Binance still answers
-XMRUSDT with its last price and a change of 0. It keeps `last`, but
+A **stale** quote is one its market has not updated for longer than the
+limit below. That is usually a symbol that stopped trading, such as a
+delisted coin: Binance still answers XMRUSDT with its last price and a
+change of 0. A closure longer than the limit, such as a week-long exchange
+holiday, makes a quote stale too, so `stale` says the quote is old, not why.
+It keeps `last`, but
 `change` and `change_pct` are `null`, and it adds `"stale": true` and
 `last_bar_at`, the ISO 8601 UTC time of its last update
 ([ADR-0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/)):

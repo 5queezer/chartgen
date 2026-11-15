@@ -806,9 +806,11 @@ close, like TradingView. Crypto rows (Binance) change over the rolling
 24 hours, as Binance reports it, so for crypto the number can differ from
 TradingView's change since the daily open
 ([ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)). A symbol that
-fails to load shows dashes; hover the row for the reason. A symbol that is
-not trading, such as a delisted coin, keeps its last price, dimmed, with
-dashes for the change; hover the row for the time of its last update
+fails to load shows dashes; hover the row for the reason. A symbol whose
+quote is stale, not updated for longer than its market's limit (usually a
+delisted coin, sometimes a long market holiday), keeps its last price,
+dimmed, with dashes for the change; hover the row for the time of its last
+update
 ([ADR-0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/)).
 
 ### Lists, sections and flags
