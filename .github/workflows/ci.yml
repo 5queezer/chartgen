@@ -91,14 +91,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/checks/test.sh
 
-  # The production autodeploy script, against a stub curl (scripts/autodeploy/README.md).
-  autodeploy-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - run: scripts/autodeploy/test.sh
-
   docs-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -359,8 +351,8 @@ jobs:
 
   # Implements ADR-0060: the image production runs is built here, not on the host
   # that runs it. It needs every other job, so an image for a commit exists only if
-  # this run was green for that commit, and the host deploys only commits that have
-  # one (scripts/autodeploy/). Never on a pull request.
+  # this run was green for that commit, and a pull-based deploy outside this repo
+  # picks up only commits that have one. Never on a pull request.
   image:
     name: image (linux/arm64)
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master') }}

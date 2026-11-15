@@ -1213,17 +1213,17 @@ fn tags_are_checked_and_kept_once() {
         long_args(),
         "tags",
         json!([
-            "strategy:retest-short",
-            "trigger:100eyes:abnormal-volatility",
+            "strategy:breakout",
+            "trigger:scanner:volatility",
             "pattern:double-top-ee",
-            "strategy:retest-short"
+            "strategy:breakout"
         ]),
     ));
     assert_eq!(
         r.tags,
         [
-            "strategy:retest-short",
-            "trigger:100eyes:abnormal-volatility",
+            "strategy:breakout",
+            "trigger:scanner:volatility",
             "pattern:double-top-ee"
         ]
     );

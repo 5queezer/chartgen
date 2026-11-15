@@ -987,7 +987,7 @@ export const SetupSchema = SetupLevelsSchema.extend({
   pending: z.array(SetupPendingSchema),
   revisions: z.number().int(),
   agent_revisions: z.number().int(),
-  // The agent's labels, such as strategy:retest-short. Empty on setups stored before
+  // The agent's labels, such as strategy:breakout. Empty on setups stored before
   // tags existed.
   tags: z.array(z.string()),
   // From the fill on, in R of the risk at the fill and before costs: the furthest price

@@ -536,7 +536,7 @@ pub fn setup_tools() -> Vec<Value> {
     let reason = json!({ "type": "string", "maxLength": MAX_REASON, "description": "Why this change, in plain text. Kept in the setup's log." });
     let id = json!({ "type": "string", "description": "The setup's id." });
     let tag = json!({ "type": "string", "minLength": 1, "maxLength": MAX_TAG, "pattern": "^[a-z0-9][a-z0-9:_./-]*$" });
-    let tags = json!({ "type": "array", "items": tag, "maxItems": MAX_TAGS, "description": format!("Your labels for the setup, to group and filter by, such as strategy:retest-short or trigger:100eyes:abnormal-volatility. At most {MAX_TAGS}, each 1 to {MAX_TAG} characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.") });
+    let tags = json!({ "type": "array", "items": tag, "maxItems": MAX_TAGS, "description": format!("Your labels for the setup, to group and filter by, such as strategy:breakout or trigger:rsi-oversold. At most {MAX_TAGS}, each 1 to {MAX_TAG} characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.") });
     let costs = FEE_BPS_PER_SIDE + SLIPPAGE_BPS_PER_SIDE;
     let stock_costs = STOCK_FEE_BPS_PER_SIDE + STOCK_SLIPPAGE_BPS_PER_SIDE;
     vec![

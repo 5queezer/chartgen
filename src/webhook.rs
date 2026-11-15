@@ -86,7 +86,7 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
         || a == 10                              // private
         || a == 127                             // loopback
         || a >= 224                             // multicast, reserved, broadcast
-        || (a == 100 && (64..128).contains(&b)) // CGNAT, Tailscale, Alibaba metadata
+        || (a == 100 && (64..128).contains(&b)) // CGNAT (VPN overlays), Alibaba metadata
         || (a == 169 && b == 254)               // link-local, cloud metadata
         || (a == 172 && (16..32).contains(&b))  // private
         || (a == 192 && b == 168)               // private
@@ -1067,7 +1067,7 @@ mod tests {
     fn a_name_with_no_dot_or_a_private_suffix_is_refused() {
         for url in [
             "https://redis/",
-            "https://coolify/hook",
+            "https://deployer/hook",
             "https://fedora./",
             "https://db.localdomain/",
             "https://git.corp/",
@@ -1739,19 +1739,22 @@ mod tests {
     #[test]
     fn the_agents_receiver_url_is_checked_without_repeating_it() {
         for ok in [
-            "http://hermes:8644/webhooks/chartgen",
+            "http://agent.internal:8644/webhooks/chartgen",
             "http://127.0.0.1:8644/h",
             "https://10.0.0.5/h",
             "http://[fd00::2]:8644/h",
             // This server's port number on another host is another program's.
-            "http://hermes:9315/h",
+            "http://agent.internal:9315/h",
             "http://10.0.0.5:9315/h",
         ] {
             assert!(Target::parse_agent(ok, Some(9315)).is_ok(), "{ok}");
         }
         for (no, why) in [
-            ("ftp://hermes/h", "http or https"),
-            ("http://user:token-abc@hermes:8644/h", "user or password"),
+            ("ftp://agent.internal/h", "http or https"),
+            (
+                "http://user:token-abc@agent.internal:8644/h",
+                "user or password",
+            ),
             ("http://127.0.0.1:9315/token-abc", "own port"),
             ("http://127.9.9.9:9315/token-abc", "own port"),
             ("http://[::1]:9315/token-abc", "own port"),
@@ -1766,7 +1769,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{no} was taken"));
             assert!(error.contains(why), "{no}: {error}");
             assert!(
-                !error.contains("token-abc") && !error.contains("hermes"),
+                !error.contains("token-abc") && !error.contains("agent.internal"),
                 "{error}"
             );
         }
@@ -1778,9 +1781,9 @@ mod tests {
     fn a_client_cannot_name_the_agents_receiver_as_its_webhook_url() {
         let policy = Policy::default();
         for url in [
-            "http://hermes:8644/webhooks/chartgen",
-            "https://hermes:8644/webhooks/chartgen",
-            "https://hermes/webhooks/chartgen",
+            "http://agent.internal:8644/webhooks/chartgen",
+            "https://agent.internal:8644/webhooks/chartgen",
+            "https://agent.internal/webhooks/chartgen",
             "https://127.0.0.1/webhooks/chartgen",
             "https://10.0.0.5/webhooks/chartgen",
             "https://[fd00::2]/webhooks/chartgen",
@@ -1792,7 +1795,7 @@ mod tests {
     #[test]
     fn a_name_for_the_agents_receiver_must_resolve_inside_only() {
         let policy = Policy::default();
-        let target = Target::parse_agent("http://hermes:8644/h", None).unwrap();
+        let target = Target::parse_agent("http://agent.internal:8644/h", None).unwrap();
         let at = |ips: &[&str]| -> Vec<SocketAddr> {
             ips.iter()
                 .map(|ip| SocketAddr::new(ip.parse().unwrap(), 8644))
@@ -1833,7 +1836,7 @@ mod tests {
         };
         const URL: (&str, &str) = (
             "CHARTGEN_AGENT_WEBHOOK_URL",
-            "http://hermes:8644/webhooks/token-abc",
+            "http://agent.internal:8644/webhooks/token-abc",
         );
         const OWNER: (&str, &str) = ("CHARTGEN_AGENT_WEBHOOK_OWNER", "github:42");
         const SECRET: (&str, &str) = (
@@ -1844,7 +1847,7 @@ mod tests {
         let set = with(&[URL, OWNER, SECRET]).unwrap().unwrap();
         assert_eq!(
             (set.owner.as_str(), set.target.origin().as_str()),
-            ("github:42", "http://hermes:8644")
+            ("github:42", "http://agent.internal:8644")
         );
         let cases: [(&[(&str, &str)], &str); 7] = [
             (&[URL, OWNER], "CHARTGEN_AGENT_WEBHOOK_SECRET is required"),

@@ -1818,8 +1818,8 @@ async fn list_setups_keeps_those_with_every_tag_asked_for() {
         args["tags"] = tags;
         call(&s, "create_setup", args, "owner").unwrap()
     };
-    let both = tagged(json!(["strategy:retest-short", "pattern:double-top-ee"]));
-    let one = tagged(json!(["strategy:retest-short"]));
+    let both = tagged(json!(["strategy:breakout", "pattern:double-top-ee"]));
+    let one = tagged(json!(["strategy:breakout"]));
     let none = tagged(json!([]));
     assert_eq!(none["tags"], json!([]));
     // In any order: two setups made in the same millisecond sort by their random ids.
@@ -1833,11 +1833,11 @@ async fn list_setups_keeps_those_with_every_tag_asked_for() {
             .collect()
     };
     assert_eq!(
-        ids(json!({ "tags": ["strategy:retest-short"] })),
+        ids(json!({ "tags": ["strategy:breakout"] })),
         HashSet::from([id_of(&one), id_of(&both)])
     );
     assert_eq!(
-        ids(json!({ "tags": ["pattern:double-top-ee", "strategy:retest-short"] })),
+        ids(json!({ "tags": ["pattern:double-top-ee", "strategy:breakout"] })),
         HashSet::from([id_of(&both)])
     );
     assert_eq!(ids(json!({ "tags": [] })).len(), 3);
@@ -1858,7 +1858,7 @@ async fn list_setups_keeps_those_with_every_tag_asked_for() {
     assert_eq!(revised["tags"], json!(["review:late-entry"]));
     assert_eq!(
         revised["log"].as_array().unwrap().last().unwrap()["changes"]["tags"],
-        json!({ "from": ["strategy:retest-short"], "to": ["review:late-entry"] })
+        json!({ "from": ["strategy:breakout"], "to": ["review:late-entry"] })
     );
     let bad = json!({ "id": one["id"], "reason": "r", "tags": ["x".repeat(65)] });
     assert_eq!(

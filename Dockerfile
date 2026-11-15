@@ -22,7 +22,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY tests/ tests/
 # Serialize with the web stage: BuildKit would otherwise run Vite and the LTO
-# Rust build in parallel and risk OOM on the 4 GB arm64 host.
+# Rust build in parallel and risk OOM on a 4 GB arm64 host.
 COPY --from=web /web/dist/index.html /tmp/web-built
 
 RUN cargo build --release && strip target/release/chartgen
@@ -30,7 +30,7 @@ RUN cargo build --release && strip target/release/chartgen
 # Stage 3: Slim runtime
 FROM debian:bookworm-slim
 
-# curl: Coolify's HTTP health check runs `curl` (or `wget`) inside the container.
+# curl: a container platform's HTTP health check runs `curl` (or `wget`) inside the container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 libfontconfig1 libfreetype6 fonts-dejavu-core curl \
     && rm -rf /var/lib/apt/lists/*
