@@ -4,7 +4,7 @@ description: Proposal to let chartgen users register sandboxed, Starlark-based i
 ---
 
 **Status:** accepted (Phase 1 implemented)
-**Authors:** christian.pojoni@gmail.com (via brainstorming session, 2026-04-21)
+**Date:** 2026-04-21
 **Relates to:** [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/) (Starlark as script runtime) and [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (per-user indicator registry + MCP surface). User guide: [Scripted indicators](/chartgen/guides/scripted-indicators/).
 
 :::note[Implementation notes]
