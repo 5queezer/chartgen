@@ -182,7 +182,7 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "get_quotes",
-                "description": "Get the last price and change for many symbols in one call (watchlist). Returns one entry per distinct symbol, in request order: {symbol, last, change, change_pct, prev_close, high, low, volume, source}, or {symbol, error} when that symbol fails; one bad symbol never fails the call. Stocks/ETFs/indices/FX (Yahoo): change vs the previous session's close, like TradingView. Crypto (Binance, symbols ending in USDT, BTC, ETH, ...): change over the rolling 24 h window, as Binance's own ticker reports it.",
+                "description": "Get the last price and change for many symbols in one call (watchlist). Returns one entry per distinct symbol, in request order: {symbol, last, change, change_pct, prev_close, high, low, volume, source}, or {symbol, error} when that symbol fails; one bad symbol never fails the call. Stocks/ETFs/indices/FX (Yahoo): change vs the previous session's close, like TradingView. Crypto (Binance, symbols ending in USDT, BTC, ETH, ...): change over the rolling 24 h window, as Binance's own ticker reports it. A stale quote, one its market has not updated for longer than that market is ever shut (more than 2 hours for Binance and Yahoo crypto, which trade around the clock; 3 days for FX; 4 days for stocks, ETFs, indices and anything else), such as a delisted coin's, keeps last but has change and change_pct null and adds stale: true and last_bar_at, the ISO 8601 UTC time of its last update (ADR-0076). A fresh quote has neither field.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -919,6 +919,28 @@ unreachable upstream. `change = last - prev_close` and
 `change_pct = change / prev_close × 100`. `high`, `low` and `volume` are
 `null` when upstream omits them. Numbers that are not finite are `null`.
 
+A **stale** quote is one its market has not updated for longer than that
+market is ever shut, such as a delisted coin's: Binance still answers
+XMRUSDT with its last price and a change of 0. It keeps `last`, but
+`change` and `change_pct` are `null`, and it adds `"stale": true` and
+`last_bar_at`, the ISO 8601 UTC time of its last update
+([ADR-0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/)):
+
+```json
+{ "symbol": "XMRUSDT", "last": 118.7, "change": null, "change_pct": null,
+  "prev_close": 118.7, "high": 118.7, "low": 118.7, "volume": 0.0,
+  "source": "binance", "stale": true, "last_bar_at": "2026-11-13T03:09:00Z" }
+```
+
+| Market | Last update | Stale after |
+|---|---|---|
+| Binance; Yahoo crypto (`instrumentType` `CRYPTOCURRENCY`) | the 24 h ticker's `closeTime`; `regularMarketTime` | 2 hours |
+| Yahoo FX (`CURRENCY`) | `regularMarketTime` | 3 days |
+| Yahoo stocks, ETFs, indices and anything else | `regularMarketTime` | 4 days |
+
+Staleness is judged when the call is answered. A fresh quote, a `sample`
+quote and one whose update time upstream did not give have neither field.
+
 What `prev_close` means depends on `source` (see
 [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)):
 

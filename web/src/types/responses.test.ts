@@ -6,6 +6,7 @@ import record from "../../../tests/fixtures/track_record_responses.json";
 import {
   EventsPayloadSchema,
   ListIndicatorsPayloadSchema,
+  QuotesPayloadSchema,
   SeriesPayloadSchema,
   SetupPayloadSchema,
   SetupsPayloadSchema,
@@ -397,3 +398,30 @@ describe("what a setup was made with, and the track record (ADR-0064)", () => {
   });
 });
 
+describe("get_quotes stale quotes (ADR-0076)", () => {
+  const fresh = {
+    symbol: "BTCUSDT", last: 80689.85, change: 2907.85, change_pct: 3.738, prev_close: 77782,
+    high: 81196.01, low: 75736.38, volume: 21753.1, source: "binance",
+  };
+
+  it("parses a fresh quote without the stale fields and a stale one with them", () => {
+    const p = QuotesPayloadSchema.parse({
+      quotes: [
+        fresh,
+        {
+          ...fresh, symbol: "XMRUSDT", last: 118.7, change: null, change_pct: null,
+          stale: true, last_bar_at: "2026-11-13T03:09:00Z",
+        },
+      ],
+    });
+    const [f, s] = p.quotes;
+    expect(f && "stale" in f).toBe(false);
+    expect(s && !("error" in s) && [s.stale, s.last_bar_at, s.change]).toEqual([
+      true, "2026-11-13T03:09:00Z", null,
+    ]);
+  });
+
+  it("refuses a last_bar_at that is not a string", () => {
+    expect(() => QuotesPayloadSchema.parse({ quotes: [{ ...fresh, stale: true, last_bar_at: 1 }] })).toThrow();
+  });
+});
