@@ -60,8 +60,8 @@ Chosen option: same origin, served by chartgen.
     gets `index.html`; any other `GET /` gets the JSON. The OAuth callback
     (`/?code=…&state=…`) is a browser navigation, so it loads the app.
   - `/mcp` is the canonical MCP endpoint (`POST` for JSON-RPC, `GET` for
-    the SSE stream). Documentation names `https://chartgen.example.com/mcp`
-    as the connector URL.
+    the SSE stream). Documentation names `https://<domain>/mcp` (the
+    deployment's own host) as the connector URL.
   - `POST /` is a deprecated compatibility alias for connectors added with
     the root URL, like the older `/message` and `/sse` aliases. It is kept
     and not advertised.

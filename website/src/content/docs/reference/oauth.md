@@ -381,7 +381,8 @@ authorization. After that it refreshes by itself.
    client must discover the server from the `401`, register itself, run the authorization
    code flow with PKCE, **keep its tokens on disk, with the time the access token runs
    out** (`expires_in` is 604800 seconds), and refresh once that time has passed.
-   For example, with an agent whose CLI adds MCP servers (`<agent>` stands for its command):
+   For example, with an agent whose CLI adds MCP servers like this (`<agent>` stands for its
+   command; the syntax differs between clients, so check yours):
 
    ```bash
    <agent> mcp add chartgen --url https://chartgen.example.com/mcp --auth oauth

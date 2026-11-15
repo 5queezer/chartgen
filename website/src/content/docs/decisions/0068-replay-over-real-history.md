@@ -167,7 +167,7 @@ at the next close, as it would after a delayed live wake-up.
 | subscriptions, browser alerts, server alerts, notifications, push | **refused** | wall-clock and live feeds; replay alerts are phase 2 |
 | trading tools (`place_order`, …) | **refused** | `--trade` cannot run with a replay |
 | scripted-indicator registry | **refused** | phase 3 at most, for scripts that read bars only |
-| **the agent's other MCP servers** (web search, news, a live calendar) | **must not be attached** | they answer for today. The harness gives a replay session the replay instance only. |
+| **the agent's other MCP servers** (web search, news, a live calendar) | **must not be attached** | they answer for today. The harness gives a replay session the replay instance only, plus the replay calendar below if it uses one. |
 | macro calendar | **replaced** | a live calendar answers for the current week, so in a replay it would say nothing true about the window. A harness that needs one supplies a calendar fixture of past economic releases for the window, answered at `as_of`. |
 | **the model's own memory** | **cannot be cut** | a model trained past the window may know what BTC did next. Prefer windows after the model's training cutoff; the time shift hides dates but not price levels. This is recorded with every run. |
 
@@ -247,4 +247,5 @@ bound in `Replay::bars` for year-long windows.
 - On the harness's side, not chartgen's:
   - A run of a fixed harness script against a fixed fixture twice gives byte-identical tool
     answers (the agent's choices may differ; the server's answers to the same calls do not).
-  - The harness's session config is checked to contain the replay MCP server only.
+  - The harness's session config is checked to contain the replay MCP server only (and the
+    replay calendar, if it uses one).

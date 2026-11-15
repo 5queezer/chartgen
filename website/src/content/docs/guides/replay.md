@@ -93,7 +93,7 @@ expected: there the published port decides who can reach it.
 **On your PC, as a bare binary.** Bind it to the PC's address on your VPN overlay:
 
 ```bash
-VPN_IP=100.64.0.10   # this PC's VPN overlay address
+VPN_IP=100.64.0.10   # this PC's VPN overlay address (IPv4; an IPv6 one needs [brackets] in the URL)
 CHARTGEN_BIND=$VPN_IP \
 CHARTGEN_REPLAY_FIXTURES=fixtures/2026-q3 \
 CHARTGEN_BASE_URL="http://$VPN_IP:9316" \
@@ -107,7 +107,7 @@ chartgen --serve --port 9316
 address alone:
 
 ```bash
-VPN_IP=100.64.0.10   # this PC's VPN overlay address
+VPN_IP=100.64.0.10   # this PC's VPN overlay address (IPv4; an IPv6 one needs [brackets] in the URL)
 podman run --rm --name chartgen-replay \
   -v "$PWD/fixtures/2026-q3:/fixtures:ro,Z" \
   -e CHARTGEN_REPLAY_FIXTURES=/fixtures \
