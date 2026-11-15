@@ -970,7 +970,10 @@ test.describe("drawing modifiers", () => {
     await expect(magnetButton(page, "weak")).toBeVisible();
     line = await dragPoint(page, 0, 1, 30, dy(toLow));
     expect(line.points[1]!.value).toBe(Math.min(...bar.ohlc));
-    const far = bar.lowY + 30;
+    // 30 px off the bar's range, on a side where that stays inside the pane. Sample bars
+    // follow the clock, so 30 px below the low can be within 3 px of the pane's bottom:
+    // that is the separator's hit zone, and klinecharts ignores a pressed move over it.
+    const far = bar.lowY + 30 <= bar.paneHeight - 10 ? bar.lowY + 30 : bar.highY - 30;
     line = await dragPoint(page, 0, 1, 30, dy(far));
     expect(line.points[1]!.timestamp).toBe(bar.timestamp);
     expect(Math.abs(line.pixels[1]!.y! - far)).toBeLessThan(1);
