@@ -34,7 +34,7 @@ pub const MAX_TAGS: usize = 10;
 pub const MAX_TAG: usize = 64;
 /// The characters a tag may have besides lowercase letters and digits.
 pub const TAG_PUNCTUATION: &str = ":-_./";
-const TAG_HINT: &str = "lowercase letters, digits and : - _ . /, starting with a letter or digit, such as strategy:retest-short";
+const TAG_HINT: &str = "lowercase letters, digits and : - _ . /, starting with a letter or digit, such as strategy:breakout";
 /// What an agent may state when it makes a setup (ADR-0064): how many features, and how
 /// long a feature's name, a feature's text and a playbook version may be.
 pub const MAX_FEATURES: usize = 16;
@@ -219,7 +219,7 @@ pub struct Record {
     pub revisions: u32,
     #[serde(default)]
     pub agent_revisions: u32,
-    /// The agent's labels, such as `strategy:retest-short`, to group setups by.
+    /// The agent's labels, such as `strategy:breakout`, to group setups by.
     #[serde(default)]
     pub tags: Vec<String>,
     /// From the fill on: the furthest price went against the position (0 or less) and

@@ -64,7 +64,7 @@ the catch-up polls after a missed push, several tabs per person, assets served f
 browser cache, different source addresses (so the per-IP caps are the tightest case).
 The load generator is one Locust process; use fewer than ~100 users per core.
 
-## Radxa side
+## Server side
 
 `watch.sh <container> out.csv [seconds]` samples container CPU and memory, restarts, OOM
 kill and whole-machine load every 5 s. It only reads.

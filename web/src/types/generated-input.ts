@@ -165,7 +165,7 @@ export interface CreateSetupInput {
    */
   symbol: string;
   /**
-   * Your labels for the setup, to group and filter by, such as strategy:retest-short or trigger:100eyes:abnormal-volatility. At most 10, each 1 to 64 characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.
+   * Your labels for the setup, to group and filter by, such as strategy:breakout or trigger:rsi-oversold. At most 10, each 1 to 64 characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.
    *
    * @maxItems 10
    */
@@ -745,7 +745,7 @@ export interface ReviseSetupInput {
    */
   reason: string;
   /**
-   * Your labels for the setup, to group and filter by, such as strategy:retest-short or trigger:100eyes:abnormal-volatility. At most 10, each 1 to 64 characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.
+   * Your labels for the setup, to group and filter by, such as strategy:breakout or trigger:rsi-oversold. At most 10, each 1 to 64 characters of lowercase letters, digits and : - _ . /, starting with a letter or digit. A tag given twice is kept once.
    *
    * @maxItems 10
    */

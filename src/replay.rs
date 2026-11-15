@@ -52,8 +52,8 @@ pub fn as_of(given: Option<&serde_json::Value>) -> Result<i64, String> {
     chartgen::drawings::parse_time(given, i64::MAX / 2).map_err(|e| format!("as_of: {e}"))
 }
 
-/// Whether `ip` reaches this host or its tailnet only: loopback, or Tailscale's
-/// 100.64.0.0/10 or fd7a:115c:a1e0::/48. Anyone who reaches a replay can move its clock
+/// Whether `ip` reaches this host or its VPN overlay only: loopback, or the CGNAT range
+/// 100.64.0.0/10 or the fd7a:115c:a1e0::/48 IPv6 range that such overlays use. Anyone who reaches a replay can move its clock
 /// (ADR-0068).
 pub fn private_address(ip: std::net::IpAddr) -> bool {
     match ip {
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn only_loopback_and_tailscale_addresses_are_private() {
+    fn only_loopback_and_cgnat_addresses_are_private() {
         for (ip, private) in [
             ("127.0.0.1", true),
             ("::1", true),

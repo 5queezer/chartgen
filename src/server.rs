@@ -2321,7 +2321,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     if crate::replay::global().is_some() {
         println!("Replay server bound to {addr}");
         if !crate::replay::private_address(ip) {
-            eprintln!("[replay] WARNING: {ip} is neither loopback nor a Tailscale address: anyone who can reach this port can register and move the replay's one clock. Set CHARTGEN_BIND to this host's Tailscale address, or keep the port off other networks, as a container that publishes it on a private address only does (ADR-0068).");
+            eprintln!("[replay] WARNING: {ip} is neither loopback nor a VPN overlay address (100.64.0.0/10 CGNAT range): anyone who can reach this port can register and move the replay's one clock. Set CHARTGEN_BIND to loopback or this host's VPN overlay address, or keep the port off other networks, as a container that publishes it on a private address only does (ADR-0068).");
         }
     }
     // `tap_io` does nothing here: axum gives the peer's address to tapped listeners and
@@ -2510,58 +2510,58 @@ mod tests {
 
     #[test]
     fn invalid_client_redirect_stays_on_the_own_origin() {
-        const BASE: &str = "https://chartgen.vasudev.xyz";
+        const BASE: &str = "https://chartgen.example.com";
         let target = |uri, state| invalid_client_redirect(BASE, uri, state);
 
         assert_eq!(
-            target("https://chartgen.vasudev.xyz/", Some("s1")).as_deref(),
-            Some("https://chartgen.vasudev.xyz/?error=invalid_client&state=s1")
+            target("https://chartgen.example.com/", Some("s1")).as_deref(),
+            Some("https://chartgen.example.com/?error=invalid_client&state=s1")
         );
         // Without a state there is none to return.
         assert_eq!(
-            target("https://chartgen.vasudev.xyz/", None).as_deref(),
-            Some("https://chartgen.vasudev.xyz/?error=invalid_client")
+            target("https://chartgen.example.com/", None).as_deref(),
+            Some("https://chartgen.example.com/?error=invalid_client")
         );
         // An existing query string stays, and the state is encoded.
         assert_eq!(
-            target("https://chartgen.vasudev.xyz/cb?a=1", Some("x y&z=1#f")).as_deref(),
-            Some("https://chartgen.vasudev.xyz/cb?a=1&error=invalid_client&state=x+y%26z%3D1%23f")
+            target("https://chartgen.example.com/cb?a=1", Some("x y&z=1#f")).as_deref(),
+            Some("https://chartgen.example.com/cb?a=1&error=invalid_client&state=x+y%26z%3D1%23f")
         );
         // An explicit default port and upper case are the same origin.
         assert_eq!(
-            target("HTTPS://CHARTGEN.vasudev.xyz:443/", None).as_deref(),
-            Some("https://chartgen.vasudev.xyz/?error=invalid_client")
+            target("HTTPS://CHARTGEN.example.com:443/", None).as_deref(),
+            Some("https://chartgen.example.com/?error=invalid_client")
         );
         // Parsed like a browser would: the host is still ours, and the
         // Location is the normalized form, not the input.
         assert_eq!(
-            target("https://chartgen.vasudev.xyz\\@evil.com", None).as_deref(),
-            Some("https://chartgen.vasudev.xyz/@evil.com?error=invalid_client")
+            target("https://chartgen.example.com\\@evil.com", None).as_deref(),
+            Some("https://chartgen.example.com/@evil.com?error=invalid_client")
         );
 
         for uri in [
-            "https://chartgen.vasudev.xyz.evil.com/",
-            "https://chartgen.vasudev.xyz@evil.com/",
-            "https://evil.com/chartgen.vasudev.xyz/",
-            "https://evil.com#https://chartgen.vasudev.xyz/",
-            "https://user@chartgen.vasudev.xyz/",
-            "https://user:pw@chartgen.vasudev.xyz/",
-            "https://chartgen.vasudev.xyz/#fragment",
-            "https://sub.chartgen.vasudev.xyz/",
-            "http://chartgen.vasudev.xyz/",
-            "https://chartgen.vasudev.xyz:8443/",
-            "javascript:alert(1)//chartgen.vasudev.xyz/",
-            "data:text/html,chartgen.vasudev.xyz",
-            "blob:https://chartgen.vasudev.xyz/abc",
-            "ftp://chartgen.vasudev.xyz/",
-            "//chartgen.vasudev.xyz/",
+            "https://chartgen.example.com.evil.com/",
+            "https://chartgen.example.com@evil.com/",
+            "https://evil.com/chartgen.example.com/",
+            "https://evil.com#https://chartgen.example.com/",
+            "https://user@chartgen.example.com/",
+            "https://user:pw@chartgen.example.com/",
+            "https://chartgen.example.com/#fragment",
+            "https://sub.chartgen.example.com/",
+            "http://chartgen.example.com/",
+            "https://chartgen.example.com:8443/",
+            "javascript:alert(1)//chartgen.example.com/",
+            "data:text/html,chartgen.example.com",
+            "blob:https://chartgen.example.com/abc",
+            "ftp://chartgen.example.com/",
+            "//chartgen.example.com/",
             "/",
             "",
         ] {
             assert_eq!(target(uri, Some("s")), None, "{uri}");
         }
         assert_eq!(
-            invalid_client_redirect("not a url", "https://chartgen.vasudev.xyz/", None),
+            invalid_client_redirect("not a url", "https://chartgen.example.com/", None),
             None
         );
     }

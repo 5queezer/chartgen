@@ -30,7 +30,7 @@ RUN cargo build --release && strip target/release/chartgen
 # Stage 3: Slim runtime
 FROM debian:bookworm-slim
 
-# curl: Coolify's HTTP health check runs `curl` (or `wget`) inside the container.
+# curl: a container platform's HTTP health check runs `curl` (or `wget`) inside the container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 libfontconfig1 libfreetype6 fonts-dejavu-core curl \
     && rm -rf /var/lib/apt/lists/*
