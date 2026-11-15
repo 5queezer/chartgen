@@ -129,6 +129,11 @@ made, not later.
 - Neutral: making a setup on a live server reads the context, which is usually a cache hit
   and otherwise up to three bar requests and, on a Binance symbol, the futures series. It
   waits at most 10 seconds for them.
+- Neutral: "when the setup was made" is approximate. The context may be up to a minute old
+  (its cache), or read up to 10 seconds after the call's time, and so can include the first
+  seconds of a bar the setup is scored on. The features are regime labels from 20 and 50 bar
+  EMAs of 4h and 1d bars and a daily index, which seconds do not move in any way that
+  matters; they are not a price the setup is judged by.
 - Bad: an agent that already names a feature `ctx_...` must rename it.
 
 ## Validation
