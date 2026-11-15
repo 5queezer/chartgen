@@ -7,6 +7,7 @@
 
 import type { Page } from "@playwright/test";
 
+import { FONT_FAMILY } from "../../src/lib/theme";
 import { test, expect, gotoApp, openSidebarTab } from "./fixtures/app";
 
 const shot = async (page: Page, name: string) => {
@@ -17,6 +18,8 @@ const shot = async (page: Page, name: string) => {
 test.use({ viewport: { width: 1600, height: 800 } });
 
 const CANDLE_PANE = "candle_pane";
+// The labels' font, as Chart.tsx draws them.
+const MARK_FONT = `600 10px ${FONT_FAMILY}`;
 
 /** Open the app with exactly these indicators. */
 async function openWith(page: Page, entries: unknown[], style?: string): Promise<void> {
@@ -108,15 +111,60 @@ const held = <T>(page: Page, key: string, read: string) =>
     [key, read] as const,
   );
 
-/** The last-but-a-few visible labels with no other label on their bar and side. */
-async function loneLabel(page: Page, key: string): Promise<Mark> {
-  const labels = await held<Mark[]>(page, key, "(ind && ind.labels) || []");
+/**
+ * A label for a test to hover, brought into view of the active chart: the last-but-a-few
+ * closed one alone on its bar and side, whose middle no other label's box covers. Labels
+ * of one bar and side stack, those of nearby bars can overlap, and where they do the
+ * one drawn last is on top and answers the hover. Which labels overlap follows the
+ * clock (2026-11-15 09:00 UTC: a Belt Hold on the next bar covered the Tweezer Top
+ * picked), so a covered one is passed over.
+ */
+async function clearLabel(page: Page, labels: Mark[]): Promise<Mark> {
   const closed = labels.filter((l) => !(l as Mark & { tentative?: boolean }).tentative);
   const lone = closed.filter(
     (l) => closed.filter((o) => o.x === l.x && o.above === l.above).length === 1,
   );
   expect(lone.length).toBeGreaterThan(0);
-  return lone[Math.max(0, lone.length - 4)]!;
+  const first = Math.max(0, lone.length - 4);
+  const order = [...lone.slice(0, first + 1).reverse(), ...lone.slice(first + 1)];
+  for (const l of order) {
+    await bringIntoView(page, l.x);
+    const clear = await page.evaluate(
+      ([all, pick, pane, font]) => {
+        const chart = (
+          window as unknown as {
+            __chartgenTest: {
+              chart: () => {
+                convertToPixel: (p: { dataIndex: number; value: number }, f: { paneId: string }) => { x: number; y: number };
+              };
+            };
+          }
+        ).__chartgenTest.chart();
+        const ctx = document.createElement("canvas").getContext("2d")!;
+        ctx.font = font as string;
+        const marks = all as Mark[];
+        const at = (m: Mark) => chart.convertToPixel({ dataIndex: m.x, value: m.y }, { paneId: pane as string });
+        // Where hoverLabel points.
+        const own = at(marks[pick as number]!);
+        const y = own.y + (marks[pick as number]!.above ? -12 : 12);
+        // The boxes as labelBoxes (src/components/geometry.ts) lays them out, a pixel wider.
+        const stacks = new Map<string, number>();
+        return !marks.some((m, i) => {
+          const side = `${m.x}|${m.above}`;
+          const k = stacks.get(side) ?? 0;
+          stacks.set(side, k + 1);
+          if (i === pick) return false;
+          const p = at(m);
+          const width = ctx.measureText(m.text ?? "").width + 6;
+          const top = m.above ? p.y - 20 - k * 16 : p.y + 5 + k * 16;
+          return Math.abs(own.x - p.x) <= width / 2 + 1 && y >= top - 1 && y <= top + 16;
+        });
+      },
+      [labels, labels.indexOf(l), CANDLE_PANE, MARK_FONT] as const,
+    );
+    if (clear) return l;
+  }
+  throw new Error(`every one of ${lone.length} lone labels is covered by another`);
 }
 
 /** Hover the middle of a label's box. */
@@ -189,7 +237,7 @@ test.describe("candlestick patterns", () => {
     await expect.poll(() => colorCount(page, BLUE)).toBeGreaterThan(50);
     await shot(page, "candles-all");
 
-    const l = await loneLabel(page, "candlestick_patterns");
+    const l = await clearLabel(page, await held<Mark[]>(page, "candlestick_patterns", "ind.labels"));
     await hoverLabel(page, l);
     await expect(tooltip(page)).toBeVisible();
     await expect(tooltip(page)).toHaveText(l.tooltip);
@@ -348,13 +396,7 @@ test.describe("in a grid (ADR-0043)", () => {
     await expect(second).toHaveAttribute("data-active", "");
     await page.mouse.move(box.x + 5, box.y + 5);
 
-    const all = await paneLabels();
-    const closed = all.filter((l) => !(l as Mark & { tentative?: boolean }).tentative);
-    const lone = closed.filter(
-      (l) => closed.filter((o) => o.x === l.x && o.above === l.above).length === 1,
-    );
-    const l = lone[Math.max(0, lone.length - 4)]!;
-    await bringIntoView(page, l.x);
+    const l = await clearLabel(page, await paneLabels());
     const at = await page.evaluate(
       ([bar, price]) => {
         const w = window as unknown as {
