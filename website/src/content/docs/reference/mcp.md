@@ -35,8 +35,8 @@ Add chartgen to `claude_desktop_config.json`:
 ### Claude.ai — Streamable HTTP (2025-03-26) + OAuth 2.1 PKCE
 
 Run `chartgen --serve` behind a TLS-terminating reverse proxy and add
-`https://<your-domain>/mcp` (for the hosted instance,
-`https://chartgen.vasudev.xyz/mcp`) as a remote MCP connector. OAuth is
+`https://<your-domain>/mcp` (for example
+`https://chartgen.example.com/mcp`) as a remote MCP connector. OAuth is
 handled by chartgen — see the
 [OAuth reference](/chartgen/reference/oauth/) for the endpoint catalog and
 token lifetime.
@@ -784,7 +784,7 @@ after the summary or series):
     }
   ],
   "warnings": [],
-  "open_url": "https://chartgen.vasudev.xyz/?symbol=BTCUSDT&interval=1h&draw=rayLine(1793174400:236.3;1793304000:223.06;color:%2523089981;width:2)"
+  "open_url": "https://chartgen.example.com/?symbol=BTCUSDT&interval=1h&draw=rayLine(1793174400:236.3;1793304000:223.06;color:%2523089981;width:2)"
 }
 ```
 
@@ -1540,7 +1540,7 @@ its own, in this order:
     "mae_r": null, "mfe_r": null, "mae_at": null, "mfe_at": null, "closest_approach_r": 0.42,
     "bars_to_fill": null, "bars_to_exit": null, "bars_to_mae": null, "bars_to_mfe": null,
     "shadow_results": null,
-    "tags": ["strategy:retest-short"], "gap": false,
+    "tags": ["strategy:breakout"], "gap": false,
     "thesis": "the setup's thesis, as you wrote it"
   }
 }
@@ -1703,8 +1703,8 @@ setups; `can_create` in the list says so.
 - `drawings`: as [`generate_chart`'s](#drawings), at most 50, on the bars of the setup's
   symbol and interval.
 - `tags`: at most 10 labels, each 1 to 64 characters of lowercase letters, digits and
-  `: - _ . /`, starting with a letter or digit, such as `strategy:retest-short` or
-  `trigger:100eyes:abnormal-volatility`. A tag given twice is kept once. On `revise_setup` the
+  `: - _ . /`, starting with a letter or digit, such as `strategy:breakout` or
+  `trigger:rsi-oversold`. A tag given twice is kept once. On `revise_setup` the
   list replaces the old one (`[]` clears it), and it can change after the fill too. A closed
   setup, or one being cancelled, takes a revision with `tags` alone.
 - `status`, `result_r`, the excursion and duration fields, `closest_approach_r`,

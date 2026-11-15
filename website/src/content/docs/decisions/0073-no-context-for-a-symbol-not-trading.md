@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-14
 **Amends:** [ADR-0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) (what counts as a
 symbol whose context can be read)
@@ -21,8 +22,8 @@ XMRUSDT was delisted in 2024, and its last 1d candle closed at 118.70 on 2024-02
 
 That puts a 2024 price and 2024 trends next to a live funding rate and today's index, with nothing
 to say so. The same holds for any delisted or halted symbol, and a wake-up's `context` would carry it
-too. The 100eyes triage, which calls the tool for single coins, already drops coins that are not
-trading on Binance spot, but the context must not depend on that.
+too. A caller that already drops coins not trading on Binance spot avoids this, but the context must
+not depend on that.
 
 ## Decision Drivers
 

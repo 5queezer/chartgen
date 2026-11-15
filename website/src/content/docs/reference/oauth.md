@@ -381,24 +381,25 @@ authorization. After that it refreshes by itself.
    client must discover the server from the `401`, register itself, run the authorization
    code flow with PKCE, **keep its tokens on disk, with the time the access token runs
    out** (`expires_in` is 604800 seconds), and refresh once that time has passed.
-   With Hermes:
+   For example, with an agent whose CLI adds MCP servers like this (`<agent>` stands for its
+   command; the syntax differs between clients, so check yours):
 
    ```bash
-   hermes mcp add chartgen --url https://chartgen.example.com/mcp --auth oauth
+   <agent> mcp add chartgen --url https://chartgen.example.com/mcp --auth oauth
    ```
 
    Run it as the user the agent runs as, or the token files it writes are not readable by
    the agent. In a container, for example:
 
    ```bash
-   docker exec -it -u hermes <container> hermes mcp login chartgen
+   docker exec -it -u <agent-user> <container> <agent> mcp login chartgen
    ```
 
-   **The first authorization needs a terminal.** Without one, `hermes mcp add --auth oauth`
-   offers to continue unauthenticated and then reports `Connected`: chartgen answers
+   **The first authorization needs a terminal.** Without one, such a client's `mcp add --auth oauth`
+   may offer to continue unauthenticated and then reports `Connected`: chartgen answers
    `initialize` and `tools/list` without a token, so the connection looks fine, while every
    tool call gets `401`. If the agent lists chartgen's tools and cannot call any, this is
-   what happened: run `hermes mcp login <name>` once with `-it`.
+   what happened: run its `mcp login <name>` once with `-it`.
 2. **Open the URL the client prints, in any browser,** also on another machine. With
    sign-in on, sign in and approve the client on the consent page. The browser is then sent
    to the client's `redirect_uri`, usually a loopback address. If the client does not run

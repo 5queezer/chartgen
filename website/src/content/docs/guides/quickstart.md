@@ -87,7 +87,7 @@ cargo clippy -- -D warnings
 - [MCP integration](/chartgen/reference/mcp/) — the tools exposed over stdio and HTTP.
 - [Trading](/chartgen/guides/trading/) — alerts, orders, and the live engine.
 - [Push notifications](/chartgen/guides/notifications/) — SSE subscriptions for triggered alerts.
-- [Deployment](/chartgen/guides/deploy/) — Docker, Coolify, release binaries, reverse proxy.
+- [Deployment](/chartgen/guides/deploy/) — Docker, container platforms, release binaries, reverse proxy.
 - [OAuth](/chartgen/reference/oauth/) — Claude.ai connector flow.
 - [Persistence](/chartgen/reference/persistence/) — on-disk state formats.
 - [Contributing](/chartgen/guides/contributing/) — dev loop, CI jobs, keeping docs in sync.

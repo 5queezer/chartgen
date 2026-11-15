@@ -6,17 +6,17 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-14
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (the web app shows setups)
 
 ## Context and Problem Statement
 
 Setups ([ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)) appear nowhere in the web app.
-The person sees a setup only through the `open_url` links Hermes builds from `generate_chart`, and
-learns its status and R only by asking Hermes. They asked, through Hermes, for a panel like the
-Alerts panel.
+The person sees a setup only through the `open_url` links the agent builds from `generate_chart`, and
+learns its status and R only by asking the agent. A panel like the Alerts panel was asked for.
 
-One case confuses a list. A skip ("TRX 5b2b25f1") reads `won` with a negative R. Its fill came
+One case confuses a list. A skip (one on TRX, for instance) can read `won` with a negative R. Its fill came
 at the open, past its target, so reaching the target still left less than the costs. The status
 says the first target was reached, which is what `won` means for the agent.
 
@@ -25,7 +25,7 @@ says the first target was reached, which is what `won` means for the agent.
 - Only the signed-in owner's setups, through the same authenticated path as every other tool:
   no new endpoint.
 - No second scorer: what the server scores is shown as it is, totals included.
-- No change to the status values or the tool contract, which Hermes relies on.
+- No change to the status values or the tool contract, which agents rely on.
 - The wire contract rules: generated input types and Zod response schemas.
 
 ## Decision Outcome
@@ -80,7 +80,7 @@ says the first target was reached, which is what `won` means for the agent.
 
 ### Considered and not chosen
 
-- **A new status, or a field such as `won_net`.** This would change what Hermes reads, or add a
+- **A new status, or a field such as `won_net`.** This would change what the agent reads, or add a
   field it does not need. The record already holds `status` and `result_r`, and the panel can
   say what they mean together.
 - **Drawings as a temporary layer** that a click replaces. It would need a new overlay layer and
@@ -92,7 +92,7 @@ says the first target was reached, which is what `won` means for the agent.
 
 ## Consequences
 
-- Good: the person sees every setup, its levels and the track record without asking Hermes, and
+- Good: the person sees every setup, its levels and the track record without asking the agent, and
   one click shows a setup on its chart.
 - Good: the panel holds no scoring logic. It shows what the tools answer.
 - Bad: a setup's drawings stay on its symbol after a click, one set per setup opened. Opening

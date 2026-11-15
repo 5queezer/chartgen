@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-06
 **Amended by:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, devices belong to the user, the last outcome is kept per device, and an endpoint has one owner)
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (a fire may also be delivered as a push, and push does not need webhook access)
@@ -24,7 +25,7 @@ opens. A user who closes chartgen wants this browser or phone to buzz.
   so this must not let one point the server at a host of their choice.
 - As reliable as a webhook: a restart neither loses a delivery nor fires again.
 - No double report with a tab open.
-- The server runs on a 4 GB Radxa, so the build should not get heavier.
+- The server runs on a small ARM server with 4 GB of memory, so the build should not get heavier.
 
 ## Considered Options
 
@@ -38,7 +39,7 @@ And for the crypto:
 
 - **`openssl`, already linked through `native-tls`.** No new crate. RFC 8291 and the VAPID token
   are about 200 lines over its primitives, checked against the RFC's test vector.
-- **`p256`, `aes-gcm` and `hkdf`.** Pure Rust, but more crates to build on the Radxa.
+- **`p256`, `aes-gcm` and `hkdf`.** Pure Rust, but more crates to build on the ARM server.
 - **A dedicated Web Push crate.** Not tried: sending has to stay on the pinned path here, so it would
   only supply what those lines and the test vector do.
 
@@ -60,7 +61,7 @@ registers its subscription with `subscribe_push`, per owner.
   `updates.push.services.mozilla.com`, `*.push.apple.com` or `*.notify.windows.com`. The existing
   public-address checks and the pin apply as well. `CHARTGEN_WEBHOOK_PROXY` applies too. Legacy
   `android.googleapis.com` is left out, because a subscription made with a VAPID key does not use it.
-- **What it reveals.** Requests go only to those hosts, so this channel does not reveal the home IP
+- **What it reveals.** Requests go only to those hosts, so this channel does not reveal the server's IP
   to a server the user chose, which a webhook does. **The push service itself still sees this
   server's IP**, unless the proxy is set. It cannot read the message.
 - **Access.** Push goes with being allowed alerts at all: with `CHARTGEN_SERVER_ALERT_CLIENTS` unset,

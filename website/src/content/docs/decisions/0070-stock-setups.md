@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-14
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (a setup's symbol can be a US
 stock or ETF read from Yahoo; Binance setups are unchanged) and
@@ -14,7 +15,7 @@ take stock symbols)
 
 ## Context and Problem Statement
 
-Hermes analyses stocks through chartgen's Yahoo source: quotes, charts and indicators for NVDA or
+An agent client analyses stocks through chartgen's Yahoo source: quotes, charts and indicators for NVDA or
 SPY. It cannot open a paper setup on one. `create_setup` refuses any symbol that is not a Binance
 symbol, because the scorer reads closed 1m bars from the Binance WebSocket feed, and Yahoo has no
 feed.
@@ -25,7 +26,7 @@ from Binance's 5 bps fee and 2 bps slippage per side.
 
 ## Decision Drivers
 
-- **Binance setups stay exactly as they are.** They are in production and Hermes relies on them.
+- **Binance setups stay exactly as they are.** They are in production and agents rely on them.
   Their stored rows, their answers and `tests/fixtures/setup_responses.json` do not change.
 - **One scorer.** A stock setup moves through `Record::apply_bar`, as a Binance setup and a replay
   do, so their results compare.
@@ -36,7 +37,7 @@ from Binance's 5 bps fee and 2 bps slippage per side.
 
 ## Yahoo's limits, measured
 
-Measured on 2026-11-14, a Saturday, from the PC's home IP. There were 21 requests to
+Measured on 2026-11-14, a Saturday. There were 21 requests to
 `query1.finance.yahoo.com/v8/finance/chart`, a few seconds apart, with one burst of 8 at one per
 second.
 
@@ -327,7 +328,7 @@ on Binance symbols.
 
 ## Consequences
 
-- Good: Hermes can test a stock thesis on paper with the scorer, costs rules and track record it
+- Good: an agent can test a stock thesis on paper with the scorer, costs rules and track record it
   has for crypto, and a replay can run it over the last 30 days.
 - Good: a setup's result never comes from a minute that did not trade or a gap that was not one.
   A split is not read as a crash unless Yahoo sends its event more than half an hour after the

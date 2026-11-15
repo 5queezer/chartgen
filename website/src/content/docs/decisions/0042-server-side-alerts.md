@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-06
 **Amended by:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, alerts and the allowlist belong to accounts)
 **Amended by:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (the 16 watched pairs count the feeds of setups too)
@@ -176,11 +177,11 @@ Chosen: option 3, in `src/server_alerts.rs` and `src/webhook.rs`, on only with
   treats it as a secret: it is in `/authorize` URLs, browser history, proxy logs and local storage.
   No operator secret backs it. A leaked id has to be replaced, as the deploy guide describes.
 - **One webhook reveals this server's IP.** A receiver sees where the request came from, so a
-  server hidden behind a tunnel gives its home address to anyone it sends a webhook for. It is
+  server hidden behind a tunnel gives its real address to anyone it sends a webhook for. It is
   the first request here whose destination someone else chooses. The allowlist limits who can do
   it; `CHARTGEN_WEBHOOK_PROXY` hides the address from receivers, those clients included. It does not
   hide everything: names are still looked up here first, so a receiver's DNS server sees whoever
-  resolves for this network, which is the home IP if this network runs its own recursive resolver.
+  resolves for this network, which is the server's own IP if this network runs its own recursive resolver.
 - **Live event order is inferred.** That the closing kline follows the next candle's first trade comes
   from the feed's parser and its comments, and from sample and fake sources. It has not been observed
   on a live Binance stream. Both orders are handled and tested, but it should be logged for a few minutes

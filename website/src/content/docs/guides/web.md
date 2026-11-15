@@ -98,8 +98,8 @@ stays visible.
   `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). A header above the
   chart gives the symbol and timeframe (`BTCUSDT · 1h`) and, below them, the
   visible indicators by name, with params where an indicator repeats; hidden indicators are left
-  out, and a long list wraps. The site's host (`chartgen.vasudev.xyz`, or
-  your own on a self-hosted server) is marked in the bottom-right corner of
+  out, and a long list wraps. The site's host (such as
+  `chartgen.example.com`) is marked in the bottom-right corner of
   the chart. The legend rows above the panes are not part of the image.
 - **Reset chart** (circular arrow) — scrolls to the latest bar and restores
   the default bar spacing. Same as `Alt+R`.
@@ -744,7 +744,7 @@ menu) puts a URL on the clipboard and shows a "Link copied" toast. Opening it
 reproduces the chart:
 
 ```text
-https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(length:21),ema_stack&compare=BTCUSDT&tz=UTC
+https://chartgen.example.com/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(length:21),ema_stack&compare=BTCUSDT&tz=UTC
 ```
 
 | Parameter | Meaning |

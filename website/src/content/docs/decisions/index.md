@@ -64,7 +64,7 @@ one and link both ways.
 | [0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) | Drawing and indicator alerts | Accepted | 2026-11-05 |
 | [0035](/chartgen/decisions/0035-styleable-geometry/) | Styleable indicator geometry colors | Accepted | 2026-11-05 |
 | [0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) | Redirect an unknown OAuth client back to the server's own web app | Accepted | 2026-11-06 |
-| [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the Coolify host | Accepted; superseded in part by [0060](/chartgen/decisions/0060-image-built-in-ci/) | 2026-11-06 |
+| [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the host | Accepted; superseded in part by [0060](/chartgen/decisions/0060-image-built-in-ci/) | 2026-11-06 |
 | [0038](/chartgen/decisions/0038-custom-intervals/) | Custom intervals and session-aware future bars | Accepted | 2026-11-06 |
 | [0039](/chartgen/decisions/0039-compact-layout/) | Compact layout for phones and small tablets | Accepted | 2026-11-06 |
 | [0040](/chartgen/decisions/0040-layout-compare-restore/) | A layout stores the scale mode its compare symbols return to | Accepted | 2026-11-06 |
@@ -101,5 +101,5 @@ one and link both ways.
 | [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) | A wake-up carries the market around it, and a take near its stop wakes the agent | Accepted; amended by [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | 2026-11-14 |
 | [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | A symbol that is not trading has no market context | Accepted | 2026-11-14 |
 | [0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/) | After a restart, a client hears that the tools may have changed | Accepted | 2026-11-15 |
-| [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | The autodeploy follows a deployment until Coolify finished it | Accepted | 2026-11-15 |
+| [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | The autodeploy follows a deployment until the platform finished it | Accepted | 2026-11-15 |
 | [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | get_quotes marks a quote that is not trading as stale | Accepted | 2026-11-15 |

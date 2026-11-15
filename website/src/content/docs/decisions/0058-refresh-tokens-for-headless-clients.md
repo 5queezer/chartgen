@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-11
 **Amends:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (a client other than the web app no longer re-authorizes after a restart or after 7 days, and its access token no longer ends at a restart; a refresh token counts as a token in the per-user limits), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a refresh token keeps its client from being evicted, for up to 30 days out of use, and through restarts)
 
@@ -97,13 +98,13 @@ server log and no refresh. With the access-token hash stored, the same three run
 person once, and after the restart the server log shows no `/authorize`, `/register` or
 `/token` request at all.
 
-Hermes, the first agent this is for, runs on MCP SDK 2.3.0 with its own token handling. It
-stores the absolute time at which a token runs out and refreshes first when that has
-passed (`mcp_oauth.py`, lines 468 to 495; `mcp_oauth_manager.py`, lines 80 to 89). After a
+The first agent client this is for is built on the MCP Python SDK, with its own token
+handling. It stores the absolute time at which a token runs out and refreshes first when
+that has passed. After a
 `401` it reloads its tokens from disk and otherwise leaves the refresh to the SDK. Run
 against a local server with sign-in off, as reported by the operator: authorized once, a
 tool call after a restart of chartgen succeeded with the same access token and no
-`/authorize` or `/token` request, and after a restart of Hermes with a stored token that had
+`/authorize` or `/token` request, and after a restart of the agent with a stored token that had
 run out it refreshed by itself, both tokens rotated. A real 7 days, a spent token coming
 back and sign-in on were not part of that run.
 
@@ -395,7 +396,7 @@ registered clients already do.
   to refresh in time. The Python SDK above keeps that time in memory only, so a client
   process that is restarted and then holds the same access token past its 7 days gets a
   `401` and authorizes again, with a person. A process that runs through refreshes in time,
-  and so does a client that stores the time, as Hermes does. A client that answers a `401`
+  and so does a client that stores the time, as that agent client does. A client that answers a `401`
   with a refresh needs none of this.
 - Bad, and not new: **`/token` and `/revoke` have no rate limit.** What one such request
   costs does not grow with what the server holds: a refresh token names its family, the

@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted; amended by [ADR-0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) (a symbol that is not trading answers an error, not a context)
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-14
 **Amends:** [ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) (a wake-up's body gains
 `context`; a third kind of event, `setup.near_stop`), [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)
@@ -13,15 +14,14 @@ sidebar:
 
 ## Context and Problem Statement
 
-Hermes, the agent these wake-ups are for, spends four or five tool calls at the start of each woken
+An agent these wake-ups are for spends four or five tool calls at the start of each woken
 session reading the same context: the price, the trend on a higher interval or two, funding, the
-long/short ratio and the Fear & Greed index. It records most of them on every setup as features
-(`htf_trend`, `funding`, `ls_long`, `fg`). The person approved putting them into the wake-up.
+long/short ratio and the Fear & Greed index. Putting them into the wake-up saves those calls.
 
-Hermes also said it does not notice when a take fills. That wake-up exists: a status the server
-gives a take wakes the agent (ADR-0061). The only take event since the log began was sent during a
-network outage of the receiver's host and failed its five attempts. What does not exist is a warning
-before the stop: a take could go to 0.9 R against it and Hermes would hear of it only at the stop.
+An agent may also miss that a take filled. That wake-up exists: a status the server
+gives a take wakes the agent (ADR-0061), though a delivery during an outage of the receiver's host
+can fail all its attempts. What does not exist is a warning
+before the stop: a take could go to 0.9 R against it and the agent would hear of it only at the stop.
 The only way round was an alert of its own, set by hand, on every take.
 
 ## Decision Drivers
@@ -78,8 +78,7 @@ bars let the 50-bar EMA settle. It is a description of the chart, not a signal.
 
 **What is left out.** Funding, long/short and the index are for Binance symbols only; a stock has its
 price and trends. Any part that could not be read is absent, never guessed. **A macro blackout is
-not in it:** chartgen has no macro calendar. That lives in Hermes's macro-calendar tool, which stays
-where it is.
+not in it:** chartgen has no macro calendar. That stays with the agent's own tools.
 
 **Funding is read on 1h bars**, not the 4h ones: the indicator lines each rate up with the nearest
 bar open, and a symbol funded every hour has a newer rate than the open of the forming 4h bar.
@@ -98,7 +97,7 @@ hold it: an event says what happened, and the context, like the setup, is shown 
 
 **`get_market_context`** answers the same object for 1 to 10 symbols, in the order asked, with
 `{symbol, error}` for one that cannot be read. It is an ordinary MCP tool, on the same authenticated
-path as every other, so a script that already holds a token (the 100eyes triage) can call it. A
+path as every other, so a script that already holds a token can call it. A
 replay server refuses it: the fixtures hold no funding or index.
 
 ### Near the stop
@@ -123,7 +122,7 @@ below −0.8 while the setup stays `triggered`.
 - Its wake-up has `"type": "setup.near_stop"` and `change: {mae_r, gap}`, then `context`, then the
   setup, which now shows `near_stop_at`.
 
-0.8 R is the threshold Hermes asked for: near enough that it is rarely noise, with room left to act
+0.8 R is chartgen's threshold: near enough that it is rarely noise, with room left to act
 before the stop.
 
 ### Consequences

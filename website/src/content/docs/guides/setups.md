@@ -163,8 +163,8 @@ the server kept them.
 
 ## Tags
 
-`tags` labels a setup so that you can group your track record: `strategy:retest-short`,
-`trigger:100eyes:abnormal-volatility`, `pattern:double-top-ee`. Up to 10, each 1 to 64
+`tags` labels a setup so that you can group your track record: `strategy:breakout`,
+`trigger:rsi-oversold`, `pattern:double-top-ee`. Up to 10, each 1 to 64
 characters of lowercase letters, digits and `: - _ . /`, starting with a letter or digit; a
 tag given twice is kept once. `list_setups` with `tags` returns only
 the setups that have all of them. Tags are not levels: `revise_setup` can change them after the

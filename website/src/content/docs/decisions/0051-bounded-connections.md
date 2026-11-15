@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-07
 **Amended by:** [ADR-0052](/chartgen/decisions/0052-indicator-cost/) (a call costs what its indicators draw and the bricks they run on, and keeps only its answer once built)
 
@@ -212,4 +213,4 @@ The last seven are on the fixes here. Without them, on this listener, half-closi
   `test_a_client_hanging_up_its_side_leaves_no_orphan`, `test_a_replaced_stream_gives_back_its_connection`.
 - Real browser: `web/tests/e2e/connection-limits.spec.ts`, a refused stream and a refused chart coming back.
 - The memory tables above come from probes, not from the test suite: they need a cgroup. Not measured: the real
-  Cloudflare, tunnel and Traefik path, or the Radxa (arm64).
+  proxy path in front of production, or the arm64 production server.

@@ -6,16 +6,18 @@ sidebar:
 ---
 
 **Status:** Accepted (phase 1); phases 2 and 3 proposed; amended by [ADR-0070](/chartgen/decisions/0070-stock-setups/) (stock symbols in fixtures and in the builder)
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-12
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (a replay's fixtures may be
 real history written by a fixture builder; the engine is unchanged)
 
 ## Context and Problem Statement
 
-The trading agent (Hermes) keeps a playbook. A rule earns a place in it after at least five closed
-setups. Live, at a few setups a week, that takes weeks per rule, and the exit variants of
+An agent that trades on paper through chartgen judges its rules by their closed setups, and a
+rule needs several before its record says anything. Live, at a few setups a week, that takes
+weeks per rule, and the exit variants of
 [ADR-0066](/chartgen/decisions/0066-shadow-exit-variants/) need the same closed setups before they
-say anything. Hermes ranks backtesting as its most wanted missing feature.
+say anything. Testing over history is the missing piece.
 
 ADR-0059 already has a replay server. `CHARTGEN_REPLAY_FIXTURES=<dir>` loads 1m bars per symbol,
 every price tool takes a required `as_of`, and one clock per process only moves forward:
@@ -34,7 +36,7 @@ every price tool takes a required `as_of`, and one clock per process only moves 
   `as_of`, over every registered indicator and chart style.
 
 What it lacks is real data: its fixtures are hand-made. The question is the smallest change that
-lets Hermes run its playbook over real history in hours, without letting anything after `as_of`
+lets an agent run its rules over real history in hours, without letting anything after `as_of`
 reach it.
 
 ## Decision Drivers
@@ -43,10 +45,10 @@ reach it.
   the model itself remembers.
 - **The same scorer, indicators and costs as live,** so a replayed track record is comparable with
   a live one (the argument of ADR-0066 against scoring outside the server).
-- **The agent is tested, not a formula.** Hermes's rules are written as a thesis read from charts,
-  not as code.
+- **The agent is tested, not a formula.** An agent's rules are written as a thesis read from
+  charts, not as code.
 - **Small:** reuse the ADR-0059 engine and tests. Little new server code.
-- **The live server and the radxa (3.8 GB, home IP behind the Binance gate) are not put at risk.**
+- **The live server and its host (3.8 GB, one IP whose Binance budget the live server needs) are not put at risk.**
 - **A run can be repeated and audited afterwards.**
 
 ## Considered Options
@@ -77,8 +79,8 @@ symbol. `Replay::fixture_bars` validates them on load as it does today.
 - A 429, a 418 or the gate's refusal reads the same page again after the gate's wait
   (`Retry-After`, or the rest of the minute), at most 5 times, and never after a wait over 5
   minutes. Then the run stops and says how many seconds to wait before running again: a rerun at
-  once would meet the same limit, and requests that keep coming get the home IP banned (418),
-  which the live server shares. Any other failed read stops the run at once.
+  once would meet the same limit, and requests that keep coming get the IP banned (418),
+  which a live server on the same address shares. Any other failed read stops the run at once.
 - Each file is written through a `.part` file and records its window (`from`, `to`,
   `shift_days`), which the replay ignores. A rerun keeps a symbol whose file has the same window
   and reads only the others, so an interrupted run costs at most one symbol's requests again.
@@ -87,7 +89,7 @@ symbol. `Replay::fixture_bars` validates them on load as it does today.
   any request. It may be a run someone means to audit.
 - Cost: 90 days of one symbol is 129,600 bars, so 130 requests at weight 2: well under a minute's
   budget.
-- It runs where the replay runs (the PC by default), not on the live server, so the live gate
+- It runs where the replay runs (a workstation by default), not on the live server, so the live gate
   never sees it.
 - Alternative: Binance's archive (data.binance.vision, monthly zips of 1m klines) costs no API
   weight. It would need its own reader (and its timestamps may be in µs from 2025 on: check), so
@@ -111,33 +113,33 @@ symbol. `Replay::fixture_bars` validates them on load as it does today.
 **Instance.** The unchanged replay server, started with `CHARTGEN_REPLAY_FIXTURES=<dir>`:
 - **Sizes.** In memory a 1m `Bar` is about 100 bytes (five f64 plus a String date). 90 days × 5
   symbols is about 65 MB; 1 year × 10 symbols is about 500 MB, too much beside the live services on
-  the radxa. A fixture is about 56 bytes per bar of JSON (measured on BTCUSDT: 81 kB a day,
+  the production server. A fixture is about 56 bytes per bar of JSON (measured on BTCUSDT: 81 kB a day,
   ≈ 7.5 MB per symbol-quarter).
 - **Where.**
-  - Run it on the PC. Windows of up to ~90 days × 5 symbols also fit on the radxa as a second,
-    unrouted container.
+  - Run it on a workstation. Windows of up to ~90 days × 5 symbols also fit on the production
+    server as a second, unrouted container.
   - One process is one run (one clock). Parallel runs are separate processes on separate ports.
 - **Private by network.**
   - A replay refuses a sign-in provider, and with sign-in off `/authorize` issues a code to any
     registered client without a person (checked in `oauth_authorize`).
   - Anyone who can reach it can register and move the one clock to the end of the window, which
-    spoils the run. So it is never routed through Cloudflare, and is reachable on the Tailscale
-    address (PC) or an internal Docker network (radxa) only.
+    spoils the run. So it is never routed through a public proxy, and is reachable on a VPN overlay
+    address (workstation) or an internal Docker network (server) only.
   - `--serve` listens on every interface (`0.0.0.0`) unless `CHARTGEN_BIND` names one address.
-    A bare process on the PC sets it to the Tailscale address. In a container it stays unset,
-    and the privacy comes from the port being published on the Tailscale address only, or from
+    A bare process on a workstation sets it to its VPN overlay address. In a container it stays
+    unset, and the privacy comes from the port being published on that address only, or from
     an internal network with no published port. A replay server prints its address at start and
-    warns when it is neither loopback nor in Tailscale's ranges.
-  - Hermes's MCP client can do the OAuth flow headlessly, since no person is needed.
+    warns when it is neither loopback nor in a VPN overlay's CGNAT range.
+  - An agent's MCP client can do the OAuth flow headlessly, since no person is needed.
 - **Performance.** `Replay::bars` scans every 1m bar from the window start on each call (O(window)).
   At 90 days that is ~130k bars per chart call, a few ms. A start bound from `limit` × interval can
   come later if longer windows are used.
 
-**Harness (Hermes's side, not chartgen).** A script that, for each close of the chosen interval
+**Harness (the agent's side, not chartgen).** A script that, for each close of the chosen interval
 (e.g. every 4h close) in the window:
 1. builds the same text a live wake-up would carry, with `as_of` = that close;
-2. starts a Hermes decision session whose **only** MCP servers are the replay instance and the
-   replay calendar (below);
+2. starts an agent decision session whose **only** MCP servers are the replay instance and, if
+   the agent uses one, a replay calendar (below);
 3. tells it to pass that `as_of` on every call.
 
 Setups need no wake-up to be scored: each call's catch-up moves them through every 1m bar since
@@ -165,8 +167,8 @@ at the next close, as it would after a delayed live wake-up.
 | subscriptions, browser alerts, server alerts, notifications, push | **refused** | wall-clock and live feeds; replay alerts are phase 2 |
 | trading tools (`place_order`, …) | **refused** | `--trade` cannot run with a replay |
 | scripted-indicator registry | **refused** | phase 3 at most, for scripts that read bars only |
-| **the agent's other MCP servers** (web search, news, the macro calendar) | **must not be attached** | they answer for today. The harness gives a replay session the replay instance only. |
-| macro calendar | **replaced** | `macro_blackout` covers the current week only and fails closed, so in a replay it would block every setup. The harness supplies a calendar fixture of past US releases (FOMC, CPI, PPI, NFP, claims, GDP, PCE, retail sales) for the window, answered at `as_of`. |
+| **the agent's other MCP servers** (web search, news, a live calendar) | **must not be attached** | they answer for today. The harness gives a replay session the replay instance only, plus the replay calendar below if it uses one. |
+| macro calendar | **replaced** | a live calendar answers for the current week, so in a replay it would say nothing true about the window. A harness that needs one supplies a calendar fixture of past economic releases for the window, answered at `as_of`. |
 | **the model's own memory** | **cannot be cut** | a model trained past the window may know what BTC did next. Prefer windows after the model's training cutoff; the time shift hides dates but not price levels. This is recorded with every run. |
 
 ### Phase 2 (later, own ADR): wake-ups in replay
@@ -186,8 +188,8 @@ bound in `Replay::bars` for year-long windows.
 
 ### Why not the others
 
-- **Option 2 (`backtest_rule`)** tests a formula, not the agent. Hermes's rules are a thesis read
-  from charts ("retest of the range high with RSI cooling"), and a rule language able to say that
+- **Option 2 (`backtest_rule`)** tests a formula, not the agent. An agent's rules are a thesis read
+  from charts (say, "a breakout that holds above the range on rising volume"), and a rule language able to say that
   is a project of its own: grammar, validation, an ADR, and a second way to open setups. It is
   fast and deterministic, and worth having for the mechanical part of a rule once one is written
   down. It can reuse the scorer as phase 2 would, so it stays open as a later option, not a
@@ -206,21 +208,21 @@ bound in `Replay::bars` for year-long windows.
   - Docs, this ADR, and a test that a built fixture loads and replays.
   - Deploy: a second process with its own env, no DB, private address.
   - About 1–2 days.
-- **Hermes harness:** the loop, a session per close with a reduced MCP set, a calendar fixture,
-  and the run log. About 1 day, depending on how Hermes's gateway starts a session from a script
-  (not checked here).
+- **Agent harness:** the loop, a session per close with a reduced MCP set, a calendar fixture,
+  and the run log. About 1 day, depending on how the agent's runtime starts a session from a
+  script (not checked here).
 - **Running it:** dominated by model calls.
   - 90 days stepped at 4h closes is 540 sessions. At ~30–60 s each that is 4.5–9 h of wall time.
   - At an assumed $0.05–0.30 per session it costs ~$30–160 per run. Both figures depend on
-    Hermes's model and prompt size, which I did not measure.
+    the agent's model and prompt size, which were not measured.
   - Stepping at 1h is 4× that. Phase 2's event wake-ups would cut it.
-  - Five closed setups per rule needs a window where the rule's conditions occur at least ~5
+  - Enough closed setups per rule needs a window where the rule's conditions occur that many
     times; a quarter of 4h bars across 3–5 symbols is a reasonable first window.
 - **Fixture download:** seconds per symbol-quarter. Disk: ~9 MB per symbol-quarter.
 
 ### Consequences
 
-- Good, because a playbook rule can collect its five closed setups in an afternoon, scored by the
+- Good, because a trading rule can collect its closed setups in an afternoon, scored by the
   live scorer with the exit variants, and comparable with live results.
 - Good, because chartgen's change is small and outside the request path. The look-ahead guarantee
   is ADR-0059's, already tested.
@@ -245,4 +247,5 @@ bound in `Replay::bars` for year-long windows.
 - On the harness's side, not chartgen's:
   - A run of a fixed harness script against a fixed fixture twice gives byte-identical tool
     answers (the agent's choices may differ; the server's answers to the same calls do not).
-  - The harness's session config is checked to contain the replay MCP server only.
+  - The harness's session config is checked to contain the replay MCP server only (and the
+    replay calendar, if it uses one).
