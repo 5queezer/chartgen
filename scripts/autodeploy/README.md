@@ -422,10 +422,12 @@ that finds a command under way does nothing.
 The script logs `triggered Coolify deploy` when Coolify accepted the request,
 and `Coolify finished deploying <image>` at the first tick after Coolify said
 `finished`. Coolify finishes a rolling update once the new container started
-and, with its health check on, passed it. On this application Coolify's health
-check is off (and the image has none), so `finished` means the container
-started, not that it answers. The script looks at nothing beyond Coolify's word.
-To check by hand:
+and, with its health check on, passed it. Turn it on: in Coolify, the
+application, **Healthcheck**, enabled, scheme `http`, host `localhost`, port
+`9315`, path `/`, return code `200`, start period `60` s. The image ships `curl`
+for it, and a non-browser `GET /` answers with the health JSON. With it on,
+`finished` means chartgen answers; with it off, only that the container started.
+The script looks at nothing beyond Coolify's word. To check by hand:
 
 - Coolify, the application, **Deployments**: the newest one is finished, and
   its log shows the pull of `ghcr.io/5queezer/chartgen:<sha>` and no build.
