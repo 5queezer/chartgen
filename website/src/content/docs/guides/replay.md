@@ -83,35 +83,36 @@ checked later.
 :::caution[Never public]
 A replay server refuses sign-in, and with sign-in off anyone who can reach it can register a
 client and get a token without a person. Anyone can then move its one clock to the end of the
-window, which spoils the run. Never route it through Cloudflare or any public proxy.
+window, which spoils the run. Never route it through a public proxy or tunnel.
 `chartgen --serve` listens on every interface unless `CHARTGEN_BIND` names one address. A replay
-server prints the address it is bound to, and warns when that is neither loopback nor a
-Tailscale address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). In a container the warning is
+server prints the address it is bound to, and warns when that is neither loopback nor in
+a VPN overlay's CGNAT range (`100.64.0.0/10`, or `fd7a:115c:a1e0::/48` for IPv6). In a container the warning is
 expected: there the published port decides who can reach it.
 :::
 
-**On your PC, as a bare binary.** Bind it to the Tailscale address:
+**On your PC, as a bare binary.** Bind it to the PC's address on your VPN overlay:
 
 ```bash
-CHARTGEN_BIND=$(tailscale ip -4) \
+VPN_IP=100.64.0.10   # this PC's VPN overlay address
+CHARTGEN_BIND=$VPN_IP \
 CHARTGEN_REPLAY_FIXTURES=fixtures/2026-q3 \
-CHARTGEN_BASE_URL="http://$(tailscale ip -4):9316" \
+CHARTGEN_BASE_URL="http://$VPN_IP:9316" \
 chartgen --serve --port 9316
 ```
 
 `CHARTGEN_BIND=127.0.0.1` is enough when the agent runs on the same machine.
 
 **On your PC, in a container.** The published image is arm64 only, so build it on x86
-(`docker build -t chartgen .` in the repository), then publish the port on the Tailscale
+(`docker build -t chartgen .` in the repository), then publish the port on the VPN overlay
 address alone:
 
 ```bash
-TS_IP=$(tailscale ip -4)
+VPN_IP=100.64.0.10   # this PC's VPN overlay address
 podman run --rm --name chartgen-replay \
   -v "$PWD/fixtures/2026-q3:/fixtures:ro,Z" \
   -e CHARTGEN_REPLAY_FIXTURES=/fixtures \
-  -e CHARTGEN_BASE_URL="http://$TS_IP:9316" \
-  -p "$TS_IP:9316:9315" \
+  -e CHARTGEN_BASE_URL="http://$VPN_IP:9316" \
+  -p "$VPN_IP:9316:9315" \
   chartgen
 ```
 
@@ -130,7 +131,7 @@ docker run -d --name chartgen-replay --network chartgen-replay \
 
 Put that network in the agent's own compose definition rather than running
 `docker network connect` by hand: a hand-made connection is lost when the agent is redeployed
-(Coolify recreates its containers).
+(a container platform recreates its containers).
 
 ```yaml
 services:

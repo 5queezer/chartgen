@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-06
 **Amends:** [ADR-0038](/chartgen/decisions/0038-custom-intervals/) (the kline cache now holds every newest read, repeats may send nothing, and `end_time` pages are shared)
 **Amended by:** [ADR-0048](/chartgen/decisions/0048-order-flow/) (its windows hold taker buy volume, 104 bytes a kline rather than 96, and read `1s` klines, which this decision's handling of them did not reach)
@@ -15,7 +16,7 @@ sidebar:
 Binance was loaded once per user. Only reads of more than 1000 klines went through the
 cache of ADR-0038, and even those sent a page on every repeat. A normal chart load (500
 bars and 300 of warmup), every tail poll and every history page each sent a request of
-their own, so 100 users on BTCUSDT 1h sent 100 requests, from one home IP. How can load
+their own, so 100 users on BTCUSDT 1h sent 100 requests, from one IP. How can load
 follow the number of symbols rather than the number of users, without a chart ever
 showing something a direct read would not?
 

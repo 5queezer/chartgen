@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-12
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (indicator alerts may now run
 on the server, at bar closes; a watched pair can hold a window of bars) and
@@ -96,7 +97,7 @@ Chosen: **3**, **a** and **ii**, in `src/server_alerts/indicator.rs` and `src/se
   alert. They rescan a window at every bar, so they cost bars times period (see the cost below).
 - `line` is a legend label, any case, defaulting to the first line. It is resolved when the alert
   is made, so a stored alert names a line that exists.
-- `evaluate_on` must be `close` and the interval 1h or longer. A close of 1h is the finest Hermes
+- `evaluate_on` must be `close` and the interval 1h or longer. A close of 1h is the finest the agent
   needs, and what an alert costs is per close.
 - `level` is any finite number with `compare: "level"`, and refused with `compare: "close"`.
 - The indicator, its params, line and compare cannot change later; condition, level and trigger
@@ -177,7 +178,7 @@ The row keeps `level` inside `indicator` and none at the top. A build from befor
 read such a row and skips it ("skipping an unreadable alert"), rather than running an RSI level
 of 25 as a price of 25. Price alerts are stored as before.
 
-### Cost on the radxa
+### Cost on the production server
 
 - **Memory.** A window is 1000 bars of about 100 bytes: 100 KB per pair, at most 1.6 MB with the
   16 pairs the server watches, and nothing for pairs with no indicator alert.
@@ -193,7 +194,7 @@ of 25 as a price of 25. Price alerts are stored as before.
 
   Most of the linear ones' time is the copy of the bars. The rescanning five grow with their
   period, which is why they stop at 200. The worst the limits allow, 200 alerts of
-  `williams_r` 200 on one 1h pair, is about 0.14 s once an hour on x86; the radxa's ARM cores
+  `williams_r` 200 on one 1h pair, is about 0.14 s once an hour on x86; the production server's ARM cores
   are slower, by an unmeasured factor of a few. Typical alerts, RSI and EMAs,
   cost 200 × 60 µs = 12 ms at that worst.
 - **Network.** One REST page per pair as above, through the gate that charts use.

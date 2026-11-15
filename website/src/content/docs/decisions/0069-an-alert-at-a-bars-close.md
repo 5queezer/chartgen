@@ -6,13 +6,14 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-13
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (a server alert can fire at a
 bar's close, whatever the price)
 
 ## Context and Problem Statement
 
-The trading agent (Hermes) wants to be woken "at the 4h close" to look at its charts, whatever
+A trading agent wants to be woken "at the 4h close" to look at its charts, whatever
 the price. A server alert watches the price against a level
 ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)) or, since
 [ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/), an indicator's line at a

@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-06
 **Amends:** [ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) (its windows hold taker buy volume, and read `1s` klines)
 
@@ -14,7 +15,7 @@ sidebar:
 TradingView's Premium plan has a Volume Footprint chart type, a TPO chart type and a
 volume profile family, all built from data finer than the bars on the chart. chartgen
 spread each bar's volume over its range, which the parity guide listed as a gap. Doing
-this needs a new data source and a new wire shape, from a server on a home IP with a
+this needs a new data source and a new wire shape, from a server on a single IP with a
 Binance budget it must not exhaust, on a machine with 4 GB of memory.
 
 ## Considered Options

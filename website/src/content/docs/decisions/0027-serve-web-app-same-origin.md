@@ -6,6 +6,7 @@ sidebar:
 ---
 
 **Status:** Accepted; amended by [ADR-0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) (the app's pages forbid framing, and its files answer no other origin)
+*Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-05
 
 ## Context and Problem Statement
@@ -13,8 +14,8 @@ sidebar:
 The SolidJS app in `web/` ([ADR-0003](/chartgen/decisions/0003-web-frontend-stack/))
 talks to chartgen over MCP and OAuth. ADR-0003 assumed the production app
 and the backend would share one origin, but nothing deployed the app. The
-Docker image that Coolify builds contained only the Rust binary, so opening
-`https://chartgen.vasudev.xyz/` in a browser showed the JSON health
+Docker image that the container platform builds contained only the Rust binary, so opening
+`https://chartgen.example.com/` in a browser showed the JSON health
 document, not the chart app.
 
 `GET /` is also probed by health checks and by MCP clients, and existing
@@ -23,8 +24,8 @@ to keep those requests working exactly as before.
 
 ## Decision Drivers
 
-- One deploy (the root `Dockerfile` on Coolify) without new Coolify
-  settings or a second hosting service.
+- One deploy (the root `Dockerfile` on the container platform) without new
+  platform settings or a second hosting service.
 - Same origin for the app and the API: no CORS, and OAuth `redirect_uri`
   is just `origin + "/"`.
 - Non-browser requests to `/` must keep getting the same JSON.
@@ -59,7 +60,7 @@ Chosen option: same origin, served by chartgen.
     gets `index.html`; any other `GET /` gets the JSON. The OAuth callback
     (`/?code=…&state=…`) is a browser navigation, so it loads the app.
   - `/mcp` is the canonical MCP endpoint (`POST` for JSON-RPC, `GET` for
-    the SSE stream). Documentation names `https://chartgen.vasudev.xyz/mcp`
+    the SSE stream). Documentation names `https://chartgen.example.com/mcp`
     as the connector URL.
   - `POST /` is a deprecated compatibility alias for connectors added with
     the root URL, like the older `/message` and `/sse` aliases. It is kept
