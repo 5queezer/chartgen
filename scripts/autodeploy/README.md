@@ -390,9 +390,15 @@ prints its SHA before it does. So after "A ran, then B, and B is bad",
 A again. A deploy that failed in Coolify never counts: after "A ran, B failed
 three times, C ran", `rollback` goes to A.
 
-While a deploy is still followed (queued, in progress, or failed with
-attempts left), `rollback` goes to the image that runs now, the one before
-that deploy.
+**A command by hand never replaces a deploy that can still finish.** While
+the one followed is queued, in progress or cannot be read, `deploy` and
+`rollback` deploy nothing and say so: wait for it to end (the timer follows
+it), or cancel it in Coolify, and run the command again. One that failed or
+was cancelled is replaced. `running <sha>` always ends the following: it is
+the way out when Coolify lost a deployment.
+
+`rollback` needs to know what runs. With no `running-sha` it refuses and
+asks for `run running <sha>`.
 
 - **A second `rollback` in a row goes forward again:** it deploys what the
   first one replaced, the image you just rolled back from. To go further
@@ -483,6 +489,9 @@ What the log says when nothing is deployed:
 | `ERROR: ... is not finished after N min` | Coolify has held it queued or running for 45 minutes. No longer followed; look at it in Coolify. |
 | `cancelled in Coolify` | Someone cancelled it; it is not deployed again. `run deploy <sha>` puts it out. |
 | `could not read the deploy of <sha> from Coolify` | Coolify did not answer; the next tick asks again. |
+| `Coolify named no deployment for <sha>` | Coolify queued nothing (its queue is full, or the token may not deploy). Not counted as triggered; the next tick tries again. |
+| `ERROR: ... cannot be followed` | The `pending` file names no deployment (edited by hand?). No longer followed; read Coolify's deployments, then `run running <sha>` or `run deploy <sha>`. |
+| `it can still finish ... Nothing was deployed` | A command by hand while a deploy is under way. Wait, or cancel it in Coolify. |
 
 ## Cancelled or timed-out CI
 
@@ -508,8 +517,9 @@ GitHub, the registry and Coolify; no network. CI runs it (`autodeploy-test`).
 
 ## After installing this version over an older one
 
-The older script kept no `running-sha`. Tell it what runs, once: `run running
+The older script kept no `running-sha`, and its `previous-sha` is what it
+triggered before, which may never have run. Tell it what runs, once: `run running
 <sha>` with the commit of the image the application runs now (`docker ps` on the
-host shows it). Until then a `rollback` with no deploy under way goes to
-`previous-sha` as the older script wrote it: the image it triggered before its
-last one.
+host shows it). That drops the old `previous-sha`, so the first `rollback` has
+somewhere to go only after the next image ran. Until `running-sha` exists,
+`rollback` refuses.

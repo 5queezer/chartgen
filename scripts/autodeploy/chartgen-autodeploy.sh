@@ -33,8 +33,8 @@ DEPLOYED_FILE=$(dirname "$STATE_FILE")/deployed-sha
 # one that ran before it: where a rollback goes.
 RUNNING_FILE=$(dirname "$STATE_FILE")/running-sha
 PREVIOUS_FILE=$(dirname "$STATE_FILE")/previous-sha
-# A deploy being followed: "SHA DEPLOYMENT ATTEMPT SINCE", DEPLOYMENT "-" until known,
-# SINCE the epoch second of its first attempt.
+# A deploy being followed: "SHA DEPLOYMENT ATTEMPT SINCE", SINCE the epoch second of its
+# first attempt. An attempt is written here before it is made.
 PENDING_FILE=$(dirname "$STATE_FILE")/pending
 DEPLOY_ATTEMPTS=${DEPLOY_ATTEMPTS:-3}
 # Followed for this long at most: past it, a deploy still queued or running is left to
@@ -115,7 +115,8 @@ coolify() {
 
 # deploy_image SHA: point the application at the image of SHA and deploy it.
 # Returns 0 when Coolify accepted both calls, which is "triggered", not "healthy", and
-# sets deployment to the deployment Coolify named, or to nothing.
+# sets deployment to the deployment Coolify named. An answer that names none is a
+# refusal: nothing was queued.
 deploy_image() {
   deployment=
   local code json kind
@@ -154,6 +155,12 @@ deploy_image() {
       ;;
   esac
   deployment=$(jq -r '.deployments[0].deployment_uuid // empty' "$body" 2>/dev/null)
+  if [ -z "$deployment" ]; then
+    # Coolify names one whenever it queued a deployment, also one already queued for
+    # this image. Without it nothing was queued: a full queue, or a refusal.
+    log "Coolify named no deployment for $1 ($(jq -r '.deployments[0].message // .message // "no message"' "$body" 2>/dev/null)); not deployed"
+    return 1
+  fi
 }
 
 # record_deploy SHA ATTEMPT: SHA is what this script triggered last, and the deployment
@@ -171,7 +178,11 @@ record_deploy() {
 record_ran() {
   local before=
   [ -s "$RUNNING_FILE" ] && before=$(cat "$RUNNING_FILE")
-  if [ -n "$before" ] && [ "$before" != "$1" ]; then
+  if [ -z "$before" ]; then
+    # The first image known to run. A previous-sha from before is an older script's
+    # "triggered before", which may never have run: a rollback must not go there.
+    rm -f "$PREVIOUS_FILE" || return 1
+  elif [ "$before" != "$1" ]; then
     write_file "$PREVIOUS_FILE" "$before" || return 1
   fi
   write_file "$RUNNING_FILE" "$1"
@@ -189,15 +200,6 @@ pending_status() {
   [[ ${p_uuid-} =~ ^[A-Za-z0-9_-]+$ ]] || p_uuid=-
   [[ ${p_attempt-} =~ ^[0-9]+$ ]] || p_attempt=1
   [[ ${p_since-} =~ ^[0-9]+$ ]] || p_since=$(date +%s)
-  if [ "$p_uuid" = - ]; then
-    # Coolify's answer named no deployment: its newest for the application is this one.
-    p_code=$(coolify GET "/deployments/applications/$COOLIFY_APP_UUID?skip=0&take=1")
-    case $p_code in
-      2??) p_uuid=$(jq -r '(.deployments // .)[0].deployment_uuid // empty' "$body" 2>/dev/null) ;;
-    esac
-    [ -n "$p_uuid" ] || p_uuid=-
-    [ "$p_uuid" = - ] || write_file "$PENDING_FILE" "$p_sha $p_uuid $p_attempt $p_since"
-  fi
   if [ "$p_uuid" != - ]; then
     p_code=$(coolify GET "/deployments/$p_uuid")
     case $p_code in
@@ -215,11 +217,24 @@ finished() {
   log "Coolify finished deploying $CHARTGEN_IMAGE:$p_sha"
 }
 
-# note_finished: if the deploy being followed has finished, record it. A command by
-# hand does this first, so that what ran before it is known to a rollback.
-note_finished() {
+# before_hand: what a command by hand does first with the deploy being followed. One
+# that finished is recorded, so that what ran before is known to a rollback; one that
+# failed or was cancelled is no longer followed: the command replaces it. One still
+# queued or running, or that cannot be read, is not replaced: it can still finish, and
+# then it runs. Returns 1 then, and the command deploys nothing.
+before_hand() {
   pending_status || return 0
-  [ "$p_status" != finished ] || finished
+  case $p_status in
+    finished) finished ;;
+    failed | cancelled-by-user)
+      rm -f "$PENDING_FILE"
+      log "the deploy of $p_sha ($p_status in Coolify) is replaced by this one"
+      ;;
+    *)
+      log "the deploy of $p_sha is ${p_status:-not readable} in Coolify (deployment $p_uuid): it can still finish. Wait for it to end, which the timer follows, or cancel it in Coolify; then run this again. Nothing was deployed"
+      return 1
+      ;;
+  esac
 }
 
 # follow_deploy: where the deploy being followed stands in Coolify, and what to do
@@ -230,6 +245,12 @@ follow_deploy() {
   local now
   pending_status || return 0
   now=$(date +%s)
+  if [ "$p_uuid" = - ]; then
+    rm -f "$PENDING_FILE"
+    gave_up=1
+    log "ERROR: the deploy of $CHARTGEN_IMAGE:$p_sha cannot be followed: its record names no Coolify deployment. Look at Coolify's deployments; then: running SHA, or deploy $p_sha"
+    return 1
+  fi
   case $p_status in
     finished)
       finished
@@ -242,14 +263,21 @@ follow_deploy() {
         log "ERROR: the deploy of $CHARTGEN_IMAGE:$p_sha failed in Coolify $p_attempt times (last deployment $p_uuid); not deploying it again. Production runs $(cat "$RUNNING_FILE" 2>/dev/null || echo 'what it ran before'). Look at the deployment in Coolify; when the cause is gone: deploy $p_sha"
         return 1
       fi
+      # The attempt is written before it is made: one that cannot be recorded is not
+      # made, and every attempt made counts, refused or not.
       p_attempt=$((p_attempt + 1))
-      if deploy_image "$p_sha"; then
-        record_deploy "$p_sha" "$p_attempt" "$p_since"
-        log "the deploy of $p_sha failed in Coolify (deployment $p_uuid); deploying it again, attempt $p_attempt of $DEPLOY_ATTEMPTS"
-      else
-        # Counted all the same, so a Coolify that keeps refusing ends the attempts too.
-        write_file "$PENDING_FILE" "$p_sha $p_uuid $p_attempt $p_since"
+      if ! write_file "$PENDING_FILE" "$p_sha $p_uuid $p_attempt $p_since"; then
+        gave_up=1
+        log "ERROR: the deploy of $p_sha failed in Coolify (deployment $p_uuid), and attempt $p_attempt could not be recorded in $(dirname "$STATE_FILE"); not deploying it again"
+        return 1
+      fi
+      if ! deploy_image "$p_sha"; then
         log "the deploy of $p_sha failed in Coolify (deployment $p_uuid), and Coolify refused it again; attempt $p_attempt of $DEPLOY_ATTEMPTS, trying again next tick"
+      elif ! record_deploy "$p_sha" "$p_attempt" "$p_since"; then
+        gave_up=1
+        log "ERROR: deployed $p_sha again (deployment $deployment), but could not record it; the next tick follows the failed one and counts on from attempt $p_attempt"
+      else
+        log "the deploy of $p_sha failed in Coolify (deployment $p_uuid); deploying it again, attempt $p_attempt of $DEPLOY_ATTEMPTS"
       fi
       return 1
       ;;
@@ -299,7 +327,7 @@ manual() {
     log "no image $CHARTGEN_IMAGE:$sha to deploy (registry answered $status)"
     exit 1
   fi
-  note_finished || exit 1
+  before_hand || exit 1
   deploy_image "$sha" || exit 1
   if ! record_deploy "$sha" 1 || ! leave_head_alone; then
     log "deployed $sha by hand but could not record it in $(dirname "$STATE_FILE"); the timer may deploy master's head over it"
@@ -327,13 +355,10 @@ case ${1-} in
     ;;
   rollback)
     take_turn hand
-    note_finished || exit 1
-    # With a deploy still followed, the image that runs is the one to go back to.
-    if [ -s "$PENDING_FILE" ] && [ -s "$RUNNING_FILE" ]; then
-      read -r pending _ <"$PENDING_FILE"
-      log "rolling back to $(cat "$RUNNING_FILE"), the image that ran when the deploy of $pending was triggered"
-      manual "$(cat "$RUNNING_FILE")"
-      exit 0
+    before_hand || exit 1
+    if [ ! -s "$RUNNING_FILE" ]; then
+      log "this script does not know what runs now, so it knows nothing to roll back to. Tell it with: running SHA (the commit of the image that runs), or put an image out with: deploy SHA"
+      exit 1
     fi
     if [ ! -s "$PREVIOUS_FILE" ]; then
       log "this script knows no image that ran before the one that runs now, so there is nothing to roll back to. Read the SHA that should run from Coolify or the commit log and use: deploy SHA"

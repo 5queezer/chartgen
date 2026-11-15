@@ -7,10 +7,10 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-15
-**Amends:** [ADR-0060](/chartgen/decisions/0060-image-built-in-ci/) (what the script records
-after a deploy, and where `rollback` goes: an image counts as having run once Coolify finished
-deploying it, no longer once Coolify accepted the request; and the polling of Coolify that ADR-0060
-left out is now done)
+**Supersedes in part:** [ADR-0060](/chartgen/decisions/0060-image-built-in-ci/) (what the script
+records after a deploy, and where `rollback` goes: an image counts as having run once Coolify
+finished deploying it, no longer once Coolify accepted the request; and the polling of Coolify that
+ADR-0060 left out is now done. The rest of ADR-0060 stands)
 
 ## Context and Problem Statement
 
@@ -47,9 +47,11 @@ of leaving it out was a release that silently did not go out.
 ## Decision Outcome
 
 After a deploy, by the timer or by hand, the script keeps the deploy it follows in its state
-directory, in `pending`: the commit, the deployment Coolify named (or `-` when it named none, and
-then the application's newest deployment is read), the attempt, and when the first attempt was
-made.
+directory, in `pending`: the commit, the deployment Coolify named, the attempt, and when the first
+attempt was made. Coolify names a deployment whenever it queued one, also one already queued for
+the same image; an answer that names none means nothing was queued, and the script counts it as
+not triggered. An attempt is written to `pending` before it is made, so the attempts stay bounded
+when the state directory cannot be written.
 
 Every tick reads that deployment first, and while one is followed it deploys nothing else:
 
@@ -67,10 +69,13 @@ Every tick reads that deployment first, and while one is followed it deploys not
 `deployed-sha` keeps its meaning: what the script triggered last, or was told runs. The watchdog
 reads it and needs no change: after a give-up it still differs from the image that runs.
 
-A command by hand first reads the deploy followed so far, and records it if it finished, so that
-what ran before it is known. **`rollback` deploys the image that ran before the one that runs
-now**; while a deploy is still followed, the image that runs now. `running <sha>` records what runs
-and ends any following.
+A command by hand first reads the deploy followed so far: one that finished is recorded, so that
+what ran before it is known; one that failed or was cancelled is replaced; **one still queued or in
+progress is not replaced**, because Coolify would still run it after the command's own, and the
+command deploys nothing and says why. **`rollback` deploys the image that ran before the one that
+runs now**, and refuses while the script does not know what runs. `running <sha>` records what
+runs, ends any following, and on a state from an older script drops its `previous-sha`, which
+names an image triggered, not one known to have run.
 
 ### Consequences
 
@@ -82,5 +87,7 @@ and ends any following.
   minutes at most when Coolify holds one queued.
 - Bad: "finished" is Coolify's word. On this application Coolify's health check is off and the
   image has none, so it means the container started, not that it answers.
+- Bad: a deploy or rollback by hand waits for a deploy under way to end, or for the operator to
+  cancel it in Coolify.
 - Neutral: two more state files, `running-sha` and `pending`. An older script's state has no
   `running-sha`; `running <sha>` once after the upgrade gives `rollback` its starting point.
