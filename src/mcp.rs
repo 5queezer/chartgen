@@ -2958,32 +2958,48 @@ fn get_quotes(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Val
 
     // One result per valid symbol, in the same order as the `Ok` entries.
     let mut fetched = fetch::fetch_quotes(source, &valid).into_iter();
+    // Staleness is judged now, not when the (cached) quote was fetched.
+    let now = fetch::now_ms();
     let quotes: Vec<Value> = order
         .into_iter()
         .map(|entry| match entry {
             Err(text) => json!({ "symbol": text, "error": "invalid symbol" }),
             Ok(sym) => match fetched.next() {
-                Some(Ok(q)) => {
-                    let change = q.last - q.prev_close;
-                    let change_pct = change / q.prev_close * 100.0;
-                    json!({
-                        "symbol": sym,
-                        "last": finite_or_null(q.last),
-                        "change": finite_or_null(change),
-                        "change_pct": finite_or_null(change_pct),
-                        "prev_close": finite_or_null(q.prev_close),
-                        "high": q.high.map_or(Value::Null, finite_or_null),
-                        "low": q.low.map_or(Value::Null, finite_or_null),
-                        "volume": q.volume.map_or(Value::Null, finite_or_null),
-                        "source": q.source,
-                    })
-                }
+                Some(Ok(q)) => quote_json(&sym, &q, now),
                 Some(Err(e)) => json!({ "symbol": sym, "error": e }),
                 None => json!({ "symbol": sym, "error": "quote missing" }),
             },
         })
         .collect();
     tool_ok(id, json!({ "quotes": quotes }))
+}
+
+/// One `get_quotes` entry at `now` (ms). A stale quote (ADR-0076) keeps its
+/// price, has no change (null, not 0) and says since when it is stale.
+fn quote_json(sym: &str, q: &fetch::Quote, now: i64) -> Value {
+    let stale = q.stale_since(now);
+    let change = q.last - q.prev_close;
+    let change_pct = change / q.prev_close * 100.0;
+    let (change, change_pct) = match stale {
+        Some(_) => (Value::Null, Value::Null),
+        None => (finite_or_null(change), finite_or_null(change_pct)),
+    };
+    let mut v = json!({
+        "symbol": sym,
+        "last": finite_or_null(q.last),
+        "change": change,
+        "change_pct": change_pct,
+        "prev_close": finite_or_null(q.prev_close),
+        "high": q.high.map_or(Value::Null, finite_or_null),
+        "low": q.low.map_or(Value::Null, finite_or_null),
+        "volume": q.volume.map_or(Value::Null, finite_or_null),
+        "source": q.source,
+    });
+    if let Some(at) = stale {
+        v["stale"] = json!(true);
+        v["last_bar_at"] = json!(drawings::iso(at));
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -7186,6 +7202,51 @@ mod tests {
         assert!(q
             .iter()
             .all(|e| e["error"] == "upstream unavailable" && e.get("last").is_none()));
+    }
+
+    #[test]
+    fn get_quotes_marks_a_stale_quote_and_drops_its_change() {
+        // XMRUSDT: delisted, its 24h ticker last closed 2026-11-13 03:09 UTC.
+        let at = 1_794_539_340_000;
+        let xmr = fetch::Quote {
+            last: 118.7,
+            prev_close: 118.7,
+            high: Some(118.7),
+            low: Some(118.7),
+            volume: Some(0.0),
+            source: "binance",
+            last_at: Some(at),
+            max_age_ms: 2 * 3_600_000,
+        };
+        let stale = quote_json("XMRUSDT", &xmr, at + 2 * 3_600_000 + 1);
+        assert_eq!(stale["last"], 118.7);
+        assert!(stale["change"].is_null() && stale["change_pct"].is_null());
+        assert_eq!(stale["stale"], true);
+        assert_eq!(stale["last_bar_at"], "2026-11-13T03:09:00Z");
+
+        // Fresh: change as before, and no new fields.
+        let fresh = quote_json("XMRUSDT", &xmr, at + 2 * 3_600_000);
+        assert_eq!(fresh["change"], 0.0);
+        assert_eq!(fresh["change_pct"], 0.0);
+        let keys: Vec<&str> = fresh
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert!(
+            !keys.contains(&"stale") && !keys.contains(&"last_bar_at"),
+            "{keys:?}"
+        );
+        assert_eq!(keys.len(), 9);
+        // Unknown time: never stale.
+        let unknown = fetch::Quote {
+            last_at: None,
+            ..xmr
+        };
+        assert!(quote_json("XMRUSDT", &unknown, i64::MAX)
+            .get("stale")
+            .is_none());
     }
 
     #[test]

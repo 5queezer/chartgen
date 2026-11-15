@@ -39,7 +39,7 @@ one and link both ways.
 | [0008](/chartgen/decisions/0008-e2e-playwright/) | End-to-end tests with Playwright + CI integration | Accepted; amended by [0039](/chartgen/decisions/0039-compact-layout/) and [0057](/chartgen/decisions/0057-e2e-shards/) | 2026-11-04 |
 | [0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) | Live tail polling and history paging | Accepted | 2026-11-04 |
 | [0010](/chartgen/decisions/0010-overlay-geometry-rendering/) | Overlay geometry rendering via klinecharts indicator draw callbacks | Accepted | 2026-11-04 |
-| [0011](/chartgen/decisions/0011-watchlist-quotes/) | Watchlist quotes: batched get_quotes, rolling 24 h change for Binance | Accepted | 2026-11-04 |
+| [0011](/chartgen/decisions/0011-watchlist-quotes/) | Watchlist quotes: batched get_quotes, rolling 24 h change for Binance | Accepted; amended by [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | 2026-11-04 |
 | [0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) | Geometry colors on the wire | Accepted | 2026-11-04 |
 | [0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) | Indicator visibility, parameter editing and one instance per indicator | Accepted; superseded in part by [0028](/chartgen/decisions/0028-multiple-indicator-instances/) and [0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/) | 2026-11-04 |
 | [0015](/chartgen/decisions/0015-named-layouts/) | Named chart layouts | Accepted | 2026-11-04 |
@@ -102,3 +102,4 @@ one and link both ways.
 | [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | A symbol that is not trading has no market context | Accepted | 2026-11-14 |
 | [0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/) | After a restart, a client hears that the tools may have changed | Accepted | 2026-11-15 |
 | [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | The autodeploy follows a deployment until Coolify finished it | Accepted | 2026-11-15 |
+| [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | get_quotes marks a quote that is not trading as stale | Accepted | 2026-11-15 |

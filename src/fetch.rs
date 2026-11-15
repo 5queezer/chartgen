@@ -2189,6 +2189,13 @@ const QUOTE_TTL_MS: i64 = 3_000;
 /// How long a symbol Binance rejected as unknown stays out of batches.
 const BAD_SYMBOL_TTL_MS: i64 = 300_000;
 
+/// A quote older than this is stale (ADR-0076), by market: around the clock
+/// (Binance, Yahoo crypto); FX, shut for the weekend; everything else
+/// (stocks, ETFs, indices), shut for a weekend and a holiday.
+const STALE_24_7_MS: i64 = 2 * 3_600_000;
+const STALE_FX_MS: i64 = 3 * 86_400_000;
+const STALE_SESSION_MS: i64 = 4 * 86_400_000;
+
 /// Last price of one symbol and the reference it changed from. Yahoo and
 /// sample: `prev_close` is the previous daily close (TradingView's
 /// definition). Binance: the price at the start of the rolling 24 h window,
@@ -2201,6 +2208,18 @@ pub struct Quote {
     pub low: Option<f64>,
     pub volume: Option<f64>,
     pub source: &'static str,
+    /// When upstream last updated the quote (ms); None when unknown.
+    pub last_at: Option<i64>,
+    /// How old `last_at` may be before the quote is stale (ADR-0076).
+    pub max_age_ms: i64,
+}
+
+impl Quote {
+    /// `last_at` when it is more than `max_age_ms` before `now` (ms): the
+    /// symbol is not trading, e.g. delisted. None when fresh or unknown.
+    pub fn stale_since(&self, now: i64) -> Option<i64> {
+        self.last_at.filter(|&t| now - t > self.max_age_ms)
+    }
 }
 
 /// One quote per symbol, in input order. A failing symbol yields its own
@@ -2230,6 +2249,8 @@ pub fn fetch_quotes(source: DataSource, symbols: &[String]) -> Vec<Result<Quote,
                     low: Some(low),
                     volume: Some(volume),
                     source: "replay",
+                    last_at: None,
+                    max_age_ms: STALE_24_7_MS,
                 })
             })
             .collect(),
@@ -2371,6 +2392,8 @@ fn sample_quote(symbol: &str, now_ms: i64) -> Result<Quote, String> {
         low: Some(cur.low),
         volume: Some(cur.volume),
         source: "sample",
+        last_at: Some(now_ms),
+        max_age_ms: STALE_24_7_MS,
     })
 }
 
@@ -2471,6 +2494,8 @@ fn parse_binance_tickers(body: &serde_json::Value, symbols: &[&str]) -> Vec<Resu
                 low: num("lowPrice").ok(),
                 volume: num("volume").ok(),
                 source: "binance",
+                last_at: entry.get("closeTime").and_then(|v| v.as_i64()),
+                max_age_ms: STALE_24_7_MS,
             })
         })
         .collect()
@@ -2523,6 +2548,15 @@ fn parse_yahoo_quote(body: &serde_json::Value) -> Result<Quote, String> {
         low: num("regularMarketDayLow"),
         volume: num("regularMarketVolume"),
         source: "yahoo",
+        last_at: meta
+            .get("regularMarketTime")
+            .and_then(|v| v.as_i64())
+            .map(|s| s * 1000),
+        max_age_ms: match meta.get("instrumentType").and_then(|v| v.as_str()) {
+            Some("CRYPTOCURRENCY") => STALE_24_7_MS,
+            Some("CURRENCY") => STALE_FX_MS,
+            _ => STALE_SESSION_MS,
+        },
     })
 }
 
@@ -5594,6 +5628,9 @@ mod tests {
         assert_eq!(btc.high, Some(81196.01));
         assert_eq!(btc.low, Some(75736.38));
         assert_eq!(btc.volume, Some(21753.13912));
+        // The ticker's closeTime is the quote's last update.
+        assert_eq!(btc.last_at, Some(1_793_831_567_001));
+        assert_eq!(btc.max_age_ms, STALE_24_7_MS);
         assert!(q[2].as_ref().unwrap_err().contains("no ticker"));
     }
 
@@ -5618,9 +5655,68 @@ mod tests {
         assert_eq!(q.high, Some(354.47));
         assert_eq!(q.low, Some(340.99));
         assert_eq!(q.volume, Some(88_958_176.0));
+        // regularMarketTime is in seconds; an EQUITY gets the session limit.
+        assert_eq!(q.last_at, Some(1_793_826_001_000));
+        assert_eq!(q.max_age_ms, STALE_SESSION_MS);
         // Matches Yahoo's own regularMarketChangePercent (5.306).
         let pct = (q.last - q.prev_close) / q.prev_close * 100.0;
         assert!((pct - 5.306).abs() < 1e-3);
+    }
+
+    #[test]
+    fn yahoo_quote_max_age_follows_instrument_type() {
+        let max_age = |kind: Option<&str>| {
+            let mut meta =
+                serde_json::json!({ "regularMarketPrice": 1.0, "chartPreviousClose": 1.0 });
+            if let Some(k) = kind {
+                meta["instrumentType"] = k.into();
+            }
+            let body = serde_json::json!({ "chart": { "result": [{ "meta": meta }] } });
+            let q = parse_yahoo_quote(&body).unwrap();
+            assert_eq!(q.last_at, None);
+            q.max_age_ms
+        };
+        assert_eq!(max_age(Some("CRYPTOCURRENCY")), STALE_24_7_MS);
+        assert_eq!(max_age(Some("CURRENCY")), STALE_FX_MS);
+        for kind in [
+            Some("EQUITY"),
+            Some("ETF"),
+            Some("INDEX"),
+            Some("FUTURE"),
+            None,
+        ] {
+            assert_eq!(max_age(kind), STALE_SESSION_MS, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn quote_is_stale_only_past_its_markets_limit() {
+        let t = 1_793_826_001_000;
+        let hour = 3_600_000;
+        let day = 24 * hour;
+        for (max_age_ms, limit) in [
+            (STALE_24_7_MS, 2 * hour),
+            (STALE_FX_MS, 3 * day),
+            (STALE_SESSION_MS, 4 * day),
+        ] {
+            let quote = Quote {
+                last_at: Some(t),
+                max_age_ms,
+                ..q(1.0)
+            };
+            assert_eq!(quote.stale_since(t + limit), None);
+            assert_eq!(quote.stale_since(t + limit + 1), Some(t));
+        }
+        // Unknown time: never stale.
+        assert_eq!(q(1.0).stale_since(i64::MAX), None);
+        // US stocks: Friday close to Tuesday open after a Monday holiday.
+        let long_weekend = 3 * day + 17 * hour + 30 * 60_000;
+        let stock = Quote {
+            last_at: Some(t),
+            max_age_ms: STALE_SESSION_MS,
+            ..q(1.0)
+        };
+        assert_eq!(stock.stale_since(t + long_weekend), None);
     }
 
     #[test]
@@ -5646,6 +5742,9 @@ mod tests {
             .unwrap()
             .bars;
         assert_eq!(q.source, "sample");
+        // Always fresh: updated now.
+        assert_eq!(q.last_at, Some(now));
+        assert_eq!(q.stale_since(now), None);
         assert_eq!(q.prev_close, bars[0].close);
         assert_eq!(q.last, bars[1].close);
         assert_eq!(q.high, Some(bars[1].high));
@@ -5692,6 +5791,8 @@ mod tests {
             low: None,
             volume: None,
             source: "binance",
+            last_at: None,
+            max_age_ms: STALE_24_7_MS,
         }
     }
 

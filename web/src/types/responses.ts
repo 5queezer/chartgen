@@ -520,6 +520,8 @@ export type GetIndicatorsPayload = z.infer<typeof GetIndicatorsPayloadSchema>;
 //   One entry per distinct requested symbol, in request order: a quote,
 //   or `{symbol, error}` when that symbol failed. Numbers go through
 //   `finite_or_null`; high/low/volume are null when upstream omits them.
+//   A stale quote (ADR-0076) has change/change_pct null and adds
+//   `stale: true` and `last_bar_at` (ISO 8601 UTC); a fresh one has neither.
 // ---------------------------------------------------------------------------
 
 export const QuoteSchema = z.object({
@@ -532,6 +534,8 @@ export const QuoteSchema = z.object({
   low: FiniteOrNull,
   volume: FiniteOrNull,
   source: z.enum(["binance", "yahoo", "sample"]),
+  stale: z.boolean().optional(),
+  last_bar_at: z.string().optional(),
 });
 export type Quote = z.infer<typeof QuoteSchema>;
 
