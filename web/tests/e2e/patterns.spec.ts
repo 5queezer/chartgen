@@ -153,7 +153,8 @@ async function clearLabel(page: Page, labels: Mark[]): Promise<Mark> {
           const side = `${m.x}|${m.above}`;
           const k = stacks.get(side) ?? 0;
           stacks.set(side, k + 1);
-          if (i === pick) return false;
+          // Only a label drawn after it can cover it: markAt searches from the last drawn.
+          if (i <= pick) return false;
           const p = at(m);
           const width = ctx.measureText(m.text ?? "").width + 6;
           const top = m.above ? p.y - 20 - k * 16 : p.y + 5 + k * 16;
