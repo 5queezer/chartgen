@@ -103,6 +103,11 @@ image_status() {
       "https://$REGISTRY/v2/$IMAGE_PATH/manifests/$1" 2>/dev/null || true
 }
 
+# tag_left SHA: the tag was set and the deploy did not follow.
+tag_left() {
+  echo "The application's image tag is now $1 while $(cat "$RUNNING_FILE" 2>/dev/null || echo 'the image before') runs: a restart or a redeploy in Coolify would pull it."
+}
+
 # coolify METHOD PATH [JSON]: prints the HTTP status. The token goes to curl via a
 # stdin config so it never appears in argv or in a trace.
 coolify() {
@@ -150,7 +155,7 @@ deploy_image() {
   case $code in
     2??) ;;
     *)
-      log "Coolify deploy for $1 failed (HTTP $code)"
+      log "Coolify deploy for $1 failed (HTTP $code). $(tag_left "$1")"
       return 1
       ;;
   esac
@@ -158,7 +163,7 @@ deploy_image() {
   if [ -z "$deployment" ]; then
     # Coolify names one whenever it queued a deployment, also one already queued for
     # this image. Without it nothing was queued: a full queue, or a refusal.
-    log "Coolify named no deployment for $1 ($(jq -r '.deployments[0].message // .message // "no message"' "$body" 2>/dev/null)); not deployed"
+    log "Coolify named no deployment for $1 ($(jq -r '.deployments[0].message // .message // "no message"' "$body" 2>/dev/null)); not deployed. $(tag_left "$1")"
     return 1
   fi
 }
