@@ -41,9 +41,10 @@ CHARTGEN_IMAGE=ghcr.io/5queezer/chartgen
 how often a deploy that failed in Coolify is deployed in all, and how long one is
 followed before the operator is left to it.
 
-**This is a systemd `EnvironmentFile`, not a shell script.** Never `source` it: the
-Coolify token contains a `|`, and a shell prints part of it in an error. Read it the
-way systemd does, or with a parser.
+**This is a systemd `EnvironmentFile`, not a shell script.** Coolify tokens contain a
+`|`: put the value in single quotes (`COOLIFY_API_TOKEN='1|...'`), which systemd reads
+the same, or a shell that sources the file prints part of the token in an error. Even
+quoted, read it with a parser rather than `source`, and never print its values.
 The Coolify application must be of the kind **Docker Image**: the script sets
 its image name and tag. On an application that builds from a Dockerfile the
 tag would be ignored and a deploy would build on the host again, so the
