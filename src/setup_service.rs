@@ -42,6 +42,8 @@ const CONTEXT_BARS: usize = 300;
 const CATCH_UP_BARS: i64 = 1000;
 /// Closed setups one `get_track_record` reads: the newest of them.
 const TRACK_RECORD_SETUPS: usize = 500;
+/// How long `create_setup` waits for the market context it records (ADR-0077).
+const MARKET_CONTEXT_WAIT: Duration = Duration::from_secs(10);
 
 /// `CHARTGEN_SETUPS=1` turns setups on.
 pub fn enabled() -> bool {
@@ -888,6 +890,20 @@ impl Setups {
         if let Some(problem) = market.and_then(|m| stocks::calendar_problem(m, levels.expires_at)) {
             return Err(setups::problems_text(&[problem]));
         }
+
+        // The market the setup is made in (ADR-0077), read unlocked, as the bars are. A
+        // replay server has no market context, and a read that fails or is slow leaves
+        // each feature `unknown`: the setup is made either way. Added after the agent's
+        // features were checked, so they do not count against its MAX_FEATURES.
+        let context = match self.replay {
+            Some(_) => None,
+            None => crate::market_context::of_within(&symbol, MARKET_CONTEXT_WAIT),
+        };
+        let mut draft = draft;
+        draft
+            .features
+            .get_or_insert_with(Default::default)
+            .extend(crate::market_context::setup_features(context.as_ref()));
 
         // The read of bars ran unlocked: another call may have taken the last pair. From
         // here to the write nobody may, alerts included, whose pairs are read afresh.

@@ -139,7 +139,7 @@ export interface CreateSetupInput {
    */
   expires_at?: number | string;
   /**
-   * Optional. What you measured when you made this setup, as a flat object of at most 16 entries: names of a-z, 0-9 and _, values a number, true or false, or a string of at most 32 characters. The server gives them no meaning. Fixed once the setup is made; get_track_record can group by one of them.
+   * Optional. What you measured when you made this setup, as a flat object of at most 16 entries: names of a-z, 0-9 and _, values a number, true or false, or a string of at most 32 characters. The server gives them no meaning. Names starting with ctx_ are the server's and are refused: it adds ctx_trend_4h and ctx_trend_1d (up, down or mixed) and ctx_fear_greed (extreme fear, fear, neutral, greed or extreme greed), the symbol's market context as get_market_context reads it, each unknown where it has none, and not counted in your 16. Fixed once the setup is made; get_track_record can group by one of them.
    */
   features?: {
     [k: string]: number | boolean | string;
@@ -564,7 +564,7 @@ export interface GetTrackRecordInput {
   decision?: "take" | "skip";
   direction?: "long" | "short";
   /**
-   * With group_by: feature, the name of the feature to group by.
+   * With group_by: feature, the name of the feature to group by: one you stated, or one of the server's ctx_trend_4h, ctx_trend_1d and ctx_fear_greed.
    */
   feature?: string;
   /**

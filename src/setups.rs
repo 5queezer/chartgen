@@ -41,6 +41,14 @@ pub const MAX_FEATURES: usize = 16;
 pub const MAX_STATED_TEXT: usize = 32;
 /// Fields taken when a setup is made and by no tool afterwards.
 pub const STATED_FIELDS: [&str; 3] = ["features", "probability", "playbook_version"];
+/// Features whose names start with this are the server's (ADR-0077): an agent may not
+/// state one.
+pub const CONTEXT_PREFIX: &str = "ctx_";
+/// The features the server writes on every setup it makes: the market context of the
+/// setup's symbol then, the trend on 4h and on 1d and the Fear & Greed band.
+pub const CONTEXT_FEATURES: [&str; 3] = ["ctx_trend_4h", "ctx_trend_1d", "ctx_fear_greed"];
+/// The value of a context feature the server could not read when the setup was made.
+pub const UNKNOWN_CONTEXT: &str = "unknown";
 
 const MINUTE_MS: i64 = 60_000;
 
@@ -249,6 +257,8 @@ pub struct Record {
     /// What the agent stated when it made the setup (ADR-0064). The server gives them
     /// no meaning and never changes them; the first entry of the log holds them too.
     /// Not written when not stated, so a setup without them is stored as before.
+    /// `features` also holds the server's `ctx_` features, the market context the
+    /// setup was made in (ADR-0077), on every setup made since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1075,6 +1085,13 @@ fn features(args: &Value, problems: &mut Vec<Problem>) -> Option<Map<String, Val
                 &field,
                 format!("a feature's name is at most {MAX_STATED_TEXT} characters of a-z, 0-9 and _, and not empty"),
             ));
+            continue;
+        }
+        if name.starts_with(CONTEXT_PREFIX) {
+            problems.push(
+                Problem::new(&field, format!("a feature named {CONTEXT_PREFIX}... is the server's"))
+                    .hint("the server records the market context of a setup itself; name your own feature without that prefix"),
+            );
             continue;
         }
         let takes = match value {

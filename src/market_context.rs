@@ -109,6 +109,38 @@ pub async fn within(symbol: String, wait: Duration) -> Option<Value> {
     }
 }
 
+/// The context for a setup being made: what `of` has within `wait`, or none, as `within`
+/// is for a wake-up. A read that takes longer goes on and is held for the next caller.
+#[cfg(feature = "scripting")]
+pub fn of_within(symbol: &str, wait: Duration) -> Option<Value> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let symbol = symbol.to_string();
+    std::thread::spawn(move || tx.send(of(&symbol)));
+    rx.recv_timeout(wait)
+        .ok()
+        .filter(|context| context.get("error").is_none())
+}
+
+/// The features the server writes on a setup when it is made (ADR-0077): the trend on 4h
+/// and on 1d, and the Fear & Greed band, each in the context's own words. Each is
+/// `unknown` where the context has none, and all three where there is no context.
+#[cfg(feature = "scripting")]
+pub fn setup_features(context: Option<&Value>) -> Map<String, Value> {
+    use chartgen::setups::{CONTEXT_FEATURES, UNKNOWN_CONTEXT};
+    let paths = ["/trend/4h", "/trend/1d", "/fear_greed/label"];
+    CONTEXT_FEATURES
+        .iter()
+        .zip(paths)
+        .map(|(name, path)| {
+            let value = context
+                .and_then(|c| c.pointer(path))
+                .and_then(Value::as_str)
+                .unwrap_or(UNKNOWN_CONTEXT);
+            (name.to_string(), json!(value))
+        })
+        .collect()
+}
+
 /// Unit tests read the sample source: a test of a wake-up must not reach an exchange.
 fn source() -> DataSource {
     if cfg!(test) {
@@ -433,6 +465,34 @@ mod tests {
             line(v.as_object().unwrap()),
             "BTCUSDT 91000.5 | trend 4h down, 1d mixed | funding 0.006% | longs 76.4% (L/S 3.24) | F&G 13 extreme fear"
         );
+    }
+
+    /// A setup's features take each part the context has, and say `unknown` for each it
+    /// has not, all three without a context (ADR-0077).
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn a_setups_features_are_the_context_or_unknown() {
+        let full = json!({
+            "symbol": "BTCUSDT", "trend": { "4h": "down", "1d": "mixed" },
+            "fear_greed": { "value": 13, "label": "extreme fear" },
+        });
+        let partial = json!({ "symbol": "AAPL", "trend": { "4h": "up" } });
+        for (context, expected) in [
+            (
+                Some(&full),
+                json!({ "ctx_trend_4h": "down", "ctx_trend_1d": "mixed", "ctx_fear_greed": "extreme fear" }),
+            ),
+            (
+                Some(&partial),
+                json!({ "ctx_trend_4h": "up", "ctx_trend_1d": "unknown", "ctx_fear_greed": "unknown" }),
+            ),
+            (
+                None,
+                json!({ "ctx_trend_4h": "unknown", "ctx_trend_1d": "unknown", "ctx_fear_greed": "unknown" }),
+            ),
+        ] {
+            assert_eq!(Value::Object(setup_features(context)), expected);
+        }
     }
 
     #[test]

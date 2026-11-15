@@ -21,6 +21,11 @@
     },
     "exit": null,
     "expires_at": 1767297600000,
+    "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown"
+    },
     "fill": null,
     "gap": false,
     "id": "setup-000003",
@@ -30,7 +35,15 @@
       {
         "at": 1767268800000,
         "by": "agent",
-        "changes": {},
+        "changes": {
+          "features": {
+            "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown"
+            }
+          }
+        },
         "kind": "created",
         "reason": null,
         "seq": 1
@@ -102,6 +115,11 @@
     },
     "exit": null,
     "expires_at": 1767297600000,
+    "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown"
+    },
     "fill": null,
     "gap": false,
     "id": "setup-000001",
@@ -111,7 +129,15 @@
       {
         "at": 1767261600000,
         "by": "agent",
-        "changes": {},
+        "changes": {
+          "features": {
+            "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown"
+            }
+          }
+        },
         "kind": "created",
         "reason": null,
         "seq": 1
@@ -159,6 +185,11 @@
     },
     "exit": null,
     "expires_at": 1767283200000,
+    "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown"
+    },
     "fill": null,
     "gap": false,
     "id": "setup-000002",
@@ -168,7 +199,15 @@
       {
         "at": 1767261600000,
         "by": "agent",
-        "changes": {},
+        "changes": {
+          "features": {
+            "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown"
+            }
+          }
+        },
         "kind": "created",
         "reason": null,
         "seq": 1
@@ -227,6 +266,11 @@
     },
     "exit": null,
     "expires_at": 1767297600000,
+    "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown"
+    },
     "fill": null,
     "gap": false,
     "id": "setup-000001",
@@ -236,7 +280,15 @@
       {
         "at": 1767261600000,
         "by": "agent",
-        "changes": {},
+        "changes": {
+          "features": {
+            "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown"
+            }
+          }
+        },
         "kind": "created",
         "reason": null,
         "seq": 1
@@ -318,6 +370,11 @@
         },
         "exit": null,
         "expires_at": 1767297600000,
+        "features": {
+          "ctx_fear_greed": "unknown",
+          "ctx_trend_1d": "unknown",
+          "ctx_trend_4h": "unknown"
+        },
         "fill": null,
         "gap": false,
         "id": "setup-000003",
@@ -365,6 +422,11 @@
           "price": 3035.7847600146333
         },
         "expires_at": 1767283200000,
+        "features": {
+          "ctx_fear_greed": "unknown",
+          "ctx_trend_1d": "unknown",
+          "ctx_trend_4h": "unknown"
+        },
         "fill": {
           "bar_time": 1767261600000,
           "price": 3072.31
@@ -477,6 +539,11 @@
           "price": 59654.103299999995
         },
         "expires_at": 1767297600000,
+        "features": {
+          "ctx_fear_greed": "unknown",
+          "ctx_trend_1d": "unknown",
+          "ctx_trend_4h": "unknown"
+        },
         "fill": {
           "bar_time": 1767276180000,
           "price": 60196.413329999996
@@ -587,6 +654,11 @@
     },
     "exit": null,
     "expires_at": 1767297600000,
+    "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown"
+    },
     "fill": null,
     "gap": false,
     "id": "setup-000001",
@@ -596,7 +668,15 @@
       {
         "at": 1767261600000,
         "by": "agent",
-        "changes": {},
+        "changes": {
+          "features": {
+            "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown"
+            }
+          }
+        },
         "kind": "created",
         "reason": null,
         "seq": 1
