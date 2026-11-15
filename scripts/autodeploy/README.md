@@ -427,7 +427,9 @@ application, **Healthcheck**, enabled, scheme `http`, host `localhost`, port
 `9315`, path `/`, return code `200`, start period `60` s. The image ships `curl`
 for it, and a non-browser `GET /` answers with the health JSON. With it on,
 `finished` means chartgen answers; with it off, only that the container started.
-The script looks at nothing beyond Coolify's word. To check by hand:
+Images built before `curl` was added cannot run the check: turn it off before a
+`rollback` or `deploy <sha>` to one of those, or Coolify fails the deploy. The
+script looks at nothing beyond Coolify's word. To check by hand:
 
 - Coolify, the application, **Deployments**: the newest one is finished, and
   its log shows the pull of `ghcr.io/5queezer/chartgen:<sha>` and no build.

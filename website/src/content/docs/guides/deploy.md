@@ -553,11 +553,15 @@ sets the tag and deploys again. The first run only records the current SHA.
 The script follows each deploy it triggers until Coolify says how it ended
 ([ADR-0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/)): a
 finished one is recorded as running, a failed one is tried again at the next
-tick, up to three attempts, and then it logs an `ERROR`. Coolify calls a deploy
+tick, up to three attempts, and then it logs an `ERROR`. One still queued or
+running after 45 minutes is given up with an `ERROR` too; if it finishes later,
+the script does not know it runs: check Coolify and record it with
+`chartgen-autodeploy.sh running <sha>` before a rollback. Coolify calls a deploy
 finished once the new container started and, with the application's health
 check on, answers. Turn that check on (path `/`, port `9315`, a start period of
 60 s; the image ships `curl` for it), or `finished` only means the container
-started. `chartgen-autodeploy.sh rollback` deploys the image that ran before
+started. Images built before `curl` was added cannot run the check: turn it off
+before going back to one of those. `chartgen-autodeploy.sh rollback` deploys the image that ran before
 the one that runs now, and `deploy <sha>` any published one, by its full commit
 SHA. After either, the
 timer leaves `master`'s head of that moment alone and deploys the next
