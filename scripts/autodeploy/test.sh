@@ -8,7 +8,9 @@ mkdir "$work/bin" || exit 1
 
 # Stub curl. GitHub answers from $GH_HEAD_CODE, $work/head and $CI_JSON, the registry
 # from $TOKEN_CODE and $IMAGE_CODE, Coolify from $APP_CODE, $APP_JSON, $PATCH_CODE and
-# $COOLIFY_CODE. Every call is appended to $work/calls as "METHOD URL [BODY]", and all
+# $COOLIFY_CODE. A deploy Coolify accepts is named dep-1, dep-2, ...; with $NO_UUID it
+# names none, as Coolify does when it queued nothing. A deployment's status is the next line of $STATUS_FILE (the last line stays), or
+# "finished" without one, answered with $DEPLOYMENT_CODE. Every call is appended to $work/calls as "METHOD URL [BODY]", and all
 # its arguments to $work/args: a secret must reach curl on stdin, never there.
 cat >"$work/bin/curl" <<'STUB' || exit 1
 #!/usr/bin/env bash
@@ -47,18 +49,35 @@ case $url in
       fi
       echo '{}' >"$out"; printf %s "$PATCH_CODE"
     fi ;;
-  */api/v1/deploy*) echo '{}' >"$out"; printf %s "$COOLIFY_CODE" ;;
+  */api/v1/deployments/*)
+    st=finished
+    if [ -s "$STATUS_FILE" ]; then
+      st=$(head -n 1 "$STATUS_FILE")
+      [ "$(grep -c . "$STATUS_FILE")" -gt 1 ] && sed -i 1d "$STATUS_FILE"
+    fi
+    echo "{\"deployment_uuid\":\"${url##*/}\",\"status\":\"$st\"}" >"$out"
+    printf %s "${DEPLOYMENT_CODE:-200}" ;;
+  */api/v1/deploy\?*)
+    n=$(($(cat "$DEPLOY_COUNT" 2>/dev/null || echo 0) + 1))
+    echo "$n" >"$DEPLOY_COUNT"
+    if [ -n "${NO_UUID-}" ]; then
+      echo '{"deployments":[{"message":"queued"}]}' >"$out"
+    else
+      echo "{\"deployments\":[{\"message\":\"queued\",\"deployment_uuid\":\"dep-$n\"}]}" >"$out"
+    fi
+    printf %s "$COOLIFY_CODE" ;;
   *) echo "unexpected url $url" >&2; exit 9 ;;
 esac
 STUB
 chmod +x "$work/bin/curl" || exit 1
 
 export PATH="$work/bin:$PATH" CALLS="$work/calls" ARGS="$work/args" STATE_FILE="$work/state" HEAD_FILE="$work/head"
+export DEPLOY_COUNT="$work/deploy-count" STATUS_FILE="$work/statuses"
 export COOLIFY_URL=http://coolify.test COOLIFY_API_TOKEN=secret-token COOLIFY_APP_UUID=app-uuid
 export GH_HEAD_CODE=200 COOLIFY_CODE=200 PATCH_CODE=200 TOKEN_CODE=200 IMAGE_CODE=200
 export TOKEN_JSON='{"token":"anonymous-pull-token"}'
 export APP_CODE=200 APP_JSON='{"build_pack":"dockerimage"}'
-previous="$work/previous-sha" deployed="$work/deployed-sha"
+previous="$work/previous-sha" deployed="$work/deployed-sha" running="$work/running-sha" pending="$work/pending"
 : >"$ARGS"
 # Full commit SHAs, as `deploy` wants them.
 sha_a=$(printf 'a%.0s' {1..40}) sha_b=$(printf 'b%.0s' {1..40}) sha_c=$(printf 'c%.0s' {1..40})
@@ -74,6 +93,8 @@ run() {
   local name=$1 want_exit=$2 want_posts=$3 want_state=$4 init=${5-}
   shift 4; [ $# -gt 0 ] && shift
   rm -f "$STATE_FILE" "$CALLS"; touch "$CALLS"
+  # Each run starts with no deploy to follow, unless KEEP_PENDING asks for the last one.
+  [ -n "${KEEP_PENDING-}" ] || rm -f "$pending"
   echo "${HEAD-bbb}" >"$HEAD_FILE"
   [ -n "$init" ] && echo "$init" >"$STATE_FILE"
   local rc posts state=
@@ -187,38 +208,46 @@ HEAD_MOVES_TO=ccc run "head moves mid-run: the SHA read first is deployed" 0 1 b
 [ "$(cat "$HEAD_FILE")" = ccc ] || fail "the stub did not move master"
 IMAGE_CODE=404 HEAD=ccc run "the next tick waits for the newer head's image" 0 0 bbb bbb
 
-# By hand. Both record what they put out, so that `rollback` goes to what this script
-# triggered before, whoever triggered it.
-# What runs when the script takes over is not something it can know: it is told.
-rm -f "$previous" "$deployed"
+# By hand. What ran is known only once Coolify finished it: `rollback` goes to the image
+# that ran before the one that runs now. What runs when the script takes over is not
+# something it can know: it is told.
+rm -f "$previous" "$deployed" "$running"
 run "running SHA records what runs without deploying" 0 0 bbb bbb running "$sha_a"
-[ "$(cat "$deployed")" = "$sha_a" ] && [ ! -e "$previous" ] && [ "$(grep -c . "$CALLS")" = 0 ] || fail "running did more than record"
+[ "$(cat "$deployed")" = "$sha_a" ] && [ "$(cat "$running")" = "$sha_a" ] && [ ! -e "$previous" ] && [ "$(grep -c . "$CALLS")" = 0 ] || fail "running did more than record"
 run "running without a full SHA is a usage error" 2 0 bbb bbb running master
 HEAD=$sha_b run "the timer deploys B after A" 0 1 "$sha_b" "$sha_a"
-HEAD=$sha_b run "rollback deploys what was triggered before, A" 0 1 "$sha_b" "$sha_b" rollback
-# It names the image before it deploys it, and what it does not know about it.
-if ! grep -q "rolling back to $sha_a" <<<"$out" || ! grep -q 'does not know whether' <<<"$out"; then
-  fail "rollback does not say what it is about to deploy: $out"
-fi
+[ "$(cut -d' ' -f1-3 "$pending" 2>/dev/null)" = "$sha_b dep-$(cat "$DEPLOY_COUNT") 1" ] || fail "the deploy of B is not followed: $(cat "$pending" 2>/dev/null)"
+[ "$(cat "$running")" = "$sha_a" ] || fail "B counted as running before Coolify finished it"
+KEEP_PENDING=1 HEAD=$sha_b run "the next tick sees B finished and records it as running" 0 0 "$sha_b" "$sha_b"
+[ "$(cat "$running")" = "$sha_b" ] && [ "$(cat "$previous")" = "$sha_a" ] && [ ! -e "$pending" ] || fail "B's finish was not recorded"
+grep -q "finished deploying" <<<"$out" || fail "B's finish is not in the log: $out"
+HEAD=$sha_b run "rollback deploys what ran before, A" 0 1 "$sha_b" "$sha_b" rollback
+grep -q "rolling back to $sha_a, the image that ran before $sha_b" <<<"$out" || fail "rollback does not say what it is about to deploy: $out"
 [ "$(calls "\"docker_registry_image_tag\":\"$sha_a\"")" = 1 ] || fail "rollback set another tag"
 # It asks GitHub one thing, where master is, to leave that head alone; not for CI.
 [ "$(calls api.github.com)" = 1 ] && [ "$(calls /actions/)" = 0 ] || fail "rollback asked GitHub for more than master's head"
-[ "$(cat "$deployed")" = "$sha_a" ] && [ "$(cat "$previous")" = "$sha_b" ] || fail "rollback did not record what runs now"
-HEAD=$sha_b run "the tick after a rollback deploys nothing" 0 0 "$sha_b" "$sha_b"
+[ "$(cat "$deployed")" = "$sha_a" ] && [ "$(cat "$running")" = "$sha_b" ] || fail "rollback recorded A as running before it finished"
+KEEP_PENDING=1 HEAD=$sha_b run "the tick after a rollback records A and deploys nothing" 0 0 "$sha_b" "$sha_b"
+[ "$(cat "$running")" = "$sha_a" ] && [ "$(cat "$previous")" = "$sha_b" ] || fail "the rollback's finish was not recorded"
 HEAD=$sha_c run "the timer deploys C over the rolled-back A" 0 1 "$sha_c" "$sha_b"
+KEEP_PENDING=1 HEAD=$sha_c run "C finishes" 0 0 "$sha_c" "$sha_c"
 HEAD=$sha_c run "rollback after that goes to A, which ran before C, not to B" 0 1 "$sha_c" "$sha_c" rollback
 [ "$(calls "\"docker_registry_image_tag\":\"$sha_a\"")" = 1 ] || fail "rollback went to $(grep -o 'image_tag":"[a-f0-9]*' "$CALLS")"
+KEEP_PENDING=1 HEAD=$sha_c run "A finishes again" 0 0 "$sha_c" "$sha_c"
 
-run "deploy SHA deploys that image and records it" 0 1 bbb bbb deploy "$sha_b"
+run "deploy SHA deploys that image and records it as triggered" 0 1 bbb bbb deploy "$sha_b"
 [ "$(calls "\"docker_registry_image_tag\":\"$sha_b\"")" = 1 ] || fail "deploy set another tag"
-[ "$(cat "$deployed")" = "$sha_b" ] && [ "$(cat "$previous")" = "$sha_a" ] || fail "deploy did not record what ran before"
+[ "$(cat "$deployed")" = "$sha_b" ] && [ "$(cat "$running")" = "$sha_a" ] || fail "deploy recorded B as running before it finished"
+KEEP_PENDING=1 run "B by hand finishes" 0 0 bbb bbb
+[ "$(cat "$running")" = "$sha_b" ] && [ "$(cat "$previous")" = "$sha_a" ] || fail "deploy did not record what ran before"
 run "deploying what already runs keeps the previous SHA" 0 1 bbb bbb deploy "$sha_b"
+KEEP_PENDING=1 run "and finishing it too" 0 0 bbb bbb
 [ "$(cat "$previous")" = "$sha_a" ] || fail "deploying the same SHA again lost the previous one"
 IMAGE_CODE=404 run "deploy of a SHA with no image fails before Coolify" 1 0 bbb bbb deploy "$sha_c"
 [ "$(calls /api/v1/)" = 0 ] || fail "a missing image reached Coolify"
 APP_JSON='{"build_pack":"dockerfile"}' run "deploy by hand refuses a Dockerfile application too" 1 0 bbb bbb deploy "$sha_c"
 PATCH_CODE=500 run "a failed rollback exits 1 and records nothing" 1 0 bbb bbb rollback
-[ "$(cat "$deployed")" = "$sha_b" ] || fail "a failed rollback changed what is recorded as running"
+[ "$(cat "$deployed")" = "$sha_b" ] && [ "$(cat "$running")" = "$sha_b" ] && [ ! -e "$pending" ] || fail "a failed rollback changed what is recorded"
 rm -f "$previous"
 run "rollback with nothing recorded fails and says how" 1 0 bbb bbb rollback
 grep -q 'deploy SHA' <<<"$out" || fail "rollback without a previous SHA gives no way out"
@@ -277,11 +306,121 @@ echo "$sha_c" >"$HEAD_FILE"; step "a later commit, C, deploys as usual" 0 1 "$sh
 echo "$sha_c" >"$HEAD_FILE"; step "C, deployed by the timer, is rolled back" 0 1 "$sha_c" rollback
 step "the next tick leaves it rolled back" 0 0 "$sha_c"
 
+# Following a deploy in Coolify until it finished (ADR-0075).
+# seq NAME EXIT DEPLOYS STATE [arguments]: `step`, keeping the deploy being followed.
+follow_reset() { rm -f "$work"/*-sha "$pending" "$STATUS_FILE" "$work/hand"; echo "$sha_a" >"$STATE_FILE"; echo "$sha_a" >"$running"; echo "$sha_b" >"$HEAD_FILE"; }
+follow_reset
+printf '%s\n' queued in_progress finished >"$STATUS_FILE"
+step "the timer deploys B and follows it" 0 1 "$sha_b"
+step "queued: the tick waits" 0 0 "$sha_b"
+grep -q "is queued in Coolify; waiting" <<<"$out" || fail "a queued deploy is not named: $out"
+echo "$sha_c" >"$HEAD_FILE"
+step "in progress: the tick waits, and deploys no newer head meanwhile" 0 0 "$sha_b"
+[ "$(calls api.github.com)" = 0 ] || fail "a tick asked GitHub while a deploy was in progress"
+[ "$(cat "$running")" = "$sha_a" ] || fail "B counted as running while in progress"
+step "finished: B is recorded as running, and the tick goes on to C" 0 1 "$sha_c"
+[ "$(cat "$previous")" = "$sha_a" ] && [ "$(cut -d' ' -f1 "$pending")" = "$sha_c" ] || fail "B's finish or C's deploy is missing: running=$(cat "$running") pending=$(cat "$pending" 2>/dev/null)"
+[ "$(sed -n 1p <<<"$out")" = "chartgen-autodeploy: Coolify finished deploying ghcr.io/5queezer/chartgen:$sha_b" ] || fail "the finish is not logged first: $out"
+
+follow_reset
+printf '%s\n' failed failed failed >"$STATUS_FILE"
+step "the timer deploys B" 0 1 "$sha_b"
+step "B failed in Coolify: deployed again, attempt 2" 0 1 "$sha_b"
+grep -q "deploying it again, attempt 2 of 3" <<<"$out" && [ "$(calls '^PATCH')" = 1 ] || fail "a failed deploy was not tried again: $out"
+[ "$(cut -d' ' -f2,3 "$pending")" = "dep-$(cat "$DEPLOY_COUNT") 2" ] || fail "the second attempt is not followed: $(cat "$pending")"
+step "failed again: attempt 3" 0 1 "$sha_b"
+step "failed a third time: given up, loudly, and the unit fails" 1 0 "$sha_b"
+grep -q "ERROR: the deploy of ghcr.io/5queezer/chartgen:$sha_b failed in Coolify 3 times" <<<"$out" || fail "giving up is not logged as an error: $out"
+grep -q "Production runs $sha_a.*deploy $sha_b" <<<"$out" || fail "giving up does not say what runs and how to go on: $out"
+# What was triggered stays recorded, so the watchdog keeps comparing it with what runs.
+[ "$(cat "$deployed")" = "$sha_b" ] && [ "$(cat "$running")" = "$sha_a" ] && [ ! -e "$pending" ] || fail "giving up recorded the wrong state"
+step "after giving up nothing is deployed again" 0 0 "$sha_b"
+
+follow_reset
+printf '%s\n' failed finished >"$STATUS_FILE"
+step "the timer deploys B" 0 1 "$sha_b"
+step "B failed: deployed again" 0 1 "$sha_b"
+step "the second attempt finished: B runs" 0 0 "$sha_b"
+[ "$(cat "$running")" = "$sha_b" ] && [ ! -e "$pending" ] || fail "a retried deploy that finished is not recorded"
+
+follow_reset
+printf '%s\n' failed failed >"$STATUS_FILE"
+step "the timer deploys B" 0 1 "$sha_b"
+PATCH_CODE=500 step "Coolify refuses the second attempt: counted all the same" 0 0 "$sha_b"
+[ "$(cut -d' ' -f3 "$pending")" = 2 ] || fail "a refused attempt was not counted: $(cat "$pending")"
+step "the third attempt goes out" 0 1 "$sha_b"
+
+follow_reset
+echo cancelled-by-user >"$STATUS_FILE"
+step "the timer deploys B" 0 1 "$sha_b"
+step "cancelled in Coolify: not deployed again" 0 0 "$sha_b"
+grep -q "cancelled in Coolify" <<<"$out" && [ ! -e "$pending" ] && [ "$(cat "$running")" = "$sha_a" ] || fail "a cancelled deploy was handled wrongly: $out"
+
+follow_reset
+echo in_progress >"$STATUS_FILE"
+step "the timer deploys B" 0 1 "$sha_b"
+DEPLOY_WAIT_SECS=-1 step "still in progress past the wait: no longer followed, loudly" 1 0 "$sha_b"
+grep -q "ERROR: the deploy of ghcr.io/5queezer/chartgen:$sha_b is not finished" <<<"$out" && [ ! -e "$pending" ] || fail "a deploy past the wait was not given up: $out"
+
+follow_reset
+step "the timer deploys B" 0 1 "$sha_b"
+DEPLOYMENT_CODE=500 step "Coolify cannot be read: asked again next tick" 0 0 "$sha_b"
+grep -q "asking again next tick" <<<"$out" && [ -e "$pending" ] || fail "an unreadable deployment was not kept: $out"
+step "and read then: finished" 0 0 "$sha_b"
+[ "$(cat "$running")" = "$sha_b" ] || fail "the deploy read late was not recorded"
+
+follow_reset
+NO_UUID=1 step "Coolify names no deployment: nothing was queued, so nothing is recorded" 1 1 "$sha_a"
+grep -q "named no deployment" <<<"$out" && [ ! -e "$pending" ] && [ ! -e "$deployed" ] || fail "an answer naming no deployment was taken for a deploy: $out"
+step "the next tick deploys it" 0 1 "$sha_b"
+[ "$(cut -d' ' -f2 "$pending")" = "dep-$(cat "$DEPLOY_COUNT")" ] || fail "the next deploy is not followed"
+
+follow_reset
+echo in_progress >"$STATUS_FILE"
+step "the timer deploys B" 0 1 "$sha_b"
+step "rollback while B is in progress is refused: B can still finish" 1 0 "$sha_b" rollback
+grep -q "can still finish" <<<"$out" && [ "$(cut -d' ' -f1 "$pending")" = "$sha_b" ] && [ "$(calls '^PATCH')" = 0 ] || fail "a deploy by hand replaced one in progress: $out"
+step "so is a deploy by hand" 1 0 "$sha_b" deploy "$sha_c"
+DEPLOYMENT_CODE=500 step "and one while the deploy cannot be read" 1 0 "$sha_b" deploy "$sha_c"
+echo failed >"$STATUS_FILE"
+step "a deploy by hand replaces one that failed" 0 1 "$sha_b" deploy "$sha_c"
+grep -q "is replaced by this one" <<<"$out" && [ "$(cut -d' ' -f1,3 "$pending")" = "$sha_c 1" ] || fail "a failed deploy was not replaced: $out"
+rm -f "$STATUS_FILE"
+step "running SHA ends the following" 0 0 "$sha_b" running "$sha_b"
+[ ! -e "$pending" ] && [ "$(cat "$running")" = "$sha_b" ] || fail "running did not end the following"
+[ "$(cat "$previous")" = "$sha_a" ] || fail "running did not keep what ran before it for a rollback: $(cat "$previous" 2>/dev/null)"
+
+follow_reset
+step "the timer deploys B" 0 1 "$sha_b"
+echo "$sha_b" >"$pending"
+step "a pending line cut short ends in a loud give-up, not an abort" 1 0 "$sha_b"
+grep -q "ERROR: .* cannot be followed" <<<"$out" && [ ! -e "$pending" ] || fail "a short pending line was not handled: $out"
+
+# An older script's previous-sha is what it triggered before, maybe never run.
+rm -f "$work"/*-sha "$pending"
+echo "$sha_c" >"$previous"
+step "running SHA on an older state drops its unverified previous-sha" 0 0 "$sha_b" running "$sha_a"
+[ ! -e "$previous" ] || fail "an older script's previous-sha was kept: $(cat "$previous")"
+step "so rollback knows nothing to go to" 1 0 "$sha_b" rollback
+rm -f "$work"/*-sha "$pending"
+echo "$sha_c" >"$previous"
+step "rollback with nothing known to run refuses, even with an old previous-sha" 1 0 "$sha_b" rollback
+grep -q "does not know what runs now" <<<"$out" || fail "rollback went by an unverified previous-sha: $out"
+
+# An attempt that cannot be written is not made: retries stay bounded.
+follow_reset
+echo failed >"$STATUS_FILE"
+step "the timer deploys B" 0 1 "$sha_b"
+chmod a-w "$work"
+step "B failed, and the next attempt cannot be recorded: not made, loudly" 1 0 "$sha_b"
+chmod u+w "$work"
+grep -q "could not be recorded" <<<"$out" && [ "$(cut -d' ' -f3 "$pending")" = 1 ] || fail "an unrecorded attempt was made: $out"
+
 # Two runs at once: the timer's service and a command by hand are separate processes.
 # One run holds the whole sequence, from reading the state to writing it.
 hold="$work/hold"
 held_tick() { # start a tick that stops inside its PATCH until "$hold.go" exists
-  rm -f "$hold.reached" "$hold.go" "$STATE_FILE" "$previous" "$deployed" "$CALLS"; touch "$CALLS"
+  rm -f "$hold.reached" "$hold.go" "$STATE_FILE" "$previous" "$deployed" "$running" "$pending" "$STATUS_FILE" "$CALLS"; touch "$CALLS"
   echo bbb >"$HEAD_FILE"; echo aaa >"$STATE_FILE"
   HOLD_AT_PATCH="$hold" "$here/chartgen-autodeploy.sh" >"$work/held.out" 2>&1 &
   held_pid=$!
@@ -310,10 +449,11 @@ hand_pid=$!
 sleep 0.3; : >"$hold.go"; wait "$held_pid"; wait "$hand_pid"; rc=$?
 # The command by hand waited for its turn: its calls all come after the tick's deploy.
 order=$(grep -n -e '^PATCH' -e '^POST' "$CALLS" | sed 's/:\([A-Z]*\) .*image_tag":"\(.\).*/:\1-\2/; s/:POST .*/:POST/' | cut -d: -f2 | tr '\n' ' ')
-if [ "$rc" = 0 ] && [ "$order" = "PATCH-b POST PATCH-c POST " ] && [ "$(cat "$deployed")" = "$sha_c" ] && [ "$(cat "$previous")" = bbb ]; then
+# Before its own deploy it saw the tick's finish, so bbb is what ran.
+if [ "$rc" = 0 ] && [ "$order" = "PATCH-b POST PATCH-c POST " ] && [ "$(cat "$deployed")" = "$sha_c" ] && [ "$(cat "$running")" = bbb ]; then
   echo "ok   a deploy by hand waits for a run under way, then goes"
 else
-  fail "a deploy by hand after a run under way: exit=$rc order='$order' deployed=$(cat "$deployed") previous=$(cat "$previous" 2>/dev/null)"
+  fail "a deploy by hand after a run under way: exit=$rc order='$order' deployed=$(cat "$deployed") running=$(cat "$running" 2>/dev/null)"
 fi
 [ -z "$(find "$work" -maxdepth 1 -name '*.tmp' -o -maxdepth 1 -name 'state.*' -o -maxdepth 1 -name '*-sha.*')" ] || fail "a temporary state file was left behind"
 

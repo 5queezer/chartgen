@@ -5,7 +5,7 @@ sidebar:
   order: 60
 ---
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by [ADR-0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) (the script follows a deployment until Coolify finished it, and rollback goes to an image that ran)
 **Date:** 2026-11-11
 **Supersedes in part:** [ADR-0037](/chartgen/decisions/0037-pull-based-deploy/) (what
 the timer triggers: a pull of an image built in CI, no longer a build on the host; and

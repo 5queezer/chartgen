@@ -4,10 +4,13 @@ A systemd timer polls GitHub every 5 minutes. When `master` has a new head
 SHA, its `CI` workflow succeeded and the image CI built for it is in the
 registry, the script points the Coolify application on the same host at
 `ghcr.io/5queezer/chartgen:<sha>` and POSTs Coolify's deploy API. The host
-pulls the image and builds nothing. Nothing is exposed inbound and GitHub
-holds no Coolify secrets. Rationale:
-[ADR-0037](../../website/src/content/docs/decisions/0037-pull-based-deploy.md) and
-[ADR-0060](../../website/src/content/docs/decisions/0060-image-built-in-ci.md).
+pulls the image and builds nothing. The ticks after that follow the deployment
+in Coolify until it finished; one that failed is deployed again, at most three
+times in all. Nothing is exposed inbound and GitHub holds no Coolify secrets.
+Rationale:
+[ADR-0037](../../website/src/content/docs/decisions/0037-pull-based-deploy.md),
+[ADR-0060](../../website/src/content/docs/decisions/0060-image-built-in-ci.md) and
+[ADR-0075](../../website/src/content/docs/decisions/0075-autodeploy-follows-the-deployment.md).
 
 Needs `curl`, `jq` and `flock` (util-linux). Run everything below as root on the Coolify host. All
 paths are outside `/home`, so the timer works after an unattended reboot.
@@ -34,6 +37,14 @@ CHARTGEN_IMAGE=ghcr.io/5queezer/chartgen
 ```
 
 `GITHUB_REPO` and `CHARTGEN_IMAGE` may be left out; these are their defaults.
+`DEPLOY_ATTEMPTS` (default 3) and `DEPLOY_WAIT_SECS` (default 2700) may be added:
+how often a deploy that failed in Coolify is deployed in all, and how long one is
+followed before the operator is left to it.
+
+**This is a systemd `EnvironmentFile`, not a shell script.** Coolify tokens contain a
+`|`: put the value in single quotes (`COOLIFY_API_TOKEN='1|...'`), which systemd reads
+the same, or a shell that sources the file prints part of the token in an error. Even
+quoted, read it with a parser rather than `source`, and never print its values.
 The Coolify application must be of the kind **Docker Image**: the script sets
 its image name and tag. On an application that builds from a Dockerfile the
 tag would be ignored and a deploy would build on the host again, so the
@@ -354,7 +365,7 @@ after step 6, or do it at once with `deploy <sha>` below. Deleting
 run() { systemd-run --wait --pipe --quiet -p EnvironmentFile=/etc/chartgen-autodeploy.env \
   -p DynamicUser=yes -p StateDirectory=chartgen-autodeploy /usr/local/bin/chartgen-autodeploy.sh "$@"; }
 run deploy <full commit sha>     # that image, now
-run rollback                     # the image the script triggered before its last one
+run rollback                     # the image that ran before the one that runs now
 run running <full commit sha>    # tell the script what runs now; deploys nothing
 ```
 
@@ -370,22 +381,29 @@ That head may be the very commit you rolled back. **The next commit on
 `run deploy <sha>`. If GitHub cannot be reached when you run the command,
 the first tick that reaches it does the same and says so in the log.
 
-**What `rollback` knows.** The script records the image it triggered last,
-by the timer or by hand, and the one it had triggered before that;
-`rollback` deploys the latter, and prints its SHA before it does. So after
-"the timer deployed A, then B, and B is bad", `rollback` deploys A, and when
-the timer later deploys C, the next `rollback` goes to A again.
+**What `rollback` knows.** An image counts as having run once Coolify said
+its deployment `finished`: the tick after a deploy reads that, and so does a
+command by hand before it deploys anything. The script keeps the image that
+runs now and the one that ran before it; `rollback` deploys the latter, and
+prints its SHA before it does. So after "A ran, then B, and B is bad",
+`rollback` deploys A, and when C runs after that, the next `rollback` goes to
+A again. A deploy that failed in Coolify never counts: after "A ran, B failed
+three times, C ran", `rollback` goes to A.
 
-It knows only what it triggered itself, and **"triggered" means Coolify
-accepted the request, not that the image ever ran.** If B was triggered and
-failed in Coolify, and C came after it, `rollback` names B. So read the SHA
-it prints; if in doubt, look up in Coolify's **Deployments** which commit
-last ran well and use `deploy <sha>`.
+**A command by hand never replaces a deploy that can still finish.** While
+the one followed is queued, in progress or cannot be read, `deploy` and
+`rollback` deploy nothing and say so: wait for it to end (the timer follows
+it), or cancel it in Coolify, and run the command again. One that failed or
+was cancelled is replaced. `running <sha>` always ends the following: it is
+the way out when Coolify lost a deployment.
+
+`rollback` needs to know what runs. With no `running-sha` it refuses and
+asks for `run running <sha>`.
 
 - **A second `rollback` in a row goes forward again:** it deploys what the
   first one replaced, the image you just rolled back from. To go further
   back, name the commit with `deploy <sha>`.
-- **Before the script has triggered anything,** it knows no earlier image.
+- **Before anything finished under this script,** it knows no earlier image.
   The timer's first run only notes where `master` is; that is not a
   deployment, and `rollback` does not use it. `rollback` then deploys
   nothing and says so. Tell the script what runs when it takes over, so
@@ -401,9 +419,13 @@ that finds a command under way does nothing.
 
 ## Is it healthy?
 
-The script logs `triggered Coolify deploy` when Coolify accepted the request.
-**That is not "healthy":** it does not wait for the deployment and does not
-look at the application. To check:
+The script logs `triggered Coolify deploy` when Coolify accepted the request,
+and `Coolify finished deploying <image>` at the first tick after Coolify said
+`finished`. Coolify finishes a rolling update once the new container started
+and, with its health check on, passed it. On this application Coolify's health
+check is off (and the image has none), so `finished` means the container
+started, not that it answers. The script looks at nothing beyond Coolify's word.
+To check by hand:
 
 - Coolify, the application, **Deployments**: the newest one is finished, and
   its log shows the pull of `ghcr.io/5queezer/chartgen:<sha>` and no build.
@@ -423,8 +445,10 @@ systemctl enable --now chartgen-autodeploy.timer    # resume (deploys the newest
 journalctl -u chartgen-autodeploy.service -n 50
 systemctl list-timers chartgen-autodeploy.timer
 cat /var/lib/private/chartgen-autodeploy/last-sha       # master's head the timer last dealt with (deployed, or left alone)
-cat /var/lib/private/chartgen-autodeploy/deployed-sha   # what this script triggered last, or was told runs
-cat /var/lib/private/chartgen-autodeploy/previous-sha   # what it had triggered before that: what rollback deploys
+cat /var/lib/private/chartgen-autodeploy/deployed-sha   # what this script triggered last, or was told runs (the watchdog compares it with what runs)
+cat /var/lib/private/chartgen-autodeploy/running-sha    # what Coolify last finished deploying, or the script was told runs
+cat /var/lib/private/chartgen-autodeploy/previous-sha   # what ran before that: what rollback deploys
+cat /var/lib/private/chartgen-autodeploy/pending        # a deploy being followed: SHA, Coolify deployment, attempt, since (epoch s)
 ```
 
 Delete `last-sha` to make the next run re-baseline (it records the head
@@ -459,6 +483,15 @@ What the log says when nothing is deployed:
 | `not a Docker Image application` | `COOLIFY_APP_UUID` names an application that builds on the host, usually the old one. Nothing was changed or deployed. |
 | `could not read the Coolify application` | The uuid is wrong, the token may not read applications, or Coolify is down. |
 | `Coolify did not take the image tag` | The API token may not change the application. |
+| `the deploy of <sha> is queued` / `in_progress` `in Coolify; waiting` | A deploy is under way. Nothing else is deployed until it ends. |
+| `failed in Coolify ...; deploying it again, attempt 2 of 3` | Coolify could not pull or start it, often something passing (a pull error). It is deployed again. |
+| `ERROR: the deploy of ... failed in Coolify 3 times` | Given up; the unit fails. Production runs the image named. Read the deployment's log in Coolify; when the cause is gone, `run deploy <sha>`. |
+| `ERROR: ... is not finished after N min` | Coolify has held it queued or running for 45 minutes. No longer followed; look at it in Coolify. |
+| `cancelled in Coolify` | Someone cancelled it; it is not deployed again. `run deploy <sha>` puts it out. |
+| `could not read the deploy of <sha> from Coolify` | Coolify did not answer; the next tick asks again. |
+| `Coolify named no deployment for <sha>` | Coolify queued nothing (its queue is full, or the token may not deploy). Not counted as triggered; the next tick tries again. |
+| `ERROR: ... cannot be followed` | The `pending` file names no deployment (edited by hand?). No longer followed; read Coolify's deployments, then `run running <sha>` or `run deploy <sha>`. |
+| `it can still finish ... Nothing was deployed` | A command by hand while a deploy is under way. Wait, or cancel it in Coolify. |
 
 ## Cancelled or timed-out CI
 
@@ -480,4 +513,13 @@ systemctl daemon-reload
 ## Test
 
 `scripts/autodeploy/test.sh` runs the script against a stub `curl` that plays
-GitHub, the registry and Coolify; no network.
+GitHub, the registry and Coolify; no network. CI runs it (`autodeploy-test`).
+
+## After installing this version over an older one
+
+The older script kept no `running-sha`, and its `previous-sha` is what it
+triggered before, which may never have run. Tell it what runs, once: `run running
+<sha>` with the commit of the image the application runs now (`docker ps` on the
+host shows it). That drops the old `previous-sha`, so the first `rollback` has
+somewhere to go only after the next image ran. Until `running-sha` exists,
+`rollback` refuses.
