@@ -1016,7 +1016,10 @@ export const SetupSchema = SetupLevelsSchema.extend({
   bars_to_mae: z.number().nonnegative().nullable(),
   bars_to_mfe: z.number().nonnegative().nullable(),
   // What the agent stated when it made the setup (ADR-0064): fixed from then on, and
-  // absent when it stated none. The server gives them no meaning.
+  // absent when it stated none. The server gives them no meaning. Since ADR-0077,
+  // features also holds the server's ctx_trend_4h, ctx_trend_1d and ctx_fear_greed on
+  // every new setup (the market context when it was made, "unknown" where there was
+  // none), so it is absent only on an older setup that stated none.
   features: z.record(z.string(), z.union([z.number(), z.boolean(), z.string()])).optional(),
   probability: z.number().min(0).max(1).optional(),
   playbook_version: z.string().optional(),

@@ -199,6 +199,30 @@ them, because a record that could be rewritten after the outcome is no record. I
 wrong, cancel the setup and make a new one. Keeping a feature's name meaning the same thing
 from one setup to the next is yours to do; change `playbook_version` when it does not.
 
+### The market it was made in
+
+The server adds three features of its own to every setup it makes
+([ADR-0077](/chartgen/decisions/0077-a-setup-records-its-market-context/)), so that you can
+group setups by the market they were made in without typing it yourself. They are read from
+the symbol's [market context](/chartgen/reference/mcp/#get_market_context) at that moment, in the
+words `get_market_context` uses:
+
+| Feature | Value |
+|---|---|
+| `ctx_trend_4h` | `up`, `down` or `mixed` |
+| `ctx_trend_1d` | `up`, `down` or `mixed` |
+| `ctx_fear_greed` | `extreme fear`, `fear`, `neutral`, `greed` or `extreme greed` |
+
+A feature the server could not read is `unknown`: always on a replay server, which has no
+market context; on a symbol that is not trading; when the read failed or took longer than 10
+seconds; and `ctx_fear_greed` on a symbol that is not on Binance, which has no Fear & Greed
+index. The setup is made either way. Like your own features they are fixed once the setup is
+made, and revisions do not change them.
+
+**The `ctx_` prefix is the server's.** A setup whose `features` names one starting with
+`ctx_` is refused, so the server's values are never mixed with yours. The three do not count
+against your 16 features.
+
 ## Skips
 
 A decision **not** to trade is worth recording too. `decision: "skip"` stores it with a
@@ -220,7 +244,8 @@ one is refused and nothing old is dropped. `list_setups` returns the limits.
 `get_track_record` counts your closed setups: how many, how they ended, the total and mean
 result in R, and your stated probability beside the share that won. You can filter by
 symbol, direction, decision, `playbook_version` and the time a setup was made, and group by
-one of `playbook_version`, one feature, the probability in tenths, symbol or direction. The
+one of `playbook_version`, one feature (the server's `ctx_` features included, such as
+`ctx_trend_4h`), the probability in tenths, symbol or direction. The
 [reference](/chartgen/reference/mcp/#your-track-record) has the fields.
 
 **It counts and judges nothing.** Read it with care:

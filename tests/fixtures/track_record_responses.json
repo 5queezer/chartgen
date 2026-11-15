@@ -22,6 +22,9 @@
     "exit": null,
     "expires_at": 1767279600000,
     "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown",
       "example_flag": true,
       "example_label": "a",
       "example_number": 1.5
@@ -38,6 +41,9 @@
         "changes": {
           "features": {
             "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown",
               "example_flag": true,
               "example_label": "a",
               "example_number": 1.5

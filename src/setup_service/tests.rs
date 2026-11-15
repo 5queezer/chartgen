@@ -2399,7 +2399,19 @@ async fn what_a_setup_was_made_with_is_stored_shown_and_in_its_first_log_entry()
     let (store, dir) = store_at("stated");
     let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
     let made = call(&s, "create_setup", stated(), "owner").unwrap();
-    let features = json!({ "example_flag": true, "example_label": "a", "example_number": 1.5 });
+    let features = made["features"].clone();
+    for (name, value) in [
+        ("example_flag", json!(true)),
+        ("example_label", json!("a")),
+        ("example_number", json!(1.5)),
+    ] {
+        assert_eq!(features[name], value, "{features}");
+    }
+    assert_eq!(
+        features.as_object().unwrap().len(),
+        6,
+        "and the server's three"
+    );
     for view in [
         made.clone(),
         call(&s, "get_setup", json!({ "id": made["id"] }), "owner").unwrap(),
@@ -2457,25 +2469,58 @@ async fn what_a_setup_was_made_with_is_stored_shown_and_in_its_first_log_entry()
     assert_eq!(later["log"][0], *first);
 }
 
-/// A setup made without them shows none of the three, and its log entry is as it was
-/// before they existed: answers of such setups do not change by a byte.
+/// A setup made without them shows neither a probability nor a playbook version, and
+/// its features are the server's market context alone (ADR-0077).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_setup_made_without_them_shows_none_of_the_three() {
+async fn a_setup_made_without_them_has_only_the_servers_features() {
     let s = live();
     let made = created(&s, "owner");
     let listed = call(&s, "list_setups", json!({}), "owner").unwrap()["setups"][0].clone();
+    let mut expected = setups::CONTEXT_FEATURES.map(String::from).to_vec();
+    expected.sort();
     for view in [&made, &listed] {
-        for field in ["features", "probability", "playbook_version"] {
+        for field in ["probability", "playbook_version"] {
             assert!(view.get(field).is_none(), "{field} in {view}");
         }
+        let names: Vec<String> = view["features"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(names, expected, "{view}");
     }
-    assert_eq!(made["log"][0]["changes"], json!({}));
-    let stored = s.store.setups().unwrap().remove(0).0;
-    assert!(
-        !stored.contains("features")
-            && !stored.contains("probability")
-            && !stored.contains("playbook")
+    assert_eq!(
+        made["log"][0]["changes"],
+        json!({ "features": { "to": made["features"] } })
     );
+    let stored = s.store.setups().unwrap().remove(0).0;
+    assert!(!stored.contains("probability") && !stored.contains("playbook"));
+}
+
+/// On a live server a setup holds its symbol's market context when it was made, in the
+/// words `get_market_context` uses, and a revision leaves it as it was (ADR-0077).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_setup_holds_the_market_context_it_was_made_in() {
+    let s = live();
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    let context = crate::market_context::of("BTCUSDT");
+    for (name, path) in [("ctx_trend_4h", "/trend/4h"), ("ctx_trend_1d", "/trend/1d")] {
+        let value = made["features"][name].as_str().unwrap();
+        assert!(["up", "down", "mixed"].contains(&value), "{name}: {made}");
+        assert_eq!(context.pointer(path).unwrap(), value, "{context}");
+    }
+    // The sample source has no Fear & Greed index.
+    assert_eq!(made["features"]["ctx_fear_greed"], "unknown");
+
+    let revised = call(
+        &s,
+        "revise_setup",
+        json!({ "id": made["id"], "reason": "example reason", "thesis": "another example thesis" }),
+        "owner",
+    )
+    .unwrap();
+    assert_eq!(revised["features"], made["features"]);
 }
 
 /// A record that could be rewritten after the outcome is no record: no tool takes the
@@ -2532,6 +2577,8 @@ async fn the_three_fields_are_checked_and_bounded() {
         ("features.example", json!({ "example": { "nested": 1 } })),
         ("features.example", json!({ "example": null })),
         ("features.example", json!({ "example": long_text })),
+        ("features.ctx_trend_4h", json!({ "ctx_trend_4h": "up" })),
+        ("features.ctx_other", json!({ "ctx_other": 1 })),
         ("probability", json!(-0.01)),
         ("probability", json!(1.01)),
         ("probability", json!("0.5")),
@@ -2566,6 +2613,27 @@ async fn the_three_fields_are_checked_and_bounded() {
         args["features"] = features;
         args["playbook_version"] = json!("x".repeat(32));
         call(&s, "create_setup", args, "owner").unwrap();
+    }
+}
+
+/// The server's market context does not count against the features an agent may state
+/// (ADR-0077): all 16 are taken, and the setup holds them and the server's three.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_servers_features_leave_the_agent_all_sixteen() {
+    let s = live();
+    let full: serde_json::Map<String, Value> = (0..setups::MAX_FEATURES)
+        .map(|i| (format!("key_{i}"), json!(i)))
+        .collect();
+    let mut args = long();
+    args["features"] = json!(full);
+    let made = call(&s, "create_setup", args, "owner").unwrap();
+    let features = made["features"].as_object().unwrap();
+    assert_eq!(features.len(), setups::MAX_FEATURES + 3, "{made}");
+    for (name, value) in &full {
+        assert_eq!(&features[name], value);
+    }
+    for name in setups::CONTEXT_FEATURES {
+        assert!(features[name].is_string(), "{name}: {made}");
     }
 }
 
@@ -2746,6 +2814,16 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
         )),
         [json!(null)]
     );
+    // The server's market context groups as an agent's feature does (ADR-0077).
+    let by_trend = record(json!({ "group_by": "feature", "feature": "ctx_trend_4h" }));
+    let groups = by_trend["groups"].as_array().unwrap();
+    let trends = ["up", "down", "mixed"].map(Value::from);
+    assert!(
+        groups.iter().all(|g| trends.contains(&g["key"])),
+        "{by_trend}"
+    );
+    let grouped: u64 = groups.iter().map(|g| g["count"].as_u64().unwrap()).sum();
+    assert_eq!(grouped, 3, "{by_trend}");
     assert_eq!(
         keys(&record(json!({ "group_by": "symbol" }))),
         [json!("BTCUSDT")]
@@ -3570,6 +3648,11 @@ async fn stock_setup_answers_match_the_file_the_web_types_are_tested_against() {
                 .timestamp_millis()
         };
         let created = replayed_long(&s, "O", ny_oct(29, 15), (57.0, 57.1), 56.5, ny_oct(30, 15));
+        // A replay server has no market context: the server's features are all unknown
+        // (ADR-0077), and the setup is made all the same.
+        for name in setups::CONTEXT_FEATURES {
+            assert_eq!(created["features"][name], "unknown", "{created}");
+        }
         let ended = replayed(&s, &created, ny_oct(30, 16));
         json!({ "create_setup": created, "get_setup": ended })
     });

@@ -21,6 +21,11 @@
     },
     "exit": null,
     "expires_at": 1793386800000,
+    "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown"
+    },
     "fill": null,
     "gap": false,
     "id": "setup-000001",
@@ -30,7 +35,15 @@
       {
         "at": 1793300400000,
         "by": "agent",
-        "changes": {},
+        "changes": {
+          "features": {
+            "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown"
+            }
+          }
+        },
         "kind": "created",
         "reason": null,
         "seq": 1
@@ -86,6 +99,11 @@
       "price": 57.139801025390625
     },
     "expires_at": 1793386800000,
+    "features": {
+      "ctx_fear_greed": "unknown",
+      "ctx_trend_1d": "unknown",
+      "ctx_trend_4h": "unknown"
+    },
     "fill": {
       "bar_time": 1793300400000,
       "price": 57.084999084472656
@@ -102,7 +120,15 @@
       {
         "at": 1793300400000,
         "by": "agent",
-        "changes": {},
+        "changes": {
+          "features": {
+            "to": {
+              "ctx_fear_greed": "unknown",
+              "ctx_trend_1d": "unknown",
+              "ctx_trend_4h": "unknown"
+            }
+          }
+        },
         "kind": "created",
         "reason": null,
         "seq": 1

@@ -355,12 +355,24 @@ describe("what a setup was made with, and the track record (ADR-0064)", () => {
     const setup = SetupPayloadSchema.parse(record.create_setup_stated);
     expect(setup.probability).toBe(0.6);
     expect(setup.playbook_version).toBe("v1");
-    expect(setup.features).toEqual({ example_number: 1.5, example_flag: true, example_label: "a" });
+    // With the server's market context, which a replay has none of (ADR-0077).
+    expect(setup.features).toEqual({
+      example_number: 1.5,
+      example_flag: true,
+      example_label: "a",
+      ctx_trend_4h: "unknown",
+      ctx_trend_1d: "unknown",
+      ctx_fear_greed: "unknown",
+    });
   });
 
-  it("leaves them out of a setup made without them", () => {
+  it("leaves them out of a setup made without them, but for the server's context", () => {
     const setup = SetupPayloadSchema.parse(answers.create_setup);
-    expect(setup.features).toBeUndefined();
+    expect(setup.features).toEqual({
+      ctx_trend_4h: "unknown",
+      ctx_trend_1d: "unknown",
+      ctx_fear_greed: "unknown",
+    });
     expect(setup.probability).toBeUndefined();
     expect(setup.playbook_version).toBeUndefined();
   });

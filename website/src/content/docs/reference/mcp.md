@@ -1716,8 +1716,18 @@ setups; `can_create` in the list says so.
   `true` or `false`, or a string of at most 32 characters. `probability` is your own
   estimate from 0 to 1 that the setup reaches its first target. `playbook_version` is a
   label of at most 32 characters. The server gives them no meaning. **They are fixed once the
-  setup is made:** `revise_setup` and `cancel_setup` refuse them. A setup made without them
-  answers without them.
+  setup is made:** `revise_setup` and `cancel_setup` refuse them. A setup made without
+  `probability` or `playbook_version` answers without them.
+- The server adds three features to every setup it makes
+  ([ADR-0077](/chartgen/decisions/0077-a-setup-records-its-market-context/)): `ctx_trend_4h`
+  and `ctx_trend_1d` (`up`, `down` or `mixed`) and `ctx_fear_greed` (`extreme fear`, `fear`,
+  `neutral`, `greed` or `extreme greed`), the symbol's [market context](#get_market_context)
+  when the setup was made. Each is `unknown` where the context has none: on a replay server,
+  a symbol that is not trading, a read that failed or took over 10 seconds, and for
+  `ctx_fear_greed` a symbol that is not on Binance. They are fixed as your features are. A
+  feature name of yours that starts with `ctx_` is refused. They do not count against the 16
+  features you may state. A setup made before this has
+  none of them.
 - `as_of`: [replay servers](/chartgen/guides/setups/#replay) only, where every call needs it.
   `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
 
@@ -1753,7 +1763,8 @@ many match the filters.
 
 - Filters: `symbol`, `direction`, `decision`, `playbook_version`, and `from` and `to` (unix
   seconds, unix ms or ISO 8601) on the time the setup was **made**.
-- `group_by`: `playbook_version`, `feature` (with `feature`, the name of one), `probability`
+- `group_by`: `playbook_version`, `feature` (with `feature`, the name of one, the server's
+  `ctx_trend_4h`, `ctx_trend_1d` and `ctx_fear_greed` included), `probability`
   (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol` or `direction`. A setup
   that stated none is in the group whose `key` is `null`. Groups come in the order of their
   keys. More than 50 groups are refused: group by something that takes fewer values.
