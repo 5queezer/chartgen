@@ -185,6 +185,10 @@ pending_status() {
   p_status='' p_code=''
   [ -s "$PENDING_FILE" ] || return 1
   read -r p_sha p_uuid p_attempt p_since <"$PENDING_FILE"
+  # A line cut short, by hand or by a disk that filled, still ends in a decision.
+  [[ ${p_uuid-} =~ ^[A-Za-z0-9_-]+$ ]] || p_uuid=-
+  [[ ${p_attempt-} =~ ^[0-9]+$ ]] || p_attempt=1
+  [[ ${p_since-} =~ ^[0-9]+$ ]] || p_since=$(date +%s)
   if [ "$p_uuid" = - ]; then
     # Coolify's answer named no deployment: its newest for the application is this one.
     p_code=$(coolify GET "/deployments/applications/$COOLIFY_APP_UUID?skip=0&take=1")
@@ -204,9 +208,10 @@ pending_status() {
 }
 
 # finished: the deploy just read is finished; record it as running, follow it no more.
+# Recorded first: a write that fails leaves it followed, and the next tick records it.
 finished() {
+  record_ran "$p_sha" || { log "Coolify finished deploying $p_sha, but it could not be recorded as running; trying again next tick"; return 1; }
   rm -f "$PENDING_FILE"
-  record_ran "$p_sha" || { log "Coolify finished deploying $p_sha, but it could not be recorded as running"; return 1; }
   log "Coolify finished deploying $CHARTGEN_IMAGE:$p_sha"
 }
 
@@ -345,7 +350,8 @@ case ${1-} in
     fi
     take_turn hand
     # The operator's word: what runs now, and no deploy is followed any more.
-    if ! write_file "$DEPLOYED_FILE" "$2" || ! write_file "$RUNNING_FILE" "$2" || ! rm -f "$PENDING_FILE"; then
+    # Through record_ran, so that what ran before it is where a rollback goes.
+    if ! write_file "$DEPLOYED_FILE" "$2" || ! record_ran "$2" || ! rm -f "$PENDING_FILE"; then
       log "could not record $2 in $(dirname "$STATE_FILE")"
       exit 1
     fi

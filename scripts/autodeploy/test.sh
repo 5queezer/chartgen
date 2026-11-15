@@ -388,6 +388,13 @@ grep -q "rolling back to $sha_a, the image that ran when the deploy of $sha_b wa
 rm -f "$STATUS_FILE"
 step "running SHA ends the following" 0 0 "$sha_b" running "$sha_b"
 [ ! -e "$pending" ] && [ "$(cat "$running")" = "$sha_b" ] || fail "running did not end the following"
+[ "$(cat "$previous")" = "$sha_a" ] || fail "running did not keep what ran before it for a rollback: $(cat "$previous" 2>/dev/null)"
+
+follow_reset
+step "the timer deploys B" 0 1 "$sha_b"
+echo "$sha_b" >"$pending"
+step "a pending line cut short is still followed to its end" 0 0 "$sha_b"
+[ ! -e "$pending" ] && [ "$(cat "$running")" = "$sha_b" ] || fail "a short pending line was not handled: $out"
 
 # Two runs at once: the timer's service and a command by hand are separate processes.
 # One run holds the whole sequence, from reading the state to writing it.
