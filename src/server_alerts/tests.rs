@@ -4976,3 +4976,128 @@ async fn a_bar_close_wake_up_from_the_log_has_no_level() {
     assert!(what.get("level").is_some_and(Value::is_null), "{what}");
     assert!(what.get("indicator").is_none(), "{what}");
 }
+
+// ---- Futures-data alerts (ADR-0080) ----
+
+/// The futures read in tests, in place of Binance: funding in percent is the last
+/// close over 1000, on every bar, as a settlement shows on the bars nearest it; a
+/// NOFUT symbol has no futures market, and a SLOW one takes 400 ms.
+pub(super) fn read_futures(
+    spec: &indicator::Spec,
+    bars: &[Bar],
+    symbol: &str,
+    _interval: &str,
+) -> Result<indicator::Reading, String> {
+    if symbol.starts_with("SLOW") {
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    if symbol.starts_with("NOFUT") {
+        return Err(format!(
+            "{symbol} has no Funding at its last close: Funding (no futures market)"
+        ));
+    }
+    let tail = &bars[bars.len().saturating_sub(indicator::FUTURES_BARS)..];
+    let last = tail.last().map_or(f64::NAN, |b| b.close / 1000.0);
+    let y = vec![last; tail.len()];
+    indicator::reading(spec, tail, &y).ok_or_else(|| "no reading".to_string())
+}
+
+fn on_funding(symbol: &str, condition: &str, level: f64) -> Value {
+    json!({
+        "symbol": symbol, "interval": "1h", "evaluate_on": "close",
+        "indicator": "funding_rate", "condition": condition, "trigger": "every", "level": level,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn funding_fires_at_the_close_it_crosses_its_level() {
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let (a, _, id) =
+        with_history("funding", bars, on_funding("BTCUSDT", "crossing_up", 0.06)).await;
+    let view = get(&a, "me", &id).await;
+    assert_eq!(
+        view["indicator"]["name"], "funding",
+        "the alias is stored by its name"
+    );
+    assert_eq!(view["indicator"]["line"], "Funding");
+    assert_eq!(view["level"], 0.06);
+    let k = key("1h");
+    // 0.055% is under the level; 0.07% crosses it, though the series one bar back
+    // already shows 0.07% too: the crossing is against the close read before.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 55.0)));
+    until("the first read", || a.lock().values.contains_key(&id)).await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+    let view = get(&a, "me", &id).await;
+    assert!((view["indicator"]["value"].as_f64().unwrap() - 0.07).abs() < 1e-12);
+    assert_eq!(view["feed"], "live");
+    // The same close sent again does not fire it twice, and a tick is not a close.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    a.on_event(&k, FeedEvent::Tick(bar(t + 3 * HOUR, 99.0)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_futures_read_holds_no_lock() {
+    let (store, _) = store_at("funding-slow");
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let id = create(&a, on_funding("SLOWUSDT", "greater", 0.06), "me").await;
+    let k = ("SLOWUSDT".to_string(), "1h".to_string());
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    let started = Instant::now();
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 70.0)));
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "the close does not wait"
+    );
+    // The alerts stay usable while it reads.
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_funding_alert_needs_a_futures_market_and_a_level() {
+    let (store, _) = store_at("funding-bad");
+    let a = plain(store);
+    let err = call(
+        &a,
+        "create_server_alert",
+        on_funding("NOFUTUSDT", "greater", 0.01),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err,
+        "Cannot watch funding on NOFUTUSDT: NOFUTUSDT has no Funding at its last close: Funding (no futures market)"
+    );
+    let mut args = on_funding("BTCUSDT", "crossing", 0.01);
+    args["compare"] = json!("close");
+    args["level"] = Value::Null;
+    let err = call(&a, "create_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.contains("funding is not one"), "{err}");
+    let mut args = on_funding("BTCUSDT", "crossing", 0.01);
+    args["evaluate_on"] = json!("live");
+    assert!(call(&a, "create_server_alert", args, "me").await.is_err());
+    assert!(a.lock().alerts.is_empty());
+}

@@ -50,9 +50,9 @@ export interface CreateServerAlertInput {
    */
   evaluate_on?: "live" | "close";
   /**
-   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. Fixed after creation.
+   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the last rate settled before it opened): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. Fixed after creation.
    */
-  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx" | "funding";
   /**
    * Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert. Required with condition bar_close, 1h or longer.
    */
