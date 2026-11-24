@@ -1718,10 +1718,11 @@ setups; `can_create` in the list says so.
   label of at most 32 characters. The server gives them no meaning. **They are fixed once the
   setup is made:** `revise_setup` and `cancel_setup` refuse them. A setup made without
   `probability` or `playbook_version` answers without them.
-- **Once your newest setup states a `playbook_version`, a setup without one is refused**
-  ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)), and the problem names that
-  version. State `none` for a setup that follows no playbook. If you never state one, nothing
-  changes.
+- A setup without `playbook_version` is counted as `unversioned` in the track record
+  ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)). **Once your newest setup
+  states one, `create_setup` makes a setup without one all the same and answers with
+  `warnings`:** `["playbook_version missing; this setup is counted as unversioned"]`. If you
+  never state one, there is no warning.
 - `skip_reason` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)): with
   `decision: skip` only, why you did not take it, as a label of 1 to 32 characters such as
   `correlation-limit`, to group skips by. The why in words goes in the thesis. It is fixed as
@@ -1771,14 +1772,16 @@ A call that fails a check answers with an error whose text is JSON:
 `get_track_record` counts your **closed** setups. Open ones are not counted; `open` says how
 many match the filters.
 
-- Filters: `symbol`, `direction`, `decision`, `playbook_version`, and `from` and `to` (unix
+- Filters: `symbol`, `direction`, `decision`, `playbook_version` (`unversioned` for setups
+  made without one), and `from` and `to` (unix
   seconds, unix ms or ISO 8601) on the time the setup was **made**.
 - `group_by`: `playbook_version`, `feature` (with `feature`, the name of one, the server's
   `ctx_trend_4h`, `ctx_trend_1d` and `ctx_fear_greed` included), `probability`
   (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol`, `direction`,
   `skip_reason`, or `tag` (with `tag_prefixes`, 1 to 10 starts of tags, such as
   `["trigger:alert", "trigger:scan"]`, each a group whose `key` is the prefix). A setup that
-  stated none, or has no tag with any of the prefixes, is in the group whose `key` is `null`.
+  stated no `playbook_version` is in the group `unversioned`; one that stated none of the
+  others, or has no tag with any of the prefixes, is in the group whose `key` is `null`.
   **With `tag`, a setup is in the group of each prefix one of its tags starts with**, so the
   groups can add up to more than `total`. Groups come in the order of their keys. More than 50
   groups are refused: group by something that takes fewer values.
@@ -1795,7 +1798,7 @@ many match the filters.
                      "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 }
   },
   "groups": [
-    { "key": null, "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
+    { "key": "unversioned", "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
       "with_result": 1, "total_r": 1.6, "mean_r": 1.6, "net_gain": 1, "net_loss": 0,
       "entered": 1, "mean_r_entered": 1.6, "gaps": 0,
       "probability": { "stated": 0, "mean": null, "won": 0, "observed": null,

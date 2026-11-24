@@ -153,7 +153,7 @@ export interface CreateSetupInput {
    */
   invalidation?: number;
   /**
-   * Optional until you use it: a label of at most 32 characters for the rules you followed, so that results can be told apart by it. Once your newest setup states one, a setup without one is refused; state none if it follows no playbook. Fixed once the setup is made.
+   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. A setup without one is counted as unversioned; once your newest setup states one, the answer warns when this one does not. Fixed once the setup is made.
    */
   playbook_version?: string;
   /**
@@ -576,11 +576,11 @@ export interface GetTrackRecordInput {
    */
   from?: number | string;
   /**
-   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated none, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
+   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated no playbook_version is in the group unversioned; one that stated none of the others, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
    */
   group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction" | "tag" | "skip_reason";
   /**
-   * Only setups made with this playbook_version.
+   * Only setups made with this playbook_version; unversioned for those made without one.
    */
   playbook_version?: string;
   /**

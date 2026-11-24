@@ -39,6 +39,8 @@ const TAG_HINT: &str = "lowercase letters, digits and : - _ . /, starting with a
 /// long a feature's name, a feature's text and a playbook version may be.
 pub const MAX_FEATURES: usize = 16;
 pub const MAX_STATED_TEXT: usize = 32;
+/// The playbook version a setup that stated none is counted under (ADR-0079).
+pub const UNVERSIONED: &str = "unversioned";
 /// Fields taken when a setup is made and by no tool afterwards.
 pub const STATED_FIELDS: [&str; 4] = ["features", "probability", "playbook_version", "skip_reason"];
 /// Features whose names start with this are the server's (ADR-0077): an agent may not
@@ -2347,7 +2349,9 @@ impl Record {
                 };
             }
             GroupBy::SkipReason => json!(self.skip_reason),
-            GroupBy::PlaybookVersion => json!(self.playbook_version),
+            GroupBy::PlaybookVersion => {
+                json!(self.playbook_version.as_deref().unwrap_or(UNVERSIONED))
+            }
             GroupBy::Feature(name) => self
                 .features
                 .as_ref()

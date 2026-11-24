@@ -2644,8 +2644,10 @@ async fn the_servers_features_leave_the_agent_all_sixteen() {
 async fn what_a_setup_was_made_with_is_read_from_its_log_at_start() {
     let (store, dir) = store_at("restated");
     let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
-    let plain = created(&s, "owner");
     let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    let mut plain = created(&s, "owner");
+    // Only the answer to create_setup warns; the setup does not keep it (ADR-0079).
+    assert!(plain.as_object_mut().unwrap().remove("warnings").is_some());
     drop(s);
 
     let rewrite = |change: &dyn Fn(&mut Value)| {
@@ -2692,26 +2694,26 @@ async fn what_a_setup_was_made_with_is_read_from_its_log_at_start() {
     assert_eq!(read(&plain["id"]), plain);
 }
 
-/// An owner whose newest setup states a playbook version is refused a setup without
-/// one, and told how to state it (ADR-0079). One that never stated one is not, and
-/// another owner's setups do not count.
+/// An owner whose newest setup states a playbook version is warned when a new one
+/// states none, and the setup is made without one (ADR-0079). One that never stated a
+/// version is not warned, and another owner's setups do not count.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_playbook_version_once_used_is_stated_on_every_setup() {
+async fn a_missing_playbook_version_is_made_with_a_warning_once_versions_are_used() {
     let s = live();
     created(&s, "plain");
-    created(&s, "plain");
-    call(&s, "create_setup", stated(), "owner").unwrap();
+    assert!(created(&s, "plain").get("warnings").is_none());
+    let versioned = call(&s, "create_setup", stated(), "owner").unwrap();
+    assert!(versioned.get("warnings").is_none());
     created(&s, "someone-else");
-    let refused = call(&s, "create_setup", long(), "owner").unwrap_err();
-    assert_eq!(errors(&refused), ["playbook_version"], "{refused}");
-    assert!(
-        refused.contains(r#"\"v1\""#),
-        "names the version: {refused}"
+    let warned = created(&s, "owner");
+    assert_eq!(
+        warned["warnings"],
+        json!(["playbook_version missing; this setup is counted as unversioned"])
     );
-    let none = with(long(), json!({ "playbook_version": "none" }));
-    call(&s, "create_setup", none, "owner").unwrap();
-    // The newest counts: after one that states it, a missing one is refused again.
-    assert!(call(&s, "create_setup", long(), "owner").is_err());
+    assert!(warned.get("playbook_version").is_none());
+    assert!(s.owned("owner", &id_of(&warned)).is_some(), "it was made");
+    // The newest counts: after one without a version, the next is not warned.
+    assert!(created(&s, "owner").get("warnings").is_none());
 }
 
 /// `skip_reason` is stated on a skip, fixed like the others, and refused on a take.
@@ -2843,16 +2845,15 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
     );
     assert!(nothing["total"]["probability"]["observed"].is_null());
 
-    let c = closed(&s, long(), "owner", true);
     let a = closed(&s, stated(), "owner", true);
     let b_args = with(
         long(),
         json!({ "features": { "example_flag": false }, "probability": 0.25, "playbook_version": "v1" }),
     );
     let b = closed(&s, b_args, "owner", false);
+    let c = closed(&s, long(), "owner", true);
     closed(&s, stated(), "someone-else", true);
-    let open = with(long(), json!({ "playbook_version": "v1" }));
-    call(&s, "create_setup", open, "owner").unwrap();
+    created(&s, "owner");
 
     let r = |v: &Value| v["result_r"].as_f64().unwrap();
     let sum = r(&a) + r(&b) + r(&c);
@@ -2899,8 +2900,10 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
             "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 })
     );
 
+    // A setup that stated no version is counted as unversioned (ADR-0079), and the
+    // filter takes the same word.
     let by_version = record(json!({ "group_by": "playbook_version" }));
-    assert_eq!(keys(&by_version), [json!(null), json!("v1")]);
+    assert_eq!(keys(&by_version), [json!("unversioned"), json!("v1")]);
     assert_eq!(by_version["groups"][0]["count"], 1);
     assert_eq!(by_version["groups"][1]["count"], 2);
     assert_eq!(by_version["groups"][1]["won"], 1);
@@ -2944,6 +2947,7 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
     for (filter, count) in [
         (json!({ "playbook_version": "v1" }), 2),
         (json!({ "playbook_version": "v2" }), 0),
+        (json!({ "playbook_version": "unversioned" }), 1),
         (json!({ "direction": "short" }), 0),
         (
             json!({ "direction": "long", "decision": "take", "symbol": "btcusdt" }),

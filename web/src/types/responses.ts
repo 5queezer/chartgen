@@ -1062,7 +1062,12 @@ export const SetupRevisionSchema = z.object({
 export type SetupRevision = z.infer<typeof SetupRevisionSchema>;
 
 // create_setup, revise_setup, get_setup and cancel_setup: the setup with its whole log.
-export const SetupPayloadSchema = SetupSchema.extend({ log: z.array(SetupRevisionSchema) });
+export const SetupPayloadSchema = SetupSchema.extend({
+  log: z.array(SetupRevisionSchema),
+  // create_setup only, when there is something to say: a setup made without a
+  // playbook_version by an owner whose newest setup stated one (ADR-0079).
+  warnings: z.array(z.string()).optional(),
+});
 export type SetupPayload = z.infer<typeof SetupPayloadSchema>;
 
 export const SetupsPayloadSchema = z.object({
@@ -1156,7 +1161,7 @@ export const TrackRecordPayloadSchema = z.object({
   /** With group_by tag: the prefixes as sent. A setup is in each one's group that one of its tags starts with, so groups can overlap. */
   tag_prefixes: z.array(z.string()).nullable(),
   total: TrackRecordCountsSchema,
-  /** In the order of the keys; null is the group of setups that stated none. */
+  /** In the order of the keys; null is the group of setups that stated none, "unversioned" with group_by playbook_version. */
   groups: z.array(
     TrackRecordCountsSchema.extend({
       // A number is written as a decimal: 1 and 1.0 are the one group `1.0`.

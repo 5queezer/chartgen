@@ -837,29 +837,6 @@ impl Setups {
             problems.extend(stocks::calendar_problem(market, levels.expires_at));
         }
         let requests = self.drawing_requests(args, now, &mut problems);
-        // An owner whose newest setup states a playbook version states one on each
-        // (ADR-0079): a setup without one cannot be told apart in its record later, and
-        // a default would be the server's guess.
-        if draft.as_ref().is_some_and(|d| d.playbook_version.is_none()) {
-            let st = self.lock();
-            let newest = st
-                .setups
-                .values()
-                .map(|h| &h.record)
-                .filter(|r| r.owner == owner)
-                .max_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
-            if let Some(version) = newest.and_then(|r| r.playbook_version.as_ref()) {
-                problems.push(
-                    Problem::new(
-                        "playbook_version",
-                        "your newest setup states a playbook_version, and this one states none",
-                    )
-                    .hint(format!(
-                        "state the version this setup follows, such as {version:?}, or a word such as none"
-                    )),
-                );
-            }
-        }
         let (Some(draft), Some(symbol), true) = (draft, symbol, problems.is_empty()) else {
             return Err(setups::problems_text(&problems));
         };
@@ -938,6 +915,17 @@ impl Setups {
         }
         let mut st = self.lock();
         self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
+        // An owner whose newest setup states a playbook version is told when this one
+        // states none (ADR-0079). The setup is made all the same: refusing it would lose
+        // it, and a default would be the server's guess.
+        let unversioned = draft.playbook_version.is_none()
+            && st
+                .setups
+                .values()
+                .map(|h| &h.record)
+                .filter(|r| r.owner == owner)
+                .max_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
+                .is_some_and(|r| r.playbook_version.is_some());
         let id = self.new_id(&mut st, owner);
         let (mut record, created) = Record::new(id, owner, symbol, draft, levels, placed, now);
         record.bracket = rule;
@@ -947,9 +935,15 @@ impl Setups {
         }
         let log = vec![created];
         self.check_bytes(&st, &record, &log)?;
-        let view = self.view(&record, &log);
+        let mut view = self.view(&record, &log);
         self.write(&mut st, vec![(record, log)])?;
         self.sync_feeds(&mut st);
+        if unversioned {
+            view["warnings"] = json!([format!(
+                "playbook_version missing; this setup is counted as {}",
+                setups::UNVERSIONED
+            )]);
+        }
         Ok(view)
     }
 
@@ -1329,9 +1323,9 @@ impl Setups {
             .filter(|r| direction.is_none_or(|d| d == r.direction))
             .filter(|r| decision.is_none_or(|d| d == r.decision))
             .filter(|r| {
-                playbook_version
-                    .as_ref()
-                    .is_none_or(|v| r.playbook_version.as_ref() == Some(v))
+                playbook_version.as_ref().is_none_or(|v| {
+                    r.playbook_version.as_deref().unwrap_or(setups::UNVERSIONED) == v
+                })
             })
             .filter(|r| from.is_none_or(|t| r.created_at >= t))
             .filter(|r| to.is_none_or(|t| r.created_at < t))

@@ -198,8 +198,9 @@ When you make a setup you can state these too ([ADR-0064](/chartgen/decisions/00
 - `features`: what you measured, as a flat object of at most 16 short entries, for example
   `{ "example_number": 1.5, "example_flag": true }`.
 - `probability`: your own estimate, from 0 to 1, that it reaches its first target.
-- `playbook_version`: a short label for the rules you followed. Once your newest setup states
-  one, a setup without one is refused; state `none` for one that follows no playbook.
+- `playbook_version`: a short label for the rules you followed. A setup without one is
+  counted as `unversioned`; once your newest setup states one, `create_setup` warns when a new
+  one does not.
 - `skip_reason`: on a skip only, why you did not take it, as a short label such as
   `correlation-limit`, to count skips by.
 

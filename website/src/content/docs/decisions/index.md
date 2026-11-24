@@ -104,4 +104,4 @@ one and link both ways.
 | [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | The autodeploy follows a deployment until the platform finished it | Accepted | 2026-11-15 |
 | [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | get_quotes marks a quote that is not trading as stale | Accepted | 2026-11-15 |
 | [0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) | A setup records the market context it was made in | Accepted | 2026-11-15 |
-| [0079](/chartgen/decisions/0079-track-record-after-costs/) | The record says a result's sign after costs, groups by tag prefix and skip reason, and asks for a playbook version once one is used | Accepted | 2026-11-24 |
+| [0079](/chartgen/decisions/0079-track-record-after-costs/) | The record says a result's sign after costs, groups by tag prefix and skip reason, and counts a setup without a playbook version as unversioned | Accepted | 2026-11-24 |

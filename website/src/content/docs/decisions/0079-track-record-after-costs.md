@@ -1,6 +1,6 @@
 ---
-title: "0079 — The record says a result's sign after costs, groups by tag prefix and skip reason, and asks for a playbook version once one is used"
-description: "A setup's status stays as it is: won means the first target was reached. Beside it, net says whether the result after costs was a gain, a loss or even, and get_track_record counts net_gain and net_loss. get_track_record groups by tag prefixes and by a new stated field, skip_reason. An owner whose newest setup states a playbook_version is refused a setup without one."
+title: "0079 — The record says a result's sign after costs, groups by tag prefix and skip reason, and counts a setup without a playbook version as unversioned"
+description: "A setup's status stays as it is: won means the first target was reached. Beside it, net says whether the result after costs was a gain, a loss or even, and get_track_record counts net_gain and net_loss. get_track_record groups by tag prefixes and by a new stated field, skip_reason. A setup without a playbook_version is made as before, grouped and filtered as unversioned, and create_setup warns when the owner's newest setup stated one."
 sidebar:
   order: 79
 ---
@@ -8,7 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-24
 **Amends:** [ADR-0064](/chartgen/decisions/0064-a-setups-record/) (a fourth stated field,
-two more groupings, two more counts, and a rule for `playbook_version`). The statuses of
+two more groupings, two more counts, and the group of a setup without `playbook_version`). The statuses of
 [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) stay as they are.
 
 ## Context and Problem Statement
@@ -70,10 +70,12 @@ change must add fields and must not rename or remove any.
 
 ### Missing playbook version
 
-1. **Refuse a setup without `playbook_version` when the owner's newest setup states one.**
+1. Refuse a setup without `playbook_version` when the owner's newest setup states one.
 2. Make `playbook_version` required on every setup.
-3. A default, such as the owner's last version, or a fixed word.
-4. Leave it.
+3. A default stored on the setup, such as the owner's last version.
+4. **Make the setup as before, warn in the answer when the owner's newest setup stated a
+   version, and count it under an explicit `unversioned` key.**
+5. Leave it.
 
 ## Decision Outcome
 
@@ -125,20 +127,28 @@ reported. Setups that already have `features.skip_reason` keep it there, and
 `group_by: feature, feature: skip_reason` still reads them. The server does not copy those
 values into the new field, because what a setup was made with stays as it was made.
 
-### `playbook_version` once used (option 1)
+### A missing `playbook_version` (option 4)
 
-When the owner's newest setup states a `playbook_version`, `create_setup` refuses a setup
-without one. The problem is on `playbook_version`, the hint names the newest version, and
-nothing is stored. An agent that follows no playbook for a setup states a word such as `none`.
-An owner that never stated a version is not affected, and other owners' setups do not count.
+A setup without `playbook_version` is made as before, and nothing is stored in its place.
+When the owner's newest setup states a version, the `create_setup` answer carries
+**`warnings`**: `["playbook_version missing; this setup is counted as unversioned"]`. An owner
+that never stated a version gets no warning, and other owners' setups do not count.
 
-Requiring it on every setup (option 2) would break every client that does not use playbook
-versions, which the field was made optional for. A default (option 3) is a value the agent did
-not state. The owner's last version is wrong right after a bump, which is when a mistake is most
-likely, and a fixed word looks like a real version in the record. Leaving it (option 4) is what
-the client reported. The refusal catches the mistake at the one moment it can still be fixed,
-and only for an owner who uses the field. Setups that already have no version stay in the
-`null` group.
+`get_track_record` counts every setup without a version under the key **`unversioned`** with
+`group_by: playbook_version`, in place of `null`, and the filter `playbook_version:
+"unversioned"` selects them. A setup made before this decision without a version is counted
+the same way. An agent that states the word `unversioned` as its version is counted together
+with them, which is what the word says.
+
+Refusing the setup (option 1) would catch the mistake at the moment it can still be fixed. A
+live client whose call is refused may not send it again, though, and then loses the setup,
+which is worse than a setup without a version. It would also change what the client gets back
+in a way that cannot be adjusted on the client in the same step. Requiring the field on every
+setup (option 2) would break every client that does not use playbook versions, which the field
+was made optional for. A default stored on the setup (option 3) is a value the agent did not
+state. The owner's last version is wrong right after a bump, which is when a mistake is most
+likely. Leaving it (option 5) is what the client reported: the mistake goes unnoticed and the
+group reads `null`, which looks like "not grouped" rather than "made without a version".
 
 ### Consequences
 
@@ -146,14 +156,16 @@ and only for an owner who uses the field. Setups that already have no version st
   `net_loss`, without changing what `won` and the stored status mean.
 - Good: triggers or any other tag families can be compared in one call, and skips can be
   counted by why they were skipped, without using a feature slot.
-- Good: an owner that uses playbook versions cannot make a setup without one by accident.
+- Good: an owner that uses playbook versions is told at once when a setup has none, and the
+  setup is still made. The record names the group `unversioned` instead of `null`.
 - Neutral: every setup answer is about 13 bytes longer (`"net":"gain"`). The record's counts
   are two fields longer.
 - Neutral: with `group_by: tag`, group counts can add up to more than `total`. The tool
   description and the reference say so.
-- Bad: an owner whose newest setup states a version now gets an error where a setup used to be
-  stored without one. The agent has to send the call again with a version. This is the point
-  of the rule, and it is still a change of behavior for a live client.
+- Neutral: a client that read the `null` key of `group_by: playbook_version` now reads
+  `unversioned`. The other groupings keep `null`.
+- Bad: a warning can be ignored, so a setup can still be made without a version by mistake.
+  The record shows how many were.
 - Open: a skip's bracket is set around the last close of its interval, but the skip fills at
   the next 1m open. When the price has moved in between, the distances in R from the fill are
   not the 1 ATR and 2 ATR the tool describes, and a skip can be `won` from almost no move.
@@ -173,8 +185,10 @@ and only for an owner who uses the field. Setups that already have no version st
   `revise_setup`. It is in the first log entry.
 - `get_track_record` refuses `group_by: tag` without `tag_prefixes`, `tag_prefixes` without
   `group_by: tag`, an empty list, an empty prefix and a string in place of a list.
-- An owner whose newest setup states `v1` is refused a setup without a version, and the problem
-  names `v1`. `none` is accepted, and a missing version is then refused again. An owner that
-  never stated one, and another owner, are not refused.
+- An owner whose newest setup states `v1` gets a setup without a version made, with the
+  warning in the answer. The next setup without one, after that one, gets no warning. An owner
+  that never stated one, and another owner, are not warned.
+- In the record test the setup without a version is in the group `unversioned`, and the filter
+  `playbook_version: unversioned` counts it.
 - The pinned replay answers that the web types are tested against include `net`,
   `skip_reason`, `net_gain`, `net_loss` and the two new groupings.

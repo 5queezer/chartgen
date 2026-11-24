@@ -5,7 +5,7 @@ sidebar:
   order: 64
 ---
 
-**Status:** Proposed; amended by [ADR-0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) (the server adds `ctx_` features) and [ADR-0079](/chartgen/decisions/0079-track-record-after-costs/) (`skip_reason`, two more groupings, `net`, and `playbook_version` once used)
+**Status:** Proposed; amended by [ADR-0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) (the server adds `ctx_` features) and [ADR-0079](/chartgen/decisions/0079-track-record-after-costs/) (`skip_reason`, two more groupings, `net`, and the `unversioned` group)
 **Date:** 2026-11-11
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (a setup holds three
 stated fields that no tool changes after it is made, and a tool counts closed setups)
