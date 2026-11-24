@@ -31,8 +31,12 @@ per bar close. A quarter stepped at 4h closes is 540 sessions, 4.5 to 9 hours an
 $30 to $160 per run. That is right for a rule that is a thesis read from a chart. It is far too
 slow and too expensive for the part of a rule that is mechanical, such as:
 
-> RSI(14) on the 4h crosses above 70: short at the next close, stop above that bar's high,
-> target 2R, out after 24 bars.
+> RSI(14) on the 4h crosses above 70 at a bar's close: short at that close, stop above that
+> bar's high, target 2R, out after 24 bars.
+
+"At that close" is read here as "as soon as the signal bar has closed", which in 1m bars is the
+open of the next minute. A rule that waits one more bar ("short at the close of the bar after
+the signal") is the same rule with its entry one bar later; every option below can say either.
 
 ADR-0068 considered a batch `backtest_rule` tool and set it aside as "a later option, not a
 replacement": fast and deterministic, worth having for the mechanical part of a rule once one is
@@ -122,7 +126,7 @@ for t in closes("4h", window):                       # time-major: the replay cl
 ```
 
 (`get_indicators` takes indicator names with default params and returns no bar fields, so the
-script reads a `series` chart.) The entry has to be a zone; "at the next close" becomes a narrow
+script reads a `series` chart.) The entry has to be a zone; "at that close" becomes a narrow
 zone the next 1m bar usually reaches.
 
 **3. An alert condition and a bracket.**
@@ -186,6 +190,11 @@ in the library's terms, over bars the library loads.
   widened (the skip's `floor` bracket widens; whether a rule may opt into that is a question
   below).
 - **The targets** in R from the fill, **the expiry** in bars of the interval (at most 90 days).
+- **The end of the fixture.** A trade still open when the fixture's 1m bars run out has no
+  result. It is counted as `open_at_end` and listed, and is not in the closed figures, as an open
+  setup is not in a live track record. Shadow variants still open there are counted as open, as
+  `shadow_record` does. A rule whose expiry is long beside the window loses trades this way, and
+  the count says how many.
 - **Overlap:** by default one open position per rule and symbol; a signal while one is open is
   counted as `skipped_open`. Live, an owner has at most 20 open setups; the tester counts what it
   skipped instead of pretending capital was unlimited.
@@ -205,8 +214,8 @@ A run's answer holds the same figures `get_track_record` gives, computed by the 
   "rule": { "...": "as given" }, "rule_sha256": "…",
   "fixtures": { "from": "2026-08-01", "to": "2026-10-31", "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"], "sha256": "…" },
   "costs": { "fee_bps_per_side": 5.0, "slippage_bps_per_side": 2.0 },
-  "signals": 41, "traded": 32, "refused_min_risk": 3, "skipped_open": 6, "before_warmup": 0,
-  "total": { "count": 32, "won": 13, "invalidated": 16, "expired": 3, "mean_r": 0.11, "...": "as get_track_record" },
+  "signals": 41, "traded": 32, "refused_min_risk": 3, "skipped_open": 6, "before_warmup": 0, "open_at_end": 1,
+  "total": { "count": 31, "won": 13, "invalidated": 15, "expired": 3, "mean_r": 0.11, "...": "as get_track_record" },
   "groups": [ { "key": "BTCUSDT", "...": "per symbol" } ],
   "by_month": [ { "key": "2026-08", "...": "per month" } ],
   "shadows": { "...": "as get_track_record" },
@@ -237,15 +246,18 @@ leaves them out unless asked.
     ends (ADR-0055) change past values as bars arrive. They are not allowed in a rule (the ten
     alert indicators are all causal), and a new one is allowed only with a test that its value at
     every bar of a series equals its value on the series cut at that bar.
-  - *Recursive indicators:* RSI and EMA depend on how much history they were seeded with. The
-    tester reads each close over the same 999 closed bars an alert reads, so a signal is the one a
-    live alert would have fired, not a close relative of it.
+  - *Recursive indicators:* RSI and EMA depend on how much history they were seeded with. With
+    999 closed bars before each close (see the warm-up gap below), the tester reads each close
+    over the same 999 bars an alert reads, so a signal is the one a live alert would have fired,
+    not a close relative of it.
   - *The signal bar:* nothing about a bar is used before its close, and the fill is never inside
     the signal bar. A higher interval's condition reads its last closed bar.
   - *Selection:* symbols chosen because they exist and are liquid today are a survivor sample;
     the run records which symbols it was run on, and nothing hides that.
   - Option 5 has its own: a script gets the whole series and can read bar `i + 1` when it decides
-    bar `i`. Each signal must be re-run on the series cut at it, and dropped if it changes.
+    bar `i`, to emit a signal or to hold one back. So the script is re-run on the series cut at
+    every close of the window, not only at its signals, and the run is refused when any cut
+    answer for that close differs from the full-series one.
   - Unlike ADR-0068, the model's memory is not a risk: there is no model.
 - **Fees and slippage.** The live costs are applied, so a tested rule is comparable with live
   setups. They are not the market's costs: an entry exactly at a 4h close, in the minute
@@ -261,11 +273,17 @@ leaves them out unless asked.
   replay builds every interval from them, so nothing before the window exists: RSI(14) on the 4h
   has no value for its first bars and is seeded differently from live for longer, and an EMA 200
   on the 1d needs 200 days, which the 460 symbol-day bound does not allow beside a second
-  symbol. A replay already shows the agent short indicators at a window's start. The tester must
-  either read a warm-up of the rule's interval before the window (native klines, one request per
-  1000 bars, kept in the fixture beside the 1m bars) or count no signal until the indicator's
-  `warmup_bars` plus the 999-bar window are met inside it, and report `before_warmup`. The first
-  is accurate and costs a fixture format change; the second costs signals.
+  symbol. A replay already shows the agent short indicators at a window's start. Two ways out:
+  - **A lead of native bars before the window** (klines of the rule's interval, one request per
+    1000 bars, kept in the fixture beside the 1m bars): 999 bars before the first close, 166 days
+    at 4h. Signals then match a live alert's from the window's first close. It costs a fixture
+    format change and a few requests per symbol.
+  - **Warm up inside the window:** no signal until the indicator's own `warmup_bars` are met
+    there, counted as `before_warmup`. That costs the first days of each window (for RSI(14) on
+    the 4h, a few days), and the values are read over the bars there are, fewer than an alert's
+    999, so a signal near the threshold can differ from a live alert's. Waiting for the full 999
+    bars inside the window is not an option: a quarter has about 540 4h bars, so it would give no
+    signal at all.
 - **Gaps.** A missing minute stays missing (ADR-0068); a trade across a gap is marked `gap` as a
   live one is, and counted in `gaps`.
 - **Scope.** Only the mechanical part of a rule is tested. A rule that is a thesis read from a
@@ -281,7 +299,8 @@ front end:
   scores each as a `Record` over fixture 1m bars with `apply_bar`, and reports as above. It does
   not care where the signals came from.
 - **The front end** evaluates an entry rule whose `when` is the indicator condition of a server
-  alert, with the alert's own parser and 999-bar reading, at every close of the rule's interval.
+  alert, with the alert's own parser and 999-bar reading over a lead of native bars before the
+  window, at every close of the rule's interval.
   It moves out of the binary's `server_alerts` module so both use one copy.
 - **It runs as a CLI first,** `chartgen backtest --fixtures <dir> --rule rule.json`, on the
   machine that holds the fixtures (a workstation), with no server, no store and no Binance
@@ -313,7 +332,7 @@ per run). It is a good way to learn whether a tester is worth building at all.
 | 2. Script on replay | none | minutes (one chart call per symbol per close) | rule lives outside chartgen; replay limits per owner |
 | 3. Alert condition + bracket | about 3–5 days: core, front end, CLI, warm-up, tests, guide | seconds to a minute per symbol-quarter | single condition, one interval, until alert conditions grow |
 | 4. Rule language | 3 plus about 3–5 days: grammar, validation, several intervals, docs | as 3 | best done as the alerts' own AND joins |
-| 5. Starlark | 3 plus about 3–5 days: signal API, cut re-runs, limits | slower; each signal re-run on a cut series | needs scripting on, runs code a client wrote over long history |
+| 5. Starlark | 3 plus about 3–5 days: signal API, cut re-runs, limits | slower; the script re-run on the series cut at every close | needs scripting on, runs code a client wrote over long history |
 | 6. External library | none in chartgen, its own project outside | fast | not comparable with live R |
 
 The scoring cost is small: a symbol-quarter is about 130,000 1m bars, and each trade walks only
@@ -334,7 +353,7 @@ If option 3 is chosen:
 - Bad, because a fast tester invites trying many variants on one window; the overfitting guard is
   advice and a log unless the owner wants it enforced.
 - Bad, because the warm-up fix changes the fixture format (a lead of native-interval bars), or
-  the tester gives up the first signals of each window.
+  the tester gives up the first days of each window and exact parity with a live alert.
 - Neutral: the server alert's condition parser moves from the binary into the library, with its
   tests.
 
@@ -370,7 +389,7 @@ If option 3 is chosen:
 
 - Good: says anything; the runtime and `ta` module exist.
 - Bad: code a client wrote, run over months of bars; look-ahead is the script's to avoid and
-  chartgen can only catch it by re-running each signal on a cut series; scripting is opt-in and
+  chartgen can only catch it by re-running the script on the series cut at every close; scripting is opt-in and
   off by default.
 
 ### 6. An external backtest library
@@ -394,8 +413,9 @@ If option 3 is chosen:
    target in R; expiry in bars; one open position per rule and symbol?
 5. **Reporting:** the live record's figures only (recommended), or also a spread figure such as a
    bootstrap interval on mean R, which ADR-0064 declined for the live record?
-6. **Warm-up:** a lead of native-interval bars in the fixture (accurate, a format change), or no
-   signals until the warm-up is met inside the window (fewer signals)?
+6. **Warm-up:** a lead of native-interval bars in the fixture (exact parity with a live alert, a
+   format change; recommended), or a warm-up inside the window (no format change, the first days
+   lost, signals near a threshold may differ from live)?
 7. **Costs:** live costs only, or also a stressed-cost line beside them?
 8. **Overfitting and what counts:** should chartgen require a second, untouched window before a
    rule's result is shown as confirmed, and may an agent client count backtest trades toward the
@@ -408,7 +428,7 @@ If option 3 is accepted, its PR shows:
 
 - A run of the same rule on the same fixtures twice gives byte-identical answers.
 - For each allowed indicator, its value at every close equals the value the server alert reads
-  there (same parser, same 999 bars), and a fixture that differs only after a signal gives the
+  there (same parser, same 999 bars, read over the lead), and a fixture that differs only after a signal gives the
   same signals up to it.
 - A signal's fill is never inside the signal bar; a stop under the risk floor is refused and
   counted; overlap is counted.
@@ -416,4 +436,5 @@ If option 3 is accepted, its PR shows:
   (`result_r`, `mae_r`, `mfe_r`, `shadow_results`).
 - The report's `total` and `shadows` equal `track_record` and `shadow_record` over the same
   records.
+- A trade still open when the fixture ends is counted as `open_at_end` and is in no closed figure.
 - Nothing is written to a setups store.
