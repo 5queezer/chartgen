@@ -66,8 +66,37 @@ const feed = (page: Page, prices: number[]) =>
     for (const p of ps) w.__chartgenTest.feedPrice("BTCUSDT", p);
   }, prices);
 
-async function addHorizontalLine(page: Page): Promise<number> {
-  await clickAt(page, A, "right");
+/**
+ * A point of the price pane far from the last close, and the condition that holds
+ * only on the far side of a line there. The sample price moves with the clock and
+ * feed() pins it only until the next live tick, so a line at a fixed pixel can sit
+ * below the price, where "greater" fires at once.
+ */
+const awayFromPrice = (page: Page) =>
+  page.evaluate((x) => {
+    const c = (
+      window as unknown as {
+        __chartgenTest: {
+          chart(): {
+            getDataList(): { close: number }[];
+            getSize(pane: string, position: string): { height: number; top: number };
+            convertToPixel(p: object, f: object): { y?: number };
+          };
+        };
+      }
+    ).__chartgenTest.chart();
+    const bars = c.getDataList();
+    const close = bars[bars.length - 1]!.close;
+    const pane = c.getSize("candle_pane", "main");
+    const y = c.convertToPixel({ value: close }, { paneId: "candle_pane", absolute: true }).y!;
+    // The status line takes the top left of the pane; B's x stays clear of it.
+    return y < pane.top + pane.height / 2
+      ? { at: { x, y: pane.top + pane.height - 30 }, condition: "less" as const, close }
+      : { at: { x, y: pane.top + 60 }, condition: "greater" as const, close };
+  }, B.x);
+
+async function addHorizontalLine(page: Page, at = A): Promise<number> {
+  await clickAt(page, at, "right");
   const menu = page.getByRole("menu", { name: "Chart actions" });
   await menu.getByRole("menuitem", { name: /^Add horizontal line at/ }).click();
   // Alt+A only reaches the page once the menu is gone.
@@ -125,16 +154,22 @@ test.describe("drawing alerts", () => {
   });
 
   test("deleting the drawing leaves its alert inactive", async ({ bootedApp: page }) => {
-    await addHorizontalLine(page);
+    // Only an active alert is switched off by the delete: one that fired first is spent
+    // and stays triggered. So the alert must not be able to fire before the delete.
+    const { at, condition, close } = await awayFromPrice(page);
+    const level = await addHorizontalLine(page, at);
+    // Far beyond the live ticks' wobble (0.3%) on the side where the condition is false.
+    expect(condition === "less" ? close / level : level / close).toBeGreaterThan(1.01);
     await page.keyboard.press("Alt+KeyA");
     await expect(dialog(page)).toBeVisible();
     await dialog(page).getByLabel("Source").selectOption({ label: "Horizontal line" });
-    await dialog(page).getByLabel("Condition").selectOption("greater");
+    await dialog(page).getByLabel("Condition").selectOption(condition);
     await dialog(page).getByRole("button", { name: "Create" }).click();
     await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toHaveCount(1);
+    await expect(rows(page)).toHaveAttribute("data-status", "active");
 
-    await clickAt(page, A, "right");
+    await clickAt(page, at, "right");
     await drawingMenu(page).getByRole("menuitem", { name: "Remove" }).click();
     await expect.poll(async () => (await storedDrawings(page)).length).toBe(0);
     await expect(rows(page)).toHaveCount(1);
