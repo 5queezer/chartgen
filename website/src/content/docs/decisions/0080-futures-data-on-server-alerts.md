@@ -86,10 +86,12 @@ Chosen: **a**, **ii** and **y**, in `src/server_alerts/indicator.rs` and `src/se
   reading. A read that comes back after a later close's is dropped. A failed read skips the
   close and is logged, and the alert keeps the value it read before: funding moves only at a
   settlement, so its crossing shows at one close, and the next read still finds it, a close
-  late.
+  late, if the rate has not gone back across the level meanwhile. A read still out when the
+  alert is resumed or redefined is dropped.
 - **A crossing** compares the value now with the value this alert read at its previous close,
-  kept in memory. So, as for a price alert and unlike a bar-only indicator alert, the first
-  close after creating the alert or after a restart never fires a crossing. `greater` and
+  kept in memory as a price alert's baseline is, both against the level as it is now. So, as
+  for a price alert and unlike a bar-only indicator alert, the first close after creating the
+  alert, a restart, a resume, a new definition or a gap in the feed never fires a crossing. `greater` and
   `less` can fire on it.
 - **When it is made**, the server reads the symbol's last 50 bars and the series once. If the
   series has no value at the last close, the alert is refused with the reason the chart's panel

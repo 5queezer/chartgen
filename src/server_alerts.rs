@@ -1150,12 +1150,15 @@ impl ServerAlerts {
         // Read off the lock, by `read_futures_later`. The reading before is the value
         // this alert read at its close before, not the series one bar back: a bar is
         // given the settlement nearest its open, which can be the one that just came,
-        // and would hide the crossing (ADR-0080). Lost on a restart, as a price's is.
+        // and would hide the crossing (ADR-0080). It is a baseline as a price's is:
+        // lost on a restart, and started again by a resume, a new definition or a
+        // gap in the feed. Both against the level as it is now.
         if spec.reads_futures() {
             let r = given?;
             let level = spec.level?;
-            let prev = st.values.insert(id.to_string(), r.value);
-            return Some((prev.map(|v| v - level), r.d, Some(r.value)));
+            st.values.insert(id.to_string(), r.value);
+            let prev = st.baselines.insert(id.to_string(), r.value);
+            return Some((prev.map(|v| v - level), r.value - level, Some(r.value)));
         }
         let bars = st.watches.get(key)?.bars.as_ref()?;
         let end = bars.partition_point(|b| bar_time_of(b).is_some_and(|t| t <= bar_time));
@@ -2642,6 +2645,14 @@ impl ServerAlerts {
             })?;
         if redefined || active.is_some() {
             st.baselines.remove(id);
+            // A futures read still out for a close before this belongs to the alert as
+            // it was: `futures_read` drops it.
+            let last = st.watches.get(&next.feed()).and_then(|w| w.last_closed);
+            if let (Some(t), Some(_)) =
+                (last, next.indicator.as_ref().filter(|s| s.reads_futures()))
+            {
+                st.futures_bars.insert(id.to_string(), t);
+            }
         }
         let mut payload = self.view(&st, &next);
         if let Some(secret) = new_secret_text {

@@ -1407,14 +1407,16 @@ interval like any indicator alert.
   1d. Use 1h.
 - **A crossing compares with the rate this alert read at its previous close**, as a price alert
   compares with its previous price: the series one bar back can already show the new
-  settlement. So the first close after creating the alert, or after a restart, never fires a
-  crossing; `greater` and `less` can fire on it.
+  settlement. So the first close after creating the alert, after a restart, after a resume or
+  a new `condition`, `level` or `trigger`, or after a gap in the feed never fires a crossing;
+  `greater` and `less` can fire on it. A read still out when the alert is changed is dropped.
 - `compare: "close"` is refused: a close is not a rate.
 - A symbol with no futures market is refused when the alert is created, with the reason.
 - The rate is read off the alerts' lock, from Binance's funding history through the same cache
   and budget as a chart: one short read per symbol and close, shared by every alert and chart
   on it. If that read fails, the close is skipped and the alert keeps the value it read before,
-  so the next close still sees a crossing, a close late.
+  so the next close still sees a crossing, a close late, if the rate is still across the level
+  then; a rate that crossed and came back between two reads is missed.
 
 #### An alert at a bar's close
 

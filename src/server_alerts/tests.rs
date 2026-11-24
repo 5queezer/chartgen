@@ -5146,3 +5146,88 @@ async fn a_failed_funding_read_keeps_the_value_before_it() {
     a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 70.0)));
     until("the late fire", || a.lock().alerts[&id].fire_count == 1).await;
 }
+
+/// Server alerts on `symbol`'s 1h feed with 100 closes of 50, a funding alert on it,
+/// and the time of the last close.
+async fn funding_alert(
+    name: &str,
+    symbol: &str,
+    args: Value,
+) -> (Arc<ServerAlerts>, FeedKey, String, i64) {
+    let (store, _) = store_at(name);
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let id = create(&a, args, "me").await;
+    let k = (symbol.to_string(), "1h".to_string());
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    (a, k, id, t)
+}
+
+/// A new definition starts a new baseline, as for a price alert: the value read before
+/// it is not compared with the first one after it. (A resume does too, by the same
+/// path; a pause also lets go of the feed, which this fake cannot read again.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redefined_funding_alert_starts_from_a_new_reading() {
+    let (a, k, id, t) = funding_alert(
+        "funding-redefine",
+        "BTCUSDT",
+        on_funding("BTCUSDT", "crossing_up", 0.06),
+    )
+    .await;
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 55.0)));
+    until("the first read", || a.lock().values.contains_key(&id)).await;
+    let args = json!({"alert_id": id, "level": 0.065});
+    call(&a, "update_server_alert", args, "me").await.unwrap();
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    until("the read after", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + 2 * HOUR))
+    })
+    .await;
+    assert_eq!(
+        a.lock().alerts[&id].fire_count,
+        0,
+        "a baseline, not a crossing"
+    );
+    a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 50.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(t + 4 * HOUR, 70.0)));
+    until("a crossing after it", || {
+        a.lock().alerts[&id].fire_count == 1
+    })
+    .await;
+}
+
+/// A read still out when the alert is paused and resumed, or redefined, belongs to the
+/// alert as it was: it is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_from_before_an_update_is_dropped() {
+    let (a, k, id, t) = funding_alert(
+        "funding-stale",
+        "SLOWUSDT",
+        on_funding("SLOWUSDT", "greater", 0.06),
+    )
+    .await;
+    // A 400 ms read of 0.07% starts; the level moves to 0.08 before it is back.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 70.0)));
+    let args = json!({"alert_id": id, "level": 0.08});
+    call(&a, "update_server_alert", args, "me").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 0, "0.07 is not above 0.08");
+    assert!(
+        !a.lock().values.contains_key(&id),
+        "the old read was dropped"
+    );
+}
