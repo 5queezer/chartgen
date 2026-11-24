@@ -50,6 +50,10 @@ export interface CreateServerAlertInput {
    */
   evaluate_on?: "live" | "close";
   /**
+   * When the alert stops, as unix seconds, unix ms or an ISO 8601 time, in the future and at most a year ahead: no price or close after it fires it, and within a minute it is switched off (active: false) and deleted 7 days later. Default: no end.
+   */
+  expires_at?: number | string;
+  /**
    * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. Fixed after creation.
    */
   indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
@@ -917,6 +921,10 @@ export interface UpdateServerAlertInput {
    * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's. bar_close: a bar of the interval closed, whatever the price; it needs an interval of 1h or longer, takes no level, indicator or compare, and an alert cannot change into or out of it.
    */
   condition?: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less" | "bar_close";
+  /**
+   * A new end, in the future, or an empty string for none. It does not switch on an alert that has expired: send active: true with it.
+   */
+  expires_at?: number | string;
   /**
    * The price level, greater than 0, or an indicator alert's level, any number. Not on an alert with compare: close or condition: bar_close.
    */

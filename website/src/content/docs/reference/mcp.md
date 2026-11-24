@@ -1267,9 +1267,9 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
-| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; a new `webhook_secret`, once, with `sign: true` |
+| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
 | `subscribe_push` | `endpoint`, `p256dh`, `auth` | `{devices}`: registers this browser's push subscription |
 | `unsubscribe_push` | `endpoint` | `{removed, devices}` |
@@ -1294,6 +1294,13 @@ what your client may do.
   and a new URL drops the signing secret unless `sign: true` is sent with it. `sign: false` stops
   signing. Symbol, interval and `evaluate_on` cannot change, nor can an indicator alert's
   `indicator`, `params`, `line` and `compare`.
+- `expires_at`: when the alert stops, as unix seconds, unix ms or an ISO 8601 time, ahead of
+  now and at most a year out. No price or close after it fires the alert, its feed is let go,
+  and within a minute it is switched off (`active: false`), then deleted 7 days later like a
+  spent alert. Without it an alert has no end. `update_server_alert` sets a new one, or takes
+  it off with `""`; an alert that has expired resumes only with `active: true` and a later
+  `expires_at` (or `""`), and a new `condition`, `level` or `trigger` is refused on it until
+  then. A build from before this field runs such an alert with no end.
 
 An alert in a list:
 
@@ -1325,7 +1332,7 @@ Times are unix milliseconds. `webhook` shows the host only, never the URL or the
 An alert that [wakes your agent](#waking-your-agent) also has `"notify_agent": true`, and
 `"setup_id"` if it is about a setup; other alerts have neither field.
 An [indicator alert](#indicator-alerts-on-the-server) also has `"indicator"`, and its `level` is
-`null` when it compares the close with the line.
+`null` when it compares the close with the line. An alert with an end has `"expires_at"`.
 `feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
