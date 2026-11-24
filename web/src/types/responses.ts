@@ -979,6 +979,9 @@ export const SetupSchema = SetupLevelsSchema.extend({
   // In R. Null while the setup is open, and for one that expired filled while nobody
   // scored it (`gap` is then true): no price was read, so none is invented.
   result_r: z.number().nullable(),
+  // result_r's sign after costs (ADR-0079): `won` says the first target was reached, and
+  // a target nearer than the costs is still a loss. Null while result_r is.
+  net: z.enum(["gain", "loss", "even"]).nullable(),
   // Open time of the newest 1m bar applied, ms.
   scored_through: z.number().nullable(),
   // True when the server missed bars it could not read afterwards: the result does not
@@ -1023,6 +1026,9 @@ export const SetupSchema = SetupLevelsSchema.extend({
   features: z.record(z.string(), z.union([z.number(), z.boolean(), z.string()])).optional(),
   probability: z.number().min(0).max(1).optional(),
   playbook_version: z.string().optional(),
+  // A skip's reason as a short label, stated with the others (ADR-0079). Absent when not
+  // stated, and always on a take.
+  skip_reason: z.string().optional(),
   // A stock setup only (ADR-0070): its market, its newest 1m close scored (where it ends
   // when its expiry falls in a stretch with no bar) and the splits and dividends applied.
   // Absent on a Binance setup.
@@ -1098,6 +1104,9 @@ const TrackRecordCountsSchema = z.object({
   total_r: z.number(),
   /** Over `with_result`; null when that is 0. A setup that never traded is in it with 0 R. */
   mean_r: z.number().nullable(),
+  /** Results above and below 0 R after costs: a `won` with a target nearer than the costs is a loss (ADR-0079). */
+  net_gain: z.number().int(),
+  net_loss: z.number().int(),
   /** Setups whose entry was reached, and the mean over those of them with a result. */
   entered: z.number().int(),
   mean_r_entered: z.number().nullable(),
@@ -1140,8 +1149,12 @@ export const TrackRecordPayloadSchema = z.object({
   open: z.number().int(),
   /** True when older closed setups were left out. */
   truncated: z.boolean(),
-  group_by: z.enum(["playbook_version", "feature", "probability", "symbol", "direction"]).nullable(),
+  group_by: z
+    .enum(["playbook_version", "feature", "probability", "symbol", "direction", "tag", "skip_reason"])
+    .nullable(),
   feature: z.string().nullable(),
+  /** With group_by tag: the prefixes as sent. A setup is in each one's group that one of its tags starts with, so groups can overlap. */
+  tag_prefixes: z.array(z.string()).nullable(),
   total: TrackRecordCountsSchema,
   /** In the order of the keys; null is the group of setups that stated none. */
   groups: z.array(

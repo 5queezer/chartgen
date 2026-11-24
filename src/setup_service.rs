@@ -837,6 +837,29 @@ impl Setups {
             problems.extend(stocks::calendar_problem(market, levels.expires_at));
         }
         let requests = self.drawing_requests(args, now, &mut problems);
+        // An owner whose newest setup states a playbook version states one on each
+        // (ADR-0079): a setup without one cannot be told apart in its record later, and
+        // a default would be the server's guess.
+        if draft.as_ref().is_some_and(|d| d.playbook_version.is_none()) {
+            let st = self.lock();
+            let newest = st
+                .setups
+                .values()
+                .map(|h| &h.record)
+                .filter(|r| r.owner == owner)
+                .max_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+            if let Some(version) = newest.and_then(|r| r.playbook_version.as_ref()) {
+                problems.push(
+                    Problem::new(
+                        "playbook_version",
+                        "your newest setup states a playbook_version, and this one states none",
+                    )
+                    .hint(format!(
+                        "state the version this setup follows, such as {version:?}, or a word such as none"
+                    )),
+                );
+            }
+        }
         let (Some(draft), Some(symbol), true) = (draft, symbol, problems.is_empty()) else {
             return Err(setups::problems_text(&problems));
         };
@@ -1160,7 +1183,7 @@ impl Setups {
     /// The caller's closed setups, counted: in all, and grouped by one thing they were
     /// made with (ADR-0064). It reports counts and sums and judges nothing.
     fn track_record(&self, args: &Value, owner: &str, now: i64) -> Result<Value, String> {
-        const FIELDS: [&str; 9] = [
+        const FIELDS: [&str; 10] = [
             "symbol",
             "direction",
             "decision",
@@ -1169,6 +1192,7 @@ impl Setups {
             "to",
             "group_by",
             "feature",
+            "tag_prefixes",
             "as_of",
         ];
         let given = |field: &str| args.get(field).filter(|v| !v.is_null());
@@ -1223,6 +1247,42 @@ impl Setups {
                 .transpose()
         };
         let (from, to) = (time("from")?, time("to")?);
+        let tag_prefixes = match given("tag_prefixes") {
+            None => None,
+            Some(v) => {
+                let problem = || {
+                    read_problem(
+                        "tag_prefixes",
+                        format!(
+                            "tag_prefixes must be a list of 1 to {} strings of 1 to {} characters",
+                            setups::MAX_TAGS,
+                            setups::MAX_TAG
+                        ),
+                    )
+                };
+                let list = v
+                    .as_array()
+                    .filter(|l| (1..=setups::MAX_TAGS).contains(&l.len()));
+                let mut prefixes: Vec<String> = Vec::new();
+                for item in list.ok_or_else(problem)? {
+                    match item.as_str() {
+                        Some(p) if (1..=setups::MAX_TAG).contains(&p.chars().count()) => {
+                            if !prefixes.iter().any(|q| q == p) {
+                                prefixes.push(p.to_string());
+                            }
+                        }
+                        _ => return Err(problem()),
+                    }
+                }
+                if given("group_by").and_then(Value::as_str) != Some("tag") {
+                    return Err(read_problem(
+                        "tag_prefixes",
+                        "tag_prefixes needs group_by: tag",
+                    ));
+                }
+                Some(prefixes)
+            }
+        };
         let group_by =
             match (given("group_by").map(Value::as_str), feature) {
                 (None, None) => None,
@@ -1243,9 +1303,19 @@ impl Setups {
                 (Some(Some("probability")), None) => Some(setups::GroupBy::Probability),
                 (Some(Some("symbol")), None) => Some(setups::GroupBy::Symbol),
                 (Some(Some("direction")), None) => Some(setups::GroupBy::Direction),
+                (Some(Some("skip_reason")), None) => Some(setups::GroupBy::SkipReason),
+                (Some(Some("tag")), None) => match tag_prefixes {
+                    Some(prefixes) => Some(setups::GroupBy::Tag(prefixes)),
+                    None => {
+                        return Err(read_problem(
+                            "tag_prefixes",
+                            "group_by: tag needs tag_prefixes, the starts of the tags to count by",
+                        ))
+                    }
+                },
                 (Some(_), None) => return Err(read_problem(
                     "group_by",
-                    "group_by must be playbook_version, feature, probability, symbol or direction",
+                    "group_by must be playbook_version, feature, probability, symbol, direction, tag or skip_reason",
                 )),
             };
 
@@ -1281,6 +1351,7 @@ impl Setups {
             "truncated": truncated,
             "group_by": given("group_by"),
             "feature": given("feature"),
+            "tag_prefixes": given("tag_prefixes"),
             "total": total,
             "groups": groups,
             "shadows": setups::shadow_record(&mine),

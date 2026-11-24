@@ -153,13 +153,17 @@ export interface CreateSetupInput {
    */
   invalidation?: number;
   /**
-   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. Fixed once the setup is made.
+   * Optional until you use it: a label of at most 32 characters for the rules you followed, so that results can be told apart by it. Once your newest setup states one, a setup without one is refused; state none if it follows no playbook. Fixed once the setup is made.
    */
   playbook_version?: string;
   /**
    * Optional. Your own estimate, from 0 to 1, that this setup reaches its first target. Fixed once the setup is made; get_track_record shows it beside what happened.
    */
   probability?: number;
+  /**
+   * Optional, with decision: skip only. Why you did not take it, as a short label of at most 32 characters such as correlation-limit, to group skips by with get_track_record. The why in words goes in the thesis. Fixed once the setup is made.
+   */
+  skip_reason?: string;
   /**
    * A Binance symbol, e.g. BTCUSDT, or a stock or ETF listed in the US (Nasdaq, NYSE, NYSE American, NYSE Arca or Cboe BZX), e.g. NVDA or SPY. An index such as ^GSPC cannot be traded: use an ETF that tracks it, such as SPY.
    */
@@ -572,9 +576,9 @@ export interface GetTrackRecordInput {
    */
   from?: number | string;
   /**
-   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). A setup that stated none is in the group whose key is null. More than 50 groups are refused.
+   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated none, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
    */
-  group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction";
+  group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction" | "tag" | "skip_reason";
   /**
    * Only setups made with this playbook_version.
    */
@@ -583,6 +587,23 @@ export interface GetTrackRecordInput {
    * Only setups on this symbol.
    */
   symbol?: string;
+  /**
+   * With group_by: tag, the starts of the tags to count by, each a group, such as ["trigger:alert", "trigger:scan"]. A whole tag is a prefix of itself.
+   *
+   * @minItems 1
+   * @maxItems 10
+   */
+  tag_prefixes?:
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string];
   /**
    * Only setups made before this time, as unix seconds, unix ms or an ISO 8601 time.
    */

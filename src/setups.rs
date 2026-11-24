@@ -40,7 +40,7 @@ const TAG_HINT: &str = "lowercase letters, digits and : - _ . /, starting with a
 pub const MAX_FEATURES: usize = 16;
 pub const MAX_STATED_TEXT: usize = 32;
 /// Fields taken when a setup is made and by no tool afterwards.
-pub const STATED_FIELDS: [&str; 3] = ["features", "probability", "playbook_version"];
+pub const STATED_FIELDS: [&str; 4] = ["features", "probability", "playbook_version", "skip_reason"];
 /// Features whose names start with this are the server's (ADR-0077): an agent may not
 /// state one.
 pub const CONTEXT_PREFIX: &str = "ctx_";
@@ -265,6 +265,10 @@ pub struct Record {
     pub probability: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playbook_version: Option<String>,
+    /// Why a skip was not taken, in the agent's words, to group by (ADR-0079). Stated
+    /// with the others, on a skip only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     /// A stock setup's market (ADR-0070); not written for a Binance setup, which trades
     /// around the clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1056,6 +1060,7 @@ pub struct Draft {
     pub features: Option<Map<String, Value>>,
     pub probability: Option<f64>,
     pub playbook_version: Option<String>,
+    pub skip_reason: Option<String>,
 }
 
 /// The features of a call: a flat object of numbers, booleans and short strings under
@@ -1121,7 +1126,7 @@ fn probability(args: &Value, problems: &mut Vec<Problem>) -> Option<f64> {
     stated
 }
 
-pub const CREATE_FIELDS: [&str; 15] = [
+pub const CREATE_FIELDS: [&str; 16] = [
     "symbol",
     "interval",
     "direction",
@@ -1137,6 +1142,7 @@ pub const CREATE_FIELDS: [&str; 15] = [
     "features",
     "probability",
     "playbook_version",
+    "skip_reason",
 ];
 
 impl Draft {
@@ -1194,6 +1200,18 @@ impl Draft {
             None | Some(Value::Null) => None,
             Some(_) => text(args, "playbook_version", MAX_STATED_TEXT, problems),
         };
+        let skip_reason = match args.get("skip_reason") {
+            None | Some(Value::Null) => None,
+            Some(_) if decision == Some(Decision::Take) => {
+                problems.push(
+                    Problem::new("skip_reason", "a take has no skip_reason").hint(
+                        "skip_reason says why a skip was not taken; a take's why is its thesis",
+                    ),
+                );
+                None
+            }
+            Some(_) => text(args, "skip_reason", MAX_STATED_TEXT, problems),
+        };
         if problems.len() > before {
             return None;
         }
@@ -1208,6 +1226,7 @@ impl Draft {
             features,
             probability,
             playbook_version,
+            skip_reason,
         })
     }
 }
@@ -1278,6 +1297,7 @@ impl Record {
             features: draft.features,
             probability: draft.probability,
             playbook_version: draft.playbook_version,
+            skip_reason: draft.skip_reason,
             market: None,
             last_close: None,
             adjustments: Vec::new(),
@@ -1290,6 +1310,7 @@ impl Record {
             ("features", json!(record.features)),
             ("probability", json!(record.probability)),
             ("playbook_version", json!(record.playbook_version)),
+            ("skip_reason", json!(record.skip_reason)),
         ] {
             if !value.is_null() {
                 stated.insert(field.to_string(), json!({ "to": value }));
@@ -1333,6 +1354,9 @@ impl Record {
         self.features = stated("features").and_then(Value::as_object).cloned();
         self.probability = stated("probability").and_then(Value::as_f64);
         self.playbook_version = stated("playbook_version")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.skip_reason = stated("skip_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
     }
@@ -2269,8 +2293,20 @@ impl Record {
             if let Ok(Value::Object(durations)) = serde_json::to_value(self.durations()) {
                 map.extend(durations);
             }
+            map.insert("net".into(), json!(self.net()));
         }
         v
+    }
+
+    /// The result after costs as a word (ADR-0079): `won` says the first target was
+    /// reached, and a target nearer than the costs is still a loss. None without a
+    /// result.
+    pub fn net(&self) -> Option<&'static str> {
+        self.result_r.map(|r| match r {
+            r if r > 0.0 => "gain",
+            r if r < 0.0 => "loss",
+            _ => "even",
+        })
     }
 }
 
@@ -2284,16 +2320,33 @@ pub enum GroupBy {
     Probability,
     Symbol,
     Direction,
+    /// Each of these prefixes is a group, holding the setups with a tag that starts
+    /// with it; a setup can be in several (ADR-0079).
+    Tag(Vec<String>),
+    SkipReason,
 }
 
 /// Groups one answer holds. More is not a grouping but a list, and is refused.
 pub const MAX_RECORD_GROUPS: usize = 50;
 
 impl Record {
-    /// The value this setup is grouped under; null where it stated none. A number is
+    /// The values this setup is grouped under: one, null where it stated none, and for
+    /// tag prefixes each that one of its tags starts with, or null for none. A number is
     /// written as a decimal, so that 1 and 1.0 are one group and read as `1.0`.
-    fn group_key(&self, by: &GroupBy) -> Value {
+    fn group_keys(&self, by: &GroupBy) -> Vec<Value> {
         let key = match by {
+            GroupBy::Tag(prefixes) => {
+                let keys: Vec<Value> = prefixes
+                    .iter()
+                    .filter(|p| self.tags.iter().any(|t| t.starts_with(p.as_str())))
+                    .map(|p| json!(p))
+                    .collect();
+                return match keys.is_empty() {
+                    true => vec![Value::Null],
+                    false => keys,
+                };
+            }
+            GroupBy::SkipReason => json!(self.skip_reason),
             GroupBy::PlaybookVersion => json!(self.playbook_version),
             GroupBy::Feature(name) => self
                 .features
@@ -2307,10 +2360,10 @@ impl Record {
             GroupBy::Symbol => json!(self.symbol),
             GroupBy::Direction => json!(self.direction),
         };
-        match key.as_f64() {
+        vec![match key.as_f64() {
             Some(number) => json!(number),
             None => key,
-        }
+        }]
     }
 }
 
@@ -2325,6 +2378,9 @@ struct Tally {
     cancelled: u32,
     with_result: u32,
     total_r: f64,
+    /// Results above and below 0 R, after costs (ADR-0079).
+    net_gain: u32,
+    net_loss: u32,
     /// Setups whose entry was reached, and the results of those.
     entered: u32,
     entered_with_result: u32,
@@ -2342,6 +2398,11 @@ struct Tally {
 impl Tally {
     fn add(&mut self, r: &Record) {
         self.count += 1;
+        match r.net() {
+            Some("gain") => self.net_gain += 1,
+            Some("loss") => self.net_loss += 1,
+            _ => {}
+        }
         match r.status {
             Status::Won => self.won += 1,
             Status::Invalidated => self.invalidated += 1,
@@ -2385,6 +2446,8 @@ impl Tally {
             "with_result": self.with_result,
             "total_r": self.total_r,
             "mean_r": per(self.total_r, self.with_result),
+            "net_gain": self.net_gain,
+            "net_loss": self.net_loss,
             "entered": self.entered,
             "mean_r_entered": per(self.entered_r, self.entered_with_result),
             "gaps": self.gaps,
@@ -2431,20 +2494,21 @@ pub fn track_record(
     for record in closed {
         total.add(record);
         let Some(by) = by else { continue };
-        let key = record.group_key(by);
-        let at = match groups.iter().position(|(k, _)| *k == key) {
-            Some(at) => at,
-            None => {
-                if groups.len() == MAX_RECORD_GROUPS {
-                    return Err(format!(
-                        "this grouping gives more than {MAX_RECORD_GROUPS} groups; group by something that takes fewer values"
-                    ));
+        for key in record.group_keys(by) {
+            let at = match groups.iter().position(|(k, _)| *k == key) {
+                Some(at) => at,
+                None => {
+                    if groups.len() == MAX_RECORD_GROUPS {
+                        return Err(format!(
+                            "this grouping gives more than {MAX_RECORD_GROUPS} groups; group by something that takes fewer values"
+                        ));
+                    }
+                    groups.push((key, Tally::default()));
+                    groups.len() - 1
                 }
-                groups.push((key, Tally::default()));
-                groups.len() - 1
-            }
-        };
-        groups[at].1.add(record);
+            };
+            groups[at].1.add(record);
+        }
     }
     groups.sort_by(|a, b| key_order(&a.0, &b.0));
     let groups = groups

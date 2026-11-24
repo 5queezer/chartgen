@@ -65,6 +65,7 @@
     "mae_r": null,
     "mfe_at": null,
     "mfe_r": null,
+    "net": null,
     "pending": [],
     "playbook_version": "v1",
     "probability": 0.6,
@@ -116,6 +117,7 @@
         "with_result": 2
       }
     },
+    "tag_prefixes": null,
     "total": {
       "cancelled": 0,
       "count": 2,
@@ -125,6 +127,239 @@
       "invalidated": 1,
       "mean_r": 0.3056,
       "mean_r_entered": 0.3056,
+      "net_gain": 1,
+      "net_loss": 1,
+      "probability": {
+        "mean": 0.5,
+        "observed": 0.5,
+        "observed_entered": 0.5,
+        "stated": 2,
+        "stated_entered": 2,
+        "won": 1,
+        "won_entered": 1
+      },
+      "total_r": 0.6112,
+      "with_result": 2,
+      "won": 1
+    },
+    "truncated": false
+  },
+  "get_track_record_by_skip_reason": {
+    "closed": 2,
+    "feature": null,
+    "group_by": "skip_reason",
+    "groups": [
+      {
+        "cancelled": 0,
+        "count": 1,
+        "entered": 1,
+        "expired": 0,
+        "gaps": 0,
+        "invalidated": 1,
+        "key": null,
+        "mean_r": -1.1547,
+        "mean_r_entered": -1.1547,
+        "net_gain": 0,
+        "net_loss": 1,
+        "probability": {
+          "mean": 0.6,
+          "observed": 0.0,
+          "observed_entered": 0.0,
+          "stated": 1,
+          "stated_entered": 1,
+          "won": 0,
+          "won_entered": 0
+        },
+        "total_r": -1.1547,
+        "with_result": 1,
+        "won": 0
+      },
+      {
+        "cancelled": 0,
+        "count": 1,
+        "entered": 1,
+        "expired": 0,
+        "gaps": 0,
+        "invalidated": 0,
+        "key": "example-reason",
+        "mean_r": 1.7659,
+        "mean_r_entered": 1.7659,
+        "net_gain": 1,
+        "net_loss": 0,
+        "probability": {
+          "mean": 0.4,
+          "observed": 1.0,
+          "observed_entered": 1.0,
+          "stated": 1,
+          "stated_entered": 1,
+          "won": 1,
+          "won_entered": 1
+        },
+        "total_r": 1.7659,
+        "with_result": 1,
+        "won": 1
+      }
+    ],
+    "open": 0,
+    "replay": true,
+    "shadows": {
+      "v1_half_t1_be": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 1.05295,
+        "open": 0,
+        "total_r": 2.1059,
+        "with_result": 2
+      },
+      "v2_be_at_1r": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      },
+      "v3_time_stop": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      }
+    },
+    "tag_prefixes": null,
+    "total": {
+      "cancelled": 0,
+      "count": 2,
+      "entered": 2,
+      "expired": 0,
+      "gaps": 0,
+      "invalidated": 1,
+      "mean_r": 0.3056,
+      "mean_r_entered": 0.3056,
+      "net_gain": 1,
+      "net_loss": 1,
+      "probability": {
+        "mean": 0.5,
+        "observed": 0.5,
+        "observed_entered": 0.5,
+        "stated": 2,
+        "stated_entered": 2,
+        "won": 1,
+        "won_entered": 1
+      },
+      "total_r": 0.6112,
+      "with_result": 2,
+      "won": 1
+    },
+    "truncated": false
+  },
+  "get_track_record_by_tag": {
+    "closed": 2,
+    "feature": null,
+    "group_by": "tag",
+    "groups": [
+      {
+        "cancelled": 0,
+        "count": 1,
+        "entered": 1,
+        "expired": 0,
+        "gaps": 0,
+        "invalidated": 1,
+        "key": null,
+        "mean_r": -1.1547,
+        "mean_r_entered": -1.1547,
+        "net_gain": 0,
+        "net_loss": 1,
+        "probability": {
+          "mean": 0.6,
+          "observed": 0.0,
+          "observed_entered": 0.0,
+          "stated": 1,
+          "stated_entered": 1,
+          "won": 0,
+          "won_entered": 0
+        },
+        "total_r": -1.1547,
+        "with_result": 1,
+        "won": 0
+      },
+      {
+        "cancelled": 0,
+        "count": 1,
+        "entered": 1,
+        "expired": 0,
+        "gaps": 0,
+        "invalidated": 0,
+        "key": "trigger:example-b",
+        "mean_r": 1.7659,
+        "mean_r_entered": 1.7659,
+        "net_gain": 1,
+        "net_loss": 0,
+        "probability": {
+          "mean": 0.4,
+          "observed": 1.0,
+          "observed_entered": 1.0,
+          "stated": 1,
+          "stated_entered": 1,
+          "won": 1,
+          "won_entered": 1
+        },
+        "total_r": 1.7659,
+        "with_result": 1,
+        "won": 1
+      }
+    ],
+    "open": 0,
+    "replay": true,
+    "shadows": {
+      "v1_half_t1_be": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 1.05295,
+        "open": 0,
+        "total_r": 2.1059,
+        "with_result": 2
+      },
+      "v2_be_at_1r": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      },
+      "v3_time_stop": {
+        "canonical_mean_r": 0.3056,
+        "canonical_total_r": 0.6112,
+        "closed": 2,
+        "mean_r": 0.3056,
+        "open": 0,
+        "total_r": 0.6112,
+        "with_result": 2
+      }
+    },
+    "tag_prefixes": [
+      "trigger:example-a",
+      "trigger:example-b"
+    ],
+    "total": {
+      "cancelled": 0,
+      "count": 2,
+      "entered": 2,
+      "expired": 0,
+      "gaps": 0,
+      "invalidated": 1,
+      "mean_r": 0.3056,
+      "mean_r_entered": 0.3056,
+      "net_gain": 1,
+      "net_loss": 1,
       "probability": {
         "mean": 0.5,
         "observed": 0.5,
@@ -155,6 +390,8 @@
         "key": null,
         "mean_r": 1.7659,
         "mean_r_entered": 1.7659,
+        "net_gain": 1,
+        "net_loss": 0,
         "probability": {
           "mean": 0.4,
           "observed": 1.0,
@@ -178,6 +415,8 @@
         "key": true,
         "mean_r": -1.1547,
         "mean_r_entered": -1.1547,
+        "net_gain": 0,
+        "net_loss": 1,
         "probability": {
           "mean": 0.6,
           "observed": 0.0,
@@ -223,6 +462,7 @@
         "with_result": 2
       }
     },
+    "tag_prefixes": null,
     "total": {
       "cancelled": 0,
       "count": 2,
@@ -232,6 +472,8 @@
       "invalidated": 1,
       "mean_r": 0.3056,
       "mean_r_entered": 0.3056,
+      "net_gain": 1,
+      "net_loss": 1,
       "probability": {
         "mean": 0.5,
         "observed": 0.5,

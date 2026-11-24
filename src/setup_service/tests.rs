@@ -2644,8 +2644,8 @@ async fn the_servers_features_leave_the_agent_all_sixteen() {
 async fn what_a_setup_was_made_with_is_read_from_its_log_at_start() {
     let (store, dir) = store_at("restated");
     let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
-    let made = call(&s, "create_setup", stated(), "owner").unwrap();
     let plain = created(&s, "owner");
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
     drop(s);
 
     let rewrite = |change: &dyn Fn(&mut Value)| {
@@ -2690,6 +2690,103 @@ async fn what_a_setup_was_made_with_is_read_from_its_log_at_start() {
     assert_eq!(read(&made["id"]), made);
     // A setup made without them still has none.
     assert_eq!(read(&plain["id"]), plain);
+}
+
+/// An owner whose newest setup states a playbook version is refused a setup without
+/// one, and told how to state it (ADR-0079). One that never stated one is not, and
+/// another owner's setups do not count.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_playbook_version_once_used_is_stated_on_every_setup() {
+    let s = live();
+    created(&s, "plain");
+    created(&s, "plain");
+    call(&s, "create_setup", stated(), "owner").unwrap();
+    created(&s, "someone-else");
+    let refused = call(&s, "create_setup", long(), "owner").unwrap_err();
+    assert_eq!(errors(&refused), ["playbook_version"], "{refused}");
+    assert!(
+        refused.contains(r#"\"v1\""#),
+        "names the version: {refused}"
+    );
+    let none = with(long(), json!({ "playbook_version": "none" }));
+    call(&s, "create_setup", none, "owner").unwrap();
+    // The newest counts: after one that states it, a missing one is refused again.
+    assert!(call(&s, "create_setup", long(), "owner").is_err());
+}
+
+/// `skip_reason` is stated on a skip, fixed like the others, and refused on a take.
+/// The track record groups by it, and by tag prefixes, where a setup counts in each
+/// prefix one of its tags starts with (ADR-0079).
+#[tokio::test(flavor = "multi_thread")]
+async fn skips_say_why_and_the_record_groups_by_it_and_by_tag_prefix() {
+    let s = live();
+    let skip = |reason: Option<&str>, tags: Value| {
+        let mut args = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+            "decision": "skip", "thesis": "example thesis", "tags": tags });
+        if let Some(reason) = reason {
+            args["skip_reason"] = json!(reason);
+        }
+        call(&s, "create_setup", args, "owner").unwrap()
+    };
+    let made = skip(
+        Some("example-limit"),
+        json!(["trigger:alert-a", "trigger:scan-b"]),
+    );
+    assert_eq!(made["skip_reason"], "example-limit");
+    assert_eq!(
+        made["log"][0]["changes"]["skip_reason"]["to"],
+        "example-limit"
+    );
+    skip(Some("example-limit"), json!(["trigger:alert-c"]));
+    skip(None, json!(["other:x"]));
+    let take = with(long(), json!({ "skip_reason": "example-limit" }));
+    let refused = call(&s, "create_setup", take, "owner").unwrap_err();
+    assert_eq!(errors(&refused), ["skip_reason"], "{refused}");
+    let long_reason = "x".repeat(setups::MAX_STATED_TEXT + 1);
+    assert!(skip_refused(&s, &long_reason));
+    let revised = call(
+        &s,
+        "revise_setup",
+        json!({ "id": made["id"], "reason": "r", "skip_reason": "other" }),
+        "owner",
+    )
+    .unwrap_err();
+    assert_eq!(errors(&revised), ["skip_reason"], "{revised}");
+
+    // Closed by hand, as the bars would.
+    for held in s.lock().setups.values_mut() {
+        held.record.status = Status::Expired;
+        held.record.result_r = Some(0.0);
+    }
+    let record = |args: Value| call(&s, "get_track_record", args, "owner").unwrap();
+    let by_reason = record(json!({ "group_by": "skip_reason" }));
+    assert_eq!(keys(&by_reason), [json!(null), json!("example-limit")]);
+    assert_eq!(by_reason["groups"][1]["count"], 2);
+    let by_tag = record(json!({ "group_by": "tag",
+        "tag_prefixes": ["trigger:scan", "trigger:alert", "trigger:alert"] }));
+    assert_eq!(
+        by_tag["tag_prefixes"],
+        json!(["trigger:scan", "trigger:alert", "trigger:alert"])
+    );
+    assert_eq!(
+        keys(&by_tag),
+        [json!(null), json!("trigger:alert"), json!("trigger:scan")]
+    );
+    let counts: Vec<Value> = by_tag["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["count"].clone())
+        .collect();
+    // The first skip is in both trigger groups, so they add up to more than total.
+    assert_eq!(counts, [json!(1), json!(2), json!(1)]);
+    assert_eq!(by_tag["total"]["count"], 3);
+}
+
+fn skip_refused(s: &Setups, reason: &str) -> bool {
+    let args = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+        "decision": "skip", "thesis": "example thesis", "skip_reason": reason });
+    call(s, "create_setup", args, "owner").is_err()
 }
 
 /// A setup that the bars fill and then take to its target, or through its
@@ -2746,15 +2843,16 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
     );
     assert!(nothing["total"]["probability"]["observed"].is_null());
 
+    let c = closed(&s, long(), "owner", true);
     let a = closed(&s, stated(), "owner", true);
     let b_args = with(
         long(),
         json!({ "features": { "example_flag": false }, "probability": 0.25, "playbook_version": "v1" }),
     );
     let b = closed(&s, b_args, "owner", false);
-    let c = closed(&s, long(), "owner", true);
     closed(&s, stated(), "someone-else", true);
-    created(&s, "owner");
+    let open = with(long(), json!({ "playbook_version": "v1" }));
+    call(&s, "create_setup", open, "owner").unwrap();
 
     let r = |v: &Value| v["result_r"].as_f64().unwrap();
     let sum = r(&a) + r(&b) + r(&c);
@@ -2785,6 +2883,15 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
     );
     assert!((total["total_r"].as_f64().unwrap() - sum).abs() < 1e-9);
     assert!((total["mean_r"].as_f64().unwrap() - sum / 3.0).abs() < 1e-9);
+    // Two reached their target 5 % away and one its invalidation: after costs too.
+    assert_eq!(
+        (total["net_gain"].clone(), total["net_loss"].clone()),
+        (json!(2), json!(1))
+    );
+    assert_eq!(
+        (a["net"].clone(), b["net"].clone()),
+        (json!("gain"), json!("loss"))
+    );
     // Two stated a probability: 0.6 and won, 0.25 and lost. Both were entered.
     assert_eq!(
         total["probability"],
@@ -2870,6 +2977,24 @@ async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
         (
             json!({ "playbook_version": "x".repeat(33) }),
             "playbook_version",
+        ),
+        (json!({ "group_by": "tag" }), "tag_prefixes"),
+        (json!({ "tag_prefixes": ["a"] }), "tag_prefixes"),
+        (
+            json!({ "group_by": "symbol", "tag_prefixes": ["a"] }),
+            "tag_prefixes",
+        ),
+        (
+            json!({ "group_by": "tag", "tag_prefixes": [] }),
+            "tag_prefixes",
+        ),
+        (
+            json!({ "group_by": "tag", "tag_prefixes": [""] }),
+            "tag_prefixes",
+        ),
+        (
+            json!({ "group_by": "tag", "tag_prefixes": "trigger:" }),
+            "tag_prefixes",
         ),
     ] {
         let refused = call(&s, "get_track_record", bad.clone(), "owner").unwrap_err();
@@ -3011,7 +3136,8 @@ async fn record_answers_match_the_file_the_web_types_are_tested_against() {
             "create_setup",
             json!({ "symbol": "ETHUSDT", "interval": "15m", "direction": "short",
                 "decision": "skip", "thesis": "example reason", "as_of": at(0),
-                "probability": 0.4 }),
+                "probability": 0.4, "playbook_version": "v1",
+                "skip_reason": "example-reason", "tags": ["trigger:example-b"] }),
         );
         json!({
             "create_setup_stated": stated,
@@ -3019,6 +3145,15 @@ async fn record_answers_match_the_file_the_web_types_are_tested_against() {
             "get_track_record_grouped": ask(
                 "get_track_record",
                 json!({ "as_of": at(700), "group_by": "feature", "feature": "example_flag" }),
+            ),
+            "get_track_record_by_tag": ask(
+                "get_track_record",
+                json!({ "as_of": at(700), "group_by": "tag",
+                    "tag_prefixes": ["trigger:example-a", "trigger:example-b"] }),
+            ),
+            "get_track_record_by_skip_reason": ask(
+                "get_track_record",
+                json!({ "as_of": at(700), "group_by": "skip_reason" }),
             ),
         })
     });
@@ -3032,6 +3167,39 @@ async fn record_answers_match_the_file_the_web_types_are_tested_against() {
         std::fs::write(&path, &text).unwrap();
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
+}
+
+/// `won` says the first target was reached; a target nearer than the costs leaves a
+/// loss all the same. `net` and the record's `net_gain` and `net_loss` say what the
+/// result was after costs, beside the status, which stays as it was (ADR-0079).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_target_nearer_than_the_costs_is_won_and_a_net_loss() {
+    let s = live();
+    let mut args = long();
+    // Filled at the top of the zone, with a target 0.01 % above it: nearer than the
+    // 0.14 % round trip.
+    let fill = args["entry"]["high"].as_f64().unwrap();
+    args["targets"] = json!([fill * 1.0001]);
+    let made = call(&s, "create_setup", args, "owner").unwrap();
+    let (t, p) = (first_bar(&made), mid(&made));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    let end = bar(t + MINUTE_MS, p * 0.976, fill * 1.001, p * 0.976, fill);
+    s.on_bar(&key(), end);
+    let won = call(&s, "get_setup", json!({ "id": made["id"] }), "owner").unwrap();
+    assert_eq!(won["status"], "won", "{won}");
+    assert!(won["result_r"].as_f64().unwrap() < 0.0, "{won}");
+    assert_eq!(won["net"], "loss");
+    let total = &call(&s, "get_track_record", json!({}), "owner").unwrap()["total"];
+    assert_eq!(
+        (
+            total["won"].clone(),
+            total["net_gain"].clone(),
+            total["net_loss"].clone()
+        ),
+        (json!(1), json!(0), json!(1))
+    );
+    let open = created(&s, "owner");
+    assert!(open["net"].is_null(), "no result, no net: {open}");
 }
 
 /// A setup that was cancelled or ran out before its entry was reached has a result of

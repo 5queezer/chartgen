@@ -61,6 +61,7 @@
     "mae_r": null,
     "mfe_at": null,
     "mfe_r": null,
+    "net": null,
     "pending": [
       {
         "at": 1767268860000,
@@ -147,6 +148,7 @@
     "mae_r": null,
     "mfe_at": null,
     "mfe_r": null,
+    "net": null,
     "pending": [],
     "result_r": null,
     "revisions": 1,
@@ -217,6 +219,7 @@
     "mae_r": null,
     "mfe_at": null,
     "mfe_r": null,
+    "net": null,
     "pending": [],
     "result_r": null,
     "revisions": 1,
@@ -320,6 +323,7 @@
     "mae_r": null,
     "mfe_at": null,
     "mfe_r": null,
+    "net": null,
     "pending": [],
     "result_r": null,
     "revisions": 2,
@@ -384,6 +388,7 @@
         "mae_r": null,
         "mfe_at": null,
         "mfe_r": null,
+        "net": "even",
         "pending": [],
         "result_r": 0.0,
         "revisions": 3,
@@ -439,6 +444,7 @@
         "mae_r": -0.317,
         "mfe_at": 1767263820000,
         "mfe_r": 2.0,
+        "net": "gain",
         "pending": [],
         "result_r": 1.7659,
         "revisions": 3,
@@ -557,6 +563,7 @@
         "mfe_at": 1767276240000,
         "mfe_r": 0.0275,
         "near_stop_at": 1767276720000,
+        "net": "loss",
         "pending": [],
         "result_r": -1.1547,
         "revisions": 5,
@@ -708,6 +715,7 @@
     "mae_r": null,
     "mfe_at": null,
     "mfe_r": null,
+    "net": null,
     "pending": [
       {
         "at": 1767261660000,

@@ -1680,12 +1680,12 @@ setups; `can_create` in the list says so.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags`, `features`, `probability`, `playbook_version` | The setup with its log |
+| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags`, `features`, `probability`, `playbook_version`, `skip_reason` | The setup with its log |
 | `revise_setup` | `id`, `reason`; any of `thesis`, `drawings`, `tags`, `entry`, `invalidation`, `targets`, `expires_at` | The setup with its log |
 | `get_setup` | `id` | The setup with its log |
 | `list_setups` | optional `status`, `symbol`, `tags` (only setups that have all of them), `limit` (default 50, at most 500) | `{enabled, can_create, replay, total, limits, setups: [...]}`, newest first, without logs |
 | `cancel_setup` | `id`, `reason` | The setup with its log |
-| `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature` | `{replay, closed, open, truncated, group_by, feature, total, groups: [...], shadows}` |
+| `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature`, `tag_prefixes` | `{replay, closed, open, truncated, group_by, feature, tag_prefixes, total, groups: [...], shadows}` |
 
 - `symbol`: a Binance symbol, or a stock or ETF listed in the US (Nasdaq, NYSE, NYSE American,
   NYSE Arca or Cboe BZX) as Yahoo reports it, such as `NVDA` or `SPY`. An index (`^GSPC`), an
@@ -1718,6 +1718,14 @@ setups; `can_create` in the list says so.
   label of at most 32 characters. The server gives them no meaning. **They are fixed once the
   setup is made:** `revise_setup` and `cancel_setup` refuse them. A setup made without
   `probability` or `playbook_version` answers without them.
+- **Once your newest setup states a `playbook_version`, a setup without one is refused**
+  ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)), and the problem names that
+  version. State `none` for a setup that follows no playbook. If you never state one, nothing
+  changes.
+- `skip_reason` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)): with
+  `decision: skip` only, why you did not take it, as a label of 1 to 32 characters such as
+  `correlation-limit`, to group skips by. The why in words goes in the thesis. It is fixed as
+  the fields above are, does not count against your 16 features, and is refused on a take.
 - The server adds three features to every setup it makes
   ([ADR-0077](/chartgen/decisions/0077-a-setup-records-its-market-context/)): `ctx_trend_4h`
   and `ctx_trend_1d` (`up`, `down` or `mixed`) and `ctx_fear_greed` (`extreme fear`, `fear`,
@@ -1733,9 +1741,11 @@ setups; `can_create` in the list says so.
 
 A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `atr` or `floor`:
 which rule set its levels), `status` (`watching`, `triggered`, `won`,
-`invalidated`, `expired`, `cancelled`), `created_at`, `costs`, `fill` and `exit` (each
+`invalidated`, `expired`, `cancelled`; **`won` means the first target was reached**, and a
+target nearer than the costs leaves a loss all the same, which `net` says), `created_at`, `costs`, `fill` and `exit` (each
 `{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off
-the operator's list), `mae_r`, `mfe_r`, `mae_at`, `mfe_at`, `bars_to_fill`,
+the operator's list), `net` (`gain`, `loss` or `even`: the sign of `result_r` after costs, null
+while it is), `mae_r`, `mfe_r`, `mae_at`, `mfe_at`, `bars_to_fill`,
 `bars_to_exit`, `bars_to_mae`, `bars_to_mfe` and `closest_approach_r` (see
 [excursions](/chartgen/guides/setups/#excursions)), `shadow_results` (from the fill on, the
 setup scored with three fixed exit variants for comparison, `v1_half_t1_be`, `v2_be_at_1r` and
@@ -1765,29 +1775,33 @@ many match the filters.
   seconds, unix ms or ISO 8601) on the time the setup was **made**.
 - `group_by`: `playbook_version`, `feature` (with `feature`, the name of one, the server's
   `ctx_trend_4h`, `ctx_trend_1d` and `ctx_fear_greed` included), `probability`
-  (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol` or `direction`. A setup
-  that stated none is in the group whose `key` is `null`. Groups come in the order of their
-  keys. More than 50 groups are refused: group by something that takes fewer values.
+  (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol`, `direction`,
+  `skip_reason`, or `tag` (with `tag_prefixes`, 1 to 10 starts of tags, such as
+  `["trigger:alert", "trigger:scan"]`, each a group whose `key` is the prefix). A setup that
+  stated none, or has no tag with any of the prefixes, is in the group whose `key` is `null`.
+  **With `tag`, a setup is in the group of each prefix one of its tags starts with**, so the
+  groups can add up to more than `total`. Groups come in the order of their keys. More than 50
+  groups are refused: group by something that takes fewer values.
 
 ```json
 {
   "replay": false, "closed": 3, "open": 1, "truncated": false,
-  "group_by": "playbook_version", "feature": null,
+  "group_by": "playbook_version", "feature": null, "tag_prefixes": null,
   "total": {
     "count": 3, "won": 2, "invalidated": 1, "expired": 0, "cancelled": 0,
-    "with_result": 3, "total_r": 2.1, "mean_r": 0.7,
+    "with_result": 3, "total_r": 2.1, "mean_r": 0.7, "net_gain": 2, "net_loss": 1,
     "entered": 3, "mean_r_entered": 0.7, "gaps": 0,
     "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
                      "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 }
   },
   "groups": [
     { "key": null, "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
-      "with_result": 1, "total_r": 1.6, "mean_r": 1.6,
+      "with_result": 1, "total_r": 1.6, "mean_r": 1.6, "net_gain": 1, "net_loss": 0,
       "entered": 1, "mean_r_entered": 1.6, "gaps": 0,
       "probability": { "stated": 0, "mean": null, "won": 0, "observed": null,
                        "stated_entered": 0, "won_entered": 0, "observed_entered": null } },
     { "key": "v1", "count": 2, "won": 1, "invalidated": 1, "expired": 0, "cancelled": 0,
-      "with_result": 2, "total_r": 0.5, "mean_r": 0.25,
+      "with_result": 2, "total_r": 0.5, "mean_r": 0.25, "net_gain": 1, "net_loss": 1,
       "entered": 2, "mean_r_entered": 0.25, "gaps": 0,
       "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
                        "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 } }
@@ -1803,6 +1817,9 @@ many match the filters.
 }
 ```
 
+- `won` counts setups that reached their first target; `net_gain` and `net_loss` count
+  results above and below 0 R after costs. A `won` setup whose target was nearer than the
+  costs is in `net_loss`.
 - `with_result` is how many have a result in R; `mean_r` is over those and `null` when there
   are none. A setup that expired filled while nobody scored it has no result and is not
   given one. `gaps` counts results that do not cover bars the server missed.
