@@ -351,6 +351,10 @@ struct Record {
     /// An indicator's line at bar closes instead of the price (ADR-0067).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     indicator: Option<indicator::Spec>,
+    /// Conditions that must hold at the close its own fires at (ADR-0084). A build from
+    /// before them ignores them, and fires on its own condition alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    and: Vec<clauses::Clause>,
 }
 
 impl Record {
@@ -369,6 +373,11 @@ impl Record {
 
     fn json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// It reads the feed's window of closed bars: an indicator's, or its clauses'.
+    fn reads_bars(&self) -> bool {
+        self.indicator.is_some() || !self.and.is_empty()
     }
 }
 
@@ -433,6 +442,8 @@ struct State {
     baselines: HashMap<String, f64>,
     /// The line's value at the last close each indicator alert read.
     values: HashMap<String, f64>,
+    /// What each `and` clause read at the alert's last close.
+    and_values: HashMap<String, Vec<Option<f64>>>,
     changes: Window,
     fires: Window,
     /// Per client, and under "" every delivery of either kind.
@@ -914,7 +925,7 @@ impl ServerAlerts {
         let wanting: HashSet<FeedKey> = st
             .alerts
             .values()
-            .filter(|a| self.runs(a) && a.indicator.is_some())
+            .filter(|a| self.runs(a) && a.reads_bars())
             .map(Record::feed)
             .collect();
         for (key, w) in &mut st.watches {
@@ -1000,7 +1011,7 @@ impl ServerAlerts {
         let ids: Vec<String> = st
             .alerts
             .values()
-            .filter(|a| self.runs(a) && a.indicator.is_some() && a.feed() == *key)
+            .filter(|a| self.runs(a) && a.reads_bars() && a.feed() == *key)
             .map(|a| a.id.clone())
             .collect();
         let now = Instant::now();
@@ -1057,7 +1068,7 @@ impl ServerAlerts {
             && st
                 .alerts
                 .values()
-                .any(|a| self.runs(a) && a.indicator.is_some() && a.feed() == *key);
+                .any(|a| self.runs(a) && a.reads_bars() && a.feed() == *key);
         let Some(watch) = st.watches.get_mut(key) else {
             return;
         };
@@ -1145,6 +1156,13 @@ impl ServerAlerts {
         }
         let Some(spec) = &alert.indicator else {
             let level = alert.level?;
+            // With clauses, a close is read once the bars hold it, as an indicator's is.
+            if !alert.and.is_empty() {
+                let bars = st.watches.get(key)?.bars.as_ref()?;
+                if !bars.iter().rev().any(|b| bar_time_of(b) == Some(bar_time)) {
+                    return None;
+                }
+            }
             let prev = st.baselines.insert(id.to_string(), price);
             return Some((prev.map(|p| p - level), price - level, None));
         };
@@ -1159,6 +1177,30 @@ impl ServerAlerts {
         };
         st.values.insert(id.to_string(), r.value);
         Some((r.prev, r.d, Some(r.value)))
+    }
+
+    /// Whether every `and` clause of the alert holds at the close of the bar opening at
+    /// `bar_time`, read from the feed's bars; true for an alert without. What each read
+    /// is kept for its list and its fires.
+    fn clauses_hold(&self, st: &mut State, key: &FeedKey, id: &str, bar_time: i64) -> bool {
+        let Some(alert) = st.alerts.get(id).filter(|a| !a.and.is_empty()) else {
+            return true;
+        };
+        let bars = st
+            .watches
+            .get(key)
+            .and_then(|w| w.bars.as_deref())
+            .unwrap_or_default();
+        let end = bars.partition_point(|b| bar_time_of(b).is_some_and(|t| t <= bar_time));
+        let window = match end.checked_sub(1).map(|i| &bars[i]) {
+            Some(b) if bar_time_of(b) == Some(bar_time) => &bars[..end],
+            // Not a close the bars have: nothing can be said to hold.
+            _ => &[],
+        };
+        let read: Vec<(bool, Option<f64>)> = alert.and.iter().map(|c| c.holds(window)).collect();
+        st.and_values
+            .insert(id.to_string(), read.iter().map(|(_, v)| *v).collect());
+        read.iter().all(|(h, _)| *h)
     }
 
     fn evaluate(
@@ -1182,7 +1224,8 @@ impl ServerAlerts {
         };
         // Both readings are already relative to the level.
         let (condition, trigger) = (alert.condition, alert.trigger);
-        let (next, fired) = step(condition, trigger, 0.0, armed, prev, d, true);
+        let holds = self.clauses_hold(st, key, id, bar_time);
+        let (next, fired) = step(condition, trigger, 0.0, armed, prev, d, holds);
         let (next, fired) = if fired
             && trigger == Trigger::Every
             && !st
@@ -1220,7 +1263,9 @@ impl ServerAlerts {
         if updated.indicator.is_some() || updated.condition == Condition::BarClose {
             updated.fired_bar = Some(bar_time);
         }
-        let events = self.prepare_deliveries(st, &mut updated, price, value, bar_time, at);
+        let and = and_view(&updated, st.and_values.get(id));
+        let events =
+            self.prepare_deliveries(st, &mut updated, price, value, and.as_ref(), bar_time, at);
         // The fire as an event of the owner's log, which is also what wakes the agent
         // (ADR-0061). Logged whether or not there is a receiver to wake.
         let skipped = |why: &str| Delivery {
@@ -1230,7 +1275,7 @@ impl ServerAlerts {
         };
         let logged = updated
             .notify_agent
-            .then(|| self.fire_event(&updated, price, value, bar_time, at));
+            .then(|| self.fire_event(&updated, price, value, and.as_ref(), bar_time, at));
         if logged.as_ref().is_some_and(|e| !e.deliver) {
             updated.last_delivery = Some(skipped("wake-up skipped: no receiver for this owner"));
         }
@@ -1276,6 +1321,7 @@ impl ServerAlerts {
         alert: &Record,
         price: f64,
         value: Option<f64>,
+        and: Option<&Value>,
         bar_time: i64,
         at: i64,
     ) -> NewEvent {
@@ -1296,6 +1342,9 @@ impl ServerAlerts {
         });
         if let Some(spec) = &alert.indicator {
             body["indicator"] = indicator::view(spec, value);
+        }
+        if let Some(and) = and {
+            body["and"] = and.clone();
         }
         NewEvent {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1318,12 +1367,14 @@ impl ServerAlerts {
     /// wait. They wait for their turn however busy the budget is, so a `once` alert keeps
     /// them. Only with a full queue does the fire count without one, and the alert says
     /// why. All of them carry one body, and so one `id`, however many rows that takes.
+    #[allow(clippy::too_many_arguments)]
     fn prepare_deliveries(
         &self,
         st: &State,
         alert: &mut Record,
         price: f64,
         value: Option<f64>,
+        and: Option<&Value>,
         bar_time: i64,
         at: i64,
     ) -> Vec<StoredEvent> {
@@ -1350,9 +1401,13 @@ impl ServerAlerts {
             "fired_at": at,
             "fire_count": alert.fire_count,
         });
-        // Only on an indicator alert: a price alert's body is as it always was.
+        // Only on an indicator alert, or one with clauses: a price alert's body is as it
+        // always was.
         if let Some(spec) = &alert.indicator {
             body["indicator"] = indicator::view(spec, value);
+        }
+        if let Some(and) = and {
+            body["and"] = and.clone();
         }
         let body = body.to_string();
         let limits = &self.limits;
@@ -1701,6 +1756,7 @@ impl ServerAlerts {
         st.alerts.remove(id);
         st.baselines.remove(id);
         st.values.remove(id);
+        st.and_values.remove(id);
         st.held_back.remove(id);
         let mut dropped = 0;
         for queue in st.queues.values_mut() {
@@ -2257,6 +2313,10 @@ impl ServerAlerts {
             bar_close_args(args, evaluate_on)?;
         }
         let spec = indicator::parse(args)?;
+        let and = clauses::parse(args)?;
+        if !and.is_empty() && evaluate_on != Some(EvaluateOn::Close) && !at_close {
+            return Err("An alert with and reads bar closes: send evaluate_on: close".into());
+        }
         let level = match (at_close, &spec) {
             (true, _) | (false, Some(_)) => None,
             (false, None) => Some(level_arg(args)?.ok_or("level is required")?),
@@ -2265,13 +2325,15 @@ impl ServerAlerts {
             return Err("An indicator alert reads bar closes: send evaluate_on: close".into());
         }
         // What either costs is per close (ADR-0067, ADR-0069).
-        if (spec.is_some() || at_close)
+        if (spec.is_some() || at_close || !and.is_empty())
             && data::interval_secs(&interval).is_none_or(|s| s < indicator::MIN_INTERVAL_SECS)
         {
             let what = if at_close {
                 "A bar_close alert fires at"
-            } else {
+            } else if spec.is_some() {
                 "An indicator alert reads"
+            } else {
+                "An alert with and reads"
             };
             return Err(format!("{what} closes of 1h or longer, not {interval}"));
         }
@@ -2364,6 +2426,7 @@ impl ServerAlerts {
             setup_id,
             fired_bar: None,
             indicator: spec,
+            and,
         };
         // With setups: nobody else may take a pair between this check and the write.
         let _pairs = pair_gate();
@@ -2399,7 +2462,7 @@ impl ServerAlerts {
                 a.condition == Condition::BarClose,
             ),
         };
-        for field in ["indicator", "params", "line", "compare"] {
+        for field in ["indicator", "params", "line", "compare", "and"] {
             if args.get(field).is_some_and(|v| !v.is_null()) {
                 return Err(format!(
                     "{field} cannot change: delete the alert and create another"
@@ -2589,7 +2652,7 @@ impl ServerAlerts {
         let live = watch
             .and_then(|w| w.last_at)
             .is_some_and(|t| t.elapsed() < FEED_QUIET)
-            && (a.indicator.is_none() || watch.is_some_and(|w| w.bars.is_some()));
+            && (!a.reads_bars() || watch.is_some_and(|w| w.bars.is_some()));
         let held_back = st
             .held_back
             .get(&a.id)
@@ -2641,6 +2704,9 @@ impl ServerAlerts {
         }
         if let Some(spec) = &a.indicator {
             view["indicator"] = indicator::view(spec, st.values.get(&a.id).copied());
+        }
+        if let Some(and) = and_view(a, st.and_values.get(&a.id)) {
+            view["and"] = and;
         }
         view
     }
@@ -2718,6 +2784,9 @@ struct FiredAlert<'a> {
     /// Only on an indicator alert, which `level` is then about.
     #[serde(skip_serializing_if = "Option::is_none")]
     indicator: Option<&'a Value>,
+    /// Only on an alert with clauses: each with what it read at that close.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    and: Option<&'a Value>,
     price: &'a Value,
     trigger: &'a Value,
     bar_time: &'a Value,
@@ -2818,6 +2887,7 @@ fn wake_up_body(
                     // alert's line and value at that close (ADR-0067).
                     level: &happened["level"],
                     indicator: happened.get("indicator"),
+                    and: happened.get("and"),
                     price: &happened["price"],
                     trigger: &happened["trigger"],
                     bar_time: &happened["bar_time"],
@@ -3022,6 +3092,22 @@ async fn run_upkeep(alerts: Weak<ServerAlerts>) {
 }
 
 mod indicator;
+
+/// An alert's clauses as it shows them, with what each read at its last close; `None`
+/// for an alert without.
+fn and_view(a: &Record, values: Option<&Vec<Option<f64>>>) -> Option<Value> {
+    (!a.and.is_empty()).then(|| {
+        let at = |i: usize| values.and_then(|v| v.get(i).copied().flatten());
+        json!(a
+            .and
+            .iter()
+            .enumerate()
+            .map(|(i, c)| c.view(at(i)))
+            .collect::<Vec<_>>())
+    })
+}
+
+mod clauses;
 
 #[cfg(test)]
 mod tests;

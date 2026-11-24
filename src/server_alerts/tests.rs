@@ -4976,3 +4976,113 @@ async fn a_bar_close_wake_up_from_the_log_has_no_level() {
     assert!(what.get("level").is_some_and(Value::is_null), "{what}");
     assert!(what.get("indicator").is_none(), "{what}");
 }
+
+// ---- Conditions joined by AND (ADR-0084) ----
+
+fn with_and(condition: &str, level: Option<f64>, and: Value) -> Value {
+    let mut args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "condition": condition, "trigger": "every", "and": and,
+    });
+    if let Some(l) = level {
+        args["level"] = json!(l);
+    }
+    args
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alert_fires_only_where_every_clause_holds_at_that_close() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let above_sma = json!([{
+        "indicator": "ma", "params": { "type": "sma", "length": 5 },
+        "compare": "close", "condition": "greater",
+    }]);
+    let (a, _, id) =
+        with_history("and", bars, with_and("crossing_up", Some(105.0), above_sma)).await;
+    let never = create(
+        &a,
+        with_and(
+            "crossing_up",
+            Some(105.0),
+            json!([{ "condition": "less", "level": 50 }]),
+        ),
+        "me",
+    )
+    .await;
+    let k = key("1h");
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 104.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 106.0)));
+    // SMA 5 is 102 at that close, under 106: the clause holds, and it fires.
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    assert_eq!(a.lock().alerts[&never].fire_count, 0, "106 is not under 50");
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["and"][0]["condition"], "greater");
+    assert_eq!(view["and"][0]["indicator"]["line"], "SMA 5");
+    assert!((view["and"][0]["indicator"]["value"].as_f64().unwrap() - 102.0).abs() < 1e-9);
+    let view = get(&a, "me", &never).await;
+    assert_eq!(view["and"][0]["price"], 106.0);
+    assert_eq!(view["and"][0]["level"], 50.0);
+    // A held-back crossing is not kept for later: the next close is a new reading.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 40.0)));
+    assert_eq!(a.lock().alerts[&never].fire_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bar_close_with_clauses_fires_at_the_closes_they_hold() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "condition": "bar_close", "trigger": "every",
+        "and": [{ "condition": "greater", "level": 110 }],
+    });
+    let (a, _, id) = with_history("and-bar-close", bars, args).await;
+    let k = key("1h");
+    // The first two close before the alert was made, which a bar_close alert leaves
+    // alone (ADR-0069); the bars still need them, in a row.
+    for (i, close) in [(1, 120.0), (2, 120.0), (3, 105.0)] {
+        a.on_event(&k, FeedEvent::Bar(bar(t + i * HOUR, close)));
+    }
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 4 * HOUR, 111.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(t + 5 * HOUR, 112.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clauses_are_refused_where_they_cannot_be_read() {
+    let (store, _) = store_at("and-bad");
+    let a = plain(store);
+    let one = json!([{ "condition": "less", "level": 50 }]);
+    let mut live = with_and("crossing_up", Some(105.0), one.clone());
+    live["evaluate_on"] = json!("live");
+    let err = call(&a, "create_server_alert", live, "me")
+        .await
+        .unwrap_err();
+    assert!(err.contains("reads bar closes"), "{err}");
+    let mut short = with_and("crossing_up", Some(105.0), one.clone());
+    short["interval"] = json!("15m");
+    let err = call(&a, "create_server_alert", short, "me")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "An alert with and reads closes of 1h or longer, not 15m"
+    );
+    let err = call(
+        &a,
+        "create_server_alert",
+        with_and("crossing_up", Some(105.0), json!([{ "condition": "less" }])),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, "and[0]: level is required: a price greater than 0");
+    assert!(a.lock().alerts.is_empty());
+    let id = create(&a, with_and("crossing_up", Some(105.0), one.clone()), "me").await;
+    let args = json!({ "alert_id": id, "and": [] });
+    let err = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("and cannot change"), "{err}");
+}

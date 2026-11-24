@@ -40,7 +40,7 @@ export function serverAlertStatus(a: ServerAlert): ServerAlertStatus {
 export function editsInDialog(
   a: ServerAlert,
 ): a is ServerAlert & { condition: AlertCondition; indicator?: undefined } {
-  return !a.indicator && a.condition !== "bar_close";
+  return !a.indicator && !a.and?.length && a.condition !== "bar_close";
 }
 
 /** The label of a server alert's condition: a browser alert's, or "Bar close". */
@@ -59,7 +59,8 @@ export function serverAlertCondition(a: ServerAlert): string {
 }
 
 export function serverAlertText(a: ServerAlert): string {
-  const head = `${a.symbol} ${serverAlertCondition(a)}`;
+  const more = a.and?.length ? ` and ${a.and.length} more` : "";
+  const head = `${a.symbol} ${serverAlertCondition(a)}${more}`;
   return a.message ? `${head} — ${a.message}` : head;
 }
 

@@ -69,7 +69,7 @@ one and link both ways.
 | [0039](/chartgen/decisions/0039-compact-layout/) | Compact layout for phones and small tablets | Accepted | 2026-11-06 |
 | [0040](/chartgen/decisions/0040-layout-compare-restore/) | A layout stores the scale mode its compare symbols return to | Accepted | 2026-11-06 |
 | [0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) | Script editor in the web app | Accepted | 2026-11-06 |
-| [0042](/chartgen/decisions/0042-server-side-alerts/) | Alerts that run on the server, with webhooks | Accepted | 2026-11-06 |
+| [0042](/chartgen/decisions/0042-server-side-alerts/) | Alerts that run on the server, with webhooks | Accepted; amended by [0084](/chartgen/decisions/0084-conditions-joined-by-and/) | 2026-11-06 |
 | [0043](/chartgen/decisions/0043-multi-chart-grid/) | Multi-chart grid: per-pane store instances behind an active-chart API | Accepted | 2026-11-06 |
 | [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted; superseded in part by [0050](/chartgen/decisions/0050-per-user-workspace-sync/); amended by [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) and [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) and [0063](/chartgen/decisions/0063-operator-page/) | 2026-11-06 |
 | [0045](/chartgen/decisions/0045-web-push-for-server-alerts/) | Browser push for server alerts | Accepted | 2026-11-06 |
@@ -93,7 +93,7 @@ one and link both ways.
 | [0063](/chartgen/decisions/0063-operator-page/) | A read-only operator page, for a signed-in operator in the web app only | Accepted | 2026-11-11 |
 | [0064](/chartgen/decisions/0064-a-setups-record/) | A setup states what it was made with, once, and the record is read back as counts | Proposed; amended by [0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) | 2026-11-11 |
 | [0066](/chartgen/decisions/0066-shadow-exit-variants/) | Fixed shadow exit variants on every filled setup | Accepted | 2026-11-12 |
-| [0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) | Server alerts on an indicator's line, at bar closes | Accepted | 2026-11-12 |
+| [0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) | Server alerts on an indicator's line, at bar closes | Accepted; amended by [0084](/chartgen/decisions/0084-conditions-joined-by-and/) | 2026-11-12 |
 | [0068](/chartgen/decisions/0068-replay-over-real-history/) | Replay over real Binance history | Accepted (phase 1); phases 2 and 3 proposed | 2026-11-12 |
 | [0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) | An alert at a bar's close | Accepted | 2026-11-13 |
 | [0070](/chartgen/decisions/0070-stock-setups/) | Setups on US stocks, scored on Yahoo's 1m bars | Accepted | 2026-11-14 |
@@ -104,3 +104,4 @@ one and link both ways.
 | [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | The autodeploy follows a deployment until the platform finished it | Accepted | 2026-11-15 |
 | [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | get_quotes marks a quote that is not trading as stale | Accepted | 2026-11-15 |
 | [0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) | A setup records the market context it was made in | Accepted | 2026-11-15 |
+| [0084](/chartgen/decisions/0084-conditions-joined-by-and/) | Server alert conditions joined by AND | Accepted | 2026-11-24 |

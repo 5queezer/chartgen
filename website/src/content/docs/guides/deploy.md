@@ -323,6 +323,12 @@ The log is two tables in the store, `events` and `event_counters`, added when th
 first opens the file. The server keeps the newest 1000 events of an owner for 7 days; there
 is nothing to clean up by hand.
 
+**Before a rollback past conditions joined by AND**
+([ADR-0084](/chartgen/decisions/0084-conditions-joined-by-and/)): a build from before them
+ignores an alert's `and` and fires on its own condition alone. Pause those alerts first
+(`update_server_alert` with `active: false`); when that build stores one again, its clauses are
+gone, so make it again after rolling forward.
+
 **After a rollback:** a build from before this feature runs an alert with `notify_agent` as
 one with no webhook, and when it stores that alert again, after it fires or is edited,
 `notify_agent` and `setup_id` are gone from it. Once the newer build runs again, set them

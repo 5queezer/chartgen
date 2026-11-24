@@ -71,12 +71,14 @@ describe("texts", () => {
     expect(ServerAlertsPayloadSchema.parse({ enabled: true, alerts: [atClose] }).alerts[0]?.condition).toBe(
       "bar_close",
     );
+    // Conditions joined by AND (ADR-0084): the dialog would lose them.
+    const joined = { ...alert, and: [{ condition: "less" as const, level: 50, price: 106 }] };
+    expect(serverAlertText(joined)).toBe("BTCUSDT crossing 100.00 and 1 more");
+    expect(ServerAlertsPayloadSchema.parse({ enabled: true, alerts: [joined] }).alerts[0]?.and?.[0]?.price).toBe(106);
     // The dialog edits price alerts only.
-    expect([alert, atClose, { ...alert, condition: "less" as const, indicator: rsi }].map(editsInDialog)).toEqual([
-      true,
-      false,
-      false,
-    ]);
+    expect(
+      [alert, atClose, { ...alert, condition: "less" as const, indicator: rsi }, joined].map(editsInDialog),
+    ).toEqual([true, false, false, false]);
     expect(serverAlertError(new Error("MCP tool error: webhook URL must use https"))).toBe(
       "webhook URL must use https",
     );

@@ -665,6 +665,15 @@ export const IndicatorViewSchema = z.object({
   value: z.number().nullable(),
 });
 
+/** One of an alert's `and` conditions (ADR-0084), with what it read at the last close:
+ * `price` for a price level, `indicator.value` for an indicator's line. */
+export const AndClauseViewSchema = z.object({
+  condition: z.enum(["crossing", "crossing_up", "crossing_down", "greater", "less"]),
+  level: z.number().nullable(),
+  indicator: IndicatorViewSchema.optional(),
+  price: z.number().nullable().optional(),
+});
+
 export const ServerAlertSchema = z.object({
   id: z.string(),
   symbol: z.string(),
@@ -716,6 +725,8 @@ export const ServerAlertSchema = z.object({
    * the line at the last close it read, null until it has read one.
    */
   indicator: IndicatorViewSchema.optional(),
+  /** Present only on an alert with conditions joined by AND (ADR-0084). */
+  and: z.array(AndClauseViewSchema).optional(),
 });
 export type ServerAlert = z.infer<typeof ServerAlertSchema>;
 
