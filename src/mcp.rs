@@ -200,7 +200,7 @@ fn call_tool(
     }
     match tool_name {
         "generate_chart" => tool_generate_chart(id, &arguments, user),
-        "list_indicators" => tool_list_indicators(id, user),
+        "list_indicators" => tool_list_indicators(id, &arguments, user),
         "list_drawing_tools" => tool_ok(id, drawings::tools_json()),
         "inspect_chart" => inspect_chart(id, &arguments, fetch::DataSource::from_env()),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
@@ -886,21 +886,21 @@ pub(crate) fn generate_chart(
     if let Some(summary) = summary_value {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&summary).unwrap(),
+            "text": serde_json::to_string(&summary).unwrap(),
         }));
     }
 
     if let Some(series) = series_value {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&series).unwrap(),
+            "text": serde_json::to_string(&series).unwrap(),
         }));
     }
 
     if let Some(drawn) = &drawn {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&drawn_json(args, symbol, interval, drawn)).unwrap(),
+            "text": serde_json::to_string(&drawn_json(args, symbol, interval, drawn)).unwrap(),
         }));
     }
 
@@ -908,7 +908,7 @@ pub(crate) fn generate_chart(
     if let (Some(errors), "png") = (&errors_value, format.as_str()) {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&json!({ "indicator_errors": errors })).unwrap(),
+            "text": serde_json::to_string(&json!({ "indicator_errors": errors })).unwrap(),
         }));
     }
 
@@ -1510,8 +1510,17 @@ fn no_push_transport(id: Option<Value>) -> Value {
 }
 
 /// Built-ins plus the caller's scripts (tagged `source: "user"`); a script
-/// replaces the built-in entry it shadows.
-fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
+/// replaces the built-in entry it shadows. `detail: "compact"` keeps each one's name
+/// and its parameters' defaults (ADR-0078).
+fn tool_list_indicators(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let compact = match args.get("detail").filter(|v| !v.is_null()) {
+        None => false,
+        Some(v) => match v.as_str() {
+            Some("full") => false,
+            Some("compact") => true,
+            _ => return tool_err(id, "detail must be full or compact"),
+        },
+    };
     let reg = indicators::registry();
     #[cfg(feature = "scripting")]
     let mine: Vec<Value> = user
@@ -1545,20 +1554,32 @@ fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
         })
         .collect();
     indicator_list.extend(mine);
+    if compact {
+        indicator_list = indicator_list.iter().map(compact_indicator).collect();
+    }
+    tool_ok(
+        id,
+        json!({ "total": indicator_list.len(), "indicators": indicator_list }),
+    )
+}
 
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": {
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string_pretty(&json!({
-                    "total": indicator_list.len(),
-                    "indicators": indicator_list
-                })).unwrap()
-            }]
-        }
-    })
+/// An indicator's name, its parameters' defaults by name when it has any, and whether
+/// it is a script of the caller's.
+fn compact_indicator(entry: &Value) -> Value {
+    let mut compact = json!({ "name": entry["name"] });
+    let params: serde_json::Map<String, Value> = entry["configurable_params"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["name"].as_str()?.to_string(), p["default"].clone())))
+        .collect();
+    if !params.is_empty() {
+        compact["params"] = Value::Object(params);
+    }
+    if entry.get("source").is_some() {
+        compact["source"] = entry["source"].clone();
+    }
+    compact
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,7 +1662,7 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
         Ok(c) => c,
         Err(e) => {
             let payload = json!({ "ok": false, "errors": [e.to_json()] });
-            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+            return tool_err(id, &serde_json::to_string(&payload).unwrap());
         }
     };
     let info = &compiled.info;
@@ -1666,7 +1687,7 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
                 "message": format!("You already have an indicator named {name}. Open it, or pick another name."),
             });
             let payload = json!({ "ok": false, "errors": [error] });
-            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+            return tool_err(id, &serde_json::to_string(&payload).unwrap());
         }
         Err(e) => return tool_err(id, &format!("Could not store the indicator: {e}")),
     }
@@ -1751,7 +1772,7 @@ fn tool_get_my_indicator(id: Option<Value>, args: &Value, user: Option<&str>) ->
                 "error": "not_found",
                 "message": format!("You have no indicator named `{name}`."),
             });
-            tool_err(id, &serde_json::to_string_pretty(&payload).unwrap())
+            tool_err(id, &serde_json::to_string(&payload).unwrap())
         }
         Err(e) => tool_err(id, &format!("Could not read the indicator: {e}")),
     }
@@ -1791,7 +1812,7 @@ pub(crate) fn tool_ok(id: Option<Value>, payload: Value) -> Value {
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&payload).unwrap() }]
         }
     })
 }
@@ -2678,15 +2699,6 @@ fn end_time_arg(args: &Value) -> Result<Option<i64>, String> {
     }
 }
 
-/// A payload as compact JSON: these run to thousands of numbers.
-fn tool_ok_compact(id: Option<Value>, payload: &Value) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": { "content": [{ "type": "text", "text": payload.to_string() }] }
-    })
-}
-
 /// Row size from `row_size` or `row_ticks`, or `auto`. Whether it was automatic.
 fn row_arg(args: &Value, tick: f64, auto: impl FnOnce() -> f64) -> Result<(f64, bool), String> {
     let size = number_arg(args, "row_size", 0.0, 0.0, f64::MAX)?;
@@ -2702,7 +2714,7 @@ fn row_arg(args: &Value, tick: f64, auto: impl FnOnce() -> f64) -> Result<(f64, 
 
 fn tool_get_footprint(id: Option<Value>, args: &Value) -> Value {
     match footprint_payload(args, fetch::DataSource::from_env()) {
-        Ok(payload) => tool_ok_compact(id, &payload),
+        Ok(payload) => tool_ok(id, payload),
         Err(e) => tool_err(id, &e),
     }
 }
@@ -2820,7 +2832,7 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
 
 fn tool_get_tpo(id: Option<Value>, args: &Value) -> Value {
     match tpo_payload(args, fetch::DataSource::from_env()) {
-        Ok(payload) => tool_ok_compact(id, &payload),
+        Ok(payload) => tool_ok(id, payload),
         Err(e) => tool_err(id, &e),
     }
 }
@@ -3545,6 +3557,54 @@ mod tests {
     use chartgen::data::Bar;
     use chartgen::engine::{Engine, EngineConfig};
     use std::path::PathBuf;
+
+    /// `detail: "compact"` keeps every indicator, in the same order, with its name and
+    /// its parameters' defaults; answers are compact JSON (ADR-0078).
+    #[test]
+    fn list_indicators_compact_keeps_names_and_defaults() {
+        let text_of = |args: Value| {
+            let resp = tool_list_indicators(Some(json!(1)), &args, None);
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let full_text = text_of(json!({}));
+        assert!(!full_text.contains('\n'), "compact JSON");
+        let full: Value = serde_json::from_str(&full_text).unwrap();
+        assert_eq!(
+            full,
+            serde_json::from_str::<Value>(&text_of(json!({ "detail": "full" }))).unwrap()
+        );
+        let compact: Value =
+            serde_json::from_str(&text_of(json!({ "detail": "compact" }))).unwrap();
+        assert_eq!(compact["total"], full["total"]);
+        let (full, compact) = (
+            full["indicators"].as_array().unwrap(),
+            compact["indicators"].as_array().unwrap(),
+        );
+        assert_eq!(full.len(), compact.len());
+        for (f, c) in full.iter().zip(compact) {
+            assert_eq!(c["name"], f["name"]);
+            let params = f["configurable_params"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(c.get("params").is_some(), !params.is_empty(), "{c}");
+            for p in &params {
+                assert_eq!(
+                    c["params"][p["name"].as_str().unwrap()],
+                    p["default"],
+                    "{c}"
+                );
+            }
+            assert!(c.get("description").is_none() && c.get("source").is_none());
+        }
+        let rsi = compact.iter().find(|c| c["name"] == "rsi").unwrap();
+        assert!(rsi["params"]["length"].is_number(), "{rsi}");
+        let refused = tool_list_indicators(Some(json!(1)), &json!({ "detail": "short" }), None);
+        assert_eq!(refused["result"]["isError"], true);
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = crate::test_dir::new(format!("chartgen_mcp_test_{name}"));
@@ -5514,7 +5574,7 @@ mod tests {
 
     #[test]
     fn generate_chart_summary_byte_identity_golden() {
-        // sample_data is seeded (Rng::new(42)), so the pretty-printed summary
+        // sample_data is seeded (Rng::new(42)), so the summary, compact JSON (ADR-0078),
         // for a fixed input is stable. This test guards against accidental
         // changes to the summary serializer while the series format is added.
         let args = json!({
@@ -8142,7 +8202,7 @@ def compute(ohlcv, params, chart):
         let missing: Value = serde_json::from_str(text(&other, 0)).unwrap();
         assert_eq!(missing["error"], "not_found");
 
-        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&u)));
+        let all = payload(&tool_list_indicators(Some(json!(1)), &json!({}), Some(&u)));
         let entry = all["indicators"]
             .as_array()
             .unwrap()
@@ -8155,6 +8215,19 @@ def compute(ohlcv, params, chart):
             all["total"].as_u64().unwrap() as usize,
             indicators::registry().len() + 1
         );
+        let compact = payload(&tool_list_indicators(
+            Some(json!(1)),
+            &json!({ "detail": "compact" }),
+            Some(&u),
+        ));
+        let mine = compact["indicators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == "my_momentum")
+            .expect("listed for its owner");
+        assert_eq!(mine["source"], "user");
+        assert!(mine["params"]["length"].is_number(), "{mine}");
 
         // used like a built-in, with params, next to a built-in
         let resp = chart(
@@ -8240,7 +8313,7 @@ def compute(ohlcv, params, chart):
             payload(&call("list_my_indicators", json!({}), Some(&b)))["total"],
             0
         );
-        let all_b = payload(&tool_list_indicators(Some(json!(1)), Some(&b)));
+        let all_b = payload(&tool_list_indicators(Some(json!(1)), &json!({}), Some(&b)));
         assert!(!all_b.to_string().contains("secret_sauce"));
         let resp = chart(&b, json!(["secret_sauce"]), "series");
         assert_eq!(key_error_of(&resp, "secret_sauce")["step"], "unknown");
@@ -8289,7 +8362,7 @@ def compute(ohlcv, params, chart):
         };
         assert_eq!(label(&a), "My WaveTrend");
         assert_eq!(label(&b), "WaveTrend");
-        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&a)));
+        let all = payload(&tool_list_indicators(Some(json!(1)), &json!({}), Some(&a)));
         let wt: Vec<&Value> = all["indicators"]
             .as_array()
             .unwrap()

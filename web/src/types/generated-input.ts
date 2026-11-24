@@ -639,7 +639,12 @@ export interface ListEventsInput {
   limit?: number;
 }
 
-export interface ListIndicatorsInput {}
+export interface ListIndicatorsInput {
+  /**
+   * full: each indicator with its description, category, aliases and every parameter's type, range and description. compact: only its name, params (each parameter's default, by name; absent when it has none) and, for a script of yours, source.
+   */
+  detail?: "full" | "compact";
+}
 
 export interface ListServerAlertsInput {}
 

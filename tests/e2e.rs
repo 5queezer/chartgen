@@ -1049,7 +1049,9 @@ fn post_unread(port: u16, auth: &str, body: &str) -> std::net::TcpStream {
 }
 
 /// Five indicators: the largest chart at 5000 bars the budget can hold, 30,000 of 32,000.
-const FIVE: [&str; 5] = ["rsi", "macd", "ema", "bbands", "vwap"];
+/// Ones with several lines, so that its answer, about 2.7 MB of compact JSON (ADR-0078),
+/// holds more than the 2,000 units another such chart would need beside it.
+const FIVE: [&str; 5] = ["ema_stack", "bbands", "keltner", "donchian", "macd"];
 
 /// One answer nobody reads holds its share, not the server: what is no tool call goes on.
 #[test]
@@ -1086,7 +1088,7 @@ fn test_the_apps_charts_run_in_parallel() {
     let mut unread = post_unread(
         srv.port,
         &auth,
-        &chart_call(5000, &["rsi"], serde_json::json!({})),
+        &chart_call(5000, &FIVE, serde_json::json!({})),
     );
     assert!(unread_answer_size(&mut unread) > HELD);
 

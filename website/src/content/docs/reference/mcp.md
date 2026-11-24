@@ -11,6 +11,11 @@ The HTTP transport implements **MCP Streamable HTTP, spec
 See [ADR-0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) for
 the migration rationale.
 
+**Answers.** A tool that answers JSON writes it as compact JSON, without indentation, in a
+text content item; an error that carries JSON (`setup_errors`, `drawing_errors`, a script's
+`errors`) is compact JSON too. Parse it; do not match its layout
+([ADR-0078](/chartgen/decisions/0078-compact-tool-answers/)).
+
 **Time units.** `t` and fields ending in `_t` are unix seconds (chart coordinates).
 Fields ending in `_time` or `_at` are unix milliseconds. The one exception is server
 alerts' `bar_time`, which is in seconds and stays so for webhook compatibility.
@@ -852,6 +857,18 @@ Return the full indicator catalog with descriptions, aliases, and configurable
 parameters. Call before `generate_chart` to discover valid names. With
 scripting on, the caller's own scripts are included, tagged `"source": "user"`;
 a script replaces the entry of the built-in it shadows.
+
+Optional: `detail`, `full` (default) or `compact`. The full catalog is about 35 KB; `compact`
+gives each indicator's name and its parameters' defaults by name, about 5 KB, which is what a
+call to `get_indicators` needs
+([ADR-0078](/chartgen/decisions/0078-compact-tool-answers/)):
+
+```json
+{"total": 79, "indicators": [{"name": "ema_stack"}, {"name": "rsi", "params": {"length": 14}}, ...]}
+```
+
+`params` is absent for an indicator without parameters, and a script of yours keeps
+`"source": "user"`. Ranges, enums and descriptions are only in the full entry.
 
 #### `get_indicators`
 

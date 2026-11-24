@@ -436,6 +436,9 @@ export const IndicatorInfoSchema = z.object({
   source: z.literal("user").optional(),
 });
 
+// `list_indicators` as the web app asks for it, with no `detail`: the full entries. Its
+// `detail: "compact"` (ADR-0078) answers names and parameter defaults only; the web app
+// never sends it.
 export const ListIndicatorsPayloadSchema = z.object({
   total: z.number().int(),
   indicators: z.array(IndicatorInfoSchema),
