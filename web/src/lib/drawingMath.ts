@@ -289,8 +289,9 @@ export type FittedPositionLabels = { [K in keyof PositionLabels]: string | null 
  * position tool (ADR-0006) offers compact stats and stats only while
  * selected; here the box's size picks the form. The zones and the entry line
  * are always drawn, so entry, stop, target and side stay visible.
- * - A label sticks out of the box by at most one label height on each side:
- *   the full text, else the short one, else none.
+ * - A label is at most two label heights wider than the box: the full text,
+ *   else the short one, else none. Centered, that is one height a side; at a
+ *   pane edge labelX pushes it inward, so the inner side may take both.
  * - Target and stop sit outside the box, one on each side; both go when the
  *   whole box is lower than one label.
  * - The ratio sits on the entry line inside the box; it goes when it would

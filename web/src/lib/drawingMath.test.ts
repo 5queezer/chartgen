@@ -203,7 +203,7 @@ describe("fitPositionLabels", () => {
   it("keeps every full label on a box large enough for them", () => {
     expect(fit(200, 60, 30)).toEqual(full);
   });
-  it("shortens, then drops, a label sticking out of the box by more than its height a side", () => {
+  it("shortens, then drops, a label more than two label heights wider than the box", () => {
     // Full target 166 px, stop 152 px, ratio 173 px; short prices 54 px, short ratio 68 px.
     // A box of w px has room for w + 36.
     expect(fit(137, 60, 30)).toEqual(full);
