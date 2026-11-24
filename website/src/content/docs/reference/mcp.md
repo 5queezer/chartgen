@@ -867,7 +867,7 @@ call to `get_indicators` needs
 {"total": 79, "indicators": [{"name": "ema_stack"}, {"name": "rsi", "params": {"length": 14}}, ...]}
 ```
 
-`params` is absent for an indicator without parameters, and a script of yours keeps
+A parameter without a default reads `null`, `params` is absent for an indicator without parameters, and a script of yours keeps
 `"source": "user"`. Ranges, enums and descriptions are only in the full entry.
 
 #### `get_indicators`
