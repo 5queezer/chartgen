@@ -5018,8 +5018,14 @@ async fn an_alert_stops_at_its_expiry_and_is_swept_like_a_spent_one() {
         .await
         .unwrap_err();
     assert!(err.contains("has expired"), "{err}");
-    let args = json!({"alert_id": id, "level": 120.0});
-    assert!(call(&a, "update_server_alert", args, "me").await.is_err());
+    // A new level or end on its own does not run it again.
+    let args = json!({"alert_id": id, "level": 120.0, "expires_at": ""});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(
+        (&view["active"], &view["level"]),
+        (&json!(false), &json!(120.0))
+    );
+    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(past);
     let args = json!({"alert_id": id, "active": true, "expires_at": ""});
     let view = call(&a, "update_server_alert", args, "me").await.unwrap();
     assert_eq!(view["active"], true);
@@ -5053,4 +5059,47 @@ async fn an_expiry_must_lie_ahead() {
     args["expires_at"] = json!("");
     let id = create(&a, args, "me").await;
     assert!(get(&a, "me", &id).await.get("expires_at").is_none());
+}
+
+/// Past its end but before the sweep, the alert is still marked active: taking its end
+/// off must not run it again without active: true.
+#[tokio::test(flavor = "multi_thread")]
+async fn clearing_the_end_of_an_expired_alert_does_not_resume_it() {
+    let (store, _) = store_at("expires-clear");
+    let a = plain(store);
+    let mut args = spec("greater", "every", 100.0);
+    args["expires_at"] = json!(now_ms() + 3_600_000);
+    let id = create(&a, args, "me").await;
+    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(now_ms() - 1);
+    assert!(a.lock().alerts[&id].active, "the sweep has not run");
+    let args = json!({"alert_id": id, "expires_at": ""});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["active"], false);
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+}
+
+/// An alert that last fired long ago is kept for the TTL after its expiry, not deleted
+/// by that old fire in the sweep that switches it off.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_fire_does_not_cut_the_time_kept_after_expiry() {
+    let (store, _) = store_at("expires-old-fire");
+    store.save_oauth_client("me", &[]).unwrap();
+    store.mark_oauth_client_used("me").unwrap();
+    let a = plain(store);
+    let mut args = spec("greater", "every", 100.0);
+    args["expires_at"] = json!(now_ms() + 3_600_000);
+    let id = create(&a, args, "me").await;
+    let now = now_ms();
+    {
+        let mut st = a.lock();
+        let r = st.alerts.get_mut(&id).unwrap();
+        r.last_triggered_at = Some(now - SPENT_TTL_MS - 86_400_000);
+        r.expires_at = Some(now - 1);
+    }
+    a.sweep(&mut a.lock(), now);
+    assert!(a.lock().alerts.contains_key(&id), "kept after its expiry");
+    assert!(!a.lock().alerts[&id].active);
+    a.sweep(&mut a.lock(), now + SPENT_TTL_MS + 60_000);
+    assert!(!a.lock().alerts.contains_key(&id));
 }

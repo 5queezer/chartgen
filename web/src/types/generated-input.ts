@@ -922,7 +922,7 @@ export interface UpdateServerAlertInput {
    */
   condition?: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less" | "bar_close";
   /**
-   * A new end, in the future, or an empty string for none. It does not switch on an alert that has expired: send active: true with it.
+   * A new end, in the future, or an empty string for none. It does not switch on an alert that has expired, even one the sweep has not switched off yet: send active: true with it.
    */
   expires_at?: number | string;
   /**

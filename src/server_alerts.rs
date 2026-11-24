@@ -1598,9 +1598,13 @@ impl ServerAlerts {
             .alerts
             .values()
             .filter(|a| {
-                let spent = !a.active
-                    && (a.last_triggered_at.is_some_and(|t| now - t > SPENT_TTL_MS)
-                        || a.expires_at.is_some_and(|t| now - t > SPENT_TTL_MS));
+                // Kept for the TTL after the later of its last fire and its expiry, so an
+                // old fire cannot delete an alert that has just expired.
+                let ended = [a.last_triggered_at, a.expires_at.filter(|&t| t <= now)]
+                    .into_iter()
+                    .flatten()
+                    .max();
+                let spent = !a.active && ended.is_some_and(|t| now - t > SPENT_TTL_MS);
                 let idle = last_tokens.as_ref().is_some_and(|tokens| {
                     let last = tokens.get(&a.owner).map_or(0, |secs| secs * 1000);
                     !self.access.keeps_idle_alerts(&a.owner)
@@ -2488,6 +2492,9 @@ impl ServerAlerts {
             .cloned()
             .ok_or("No such alert")?;
         let was_spent = is_spent(&next);
+        let now = now_ms();
+        // Expired, whether or not the sweep has switched it off yet.
+        let was_expired = next.expired(now);
         // What decides when it fires: a note or a webhook does not bring a spent alert
         // back, and neither does the dialog sending the same values again.
         let redefined = condition.is_some_and(|c| c != next.condition)
@@ -2537,7 +2544,13 @@ impl ServerAlerts {
         if let Some(at) = expires_at {
             next.expires_at = at;
         }
-        if (redefined || active == Some(true)) && next.expired(now_ms()) {
+        // Only an explicit resume runs an expired alert again: not a new end on its own,
+        // nor a new condition, level or trigger.
+        if was_expired && active != Some(true) {
+            next.active = false;
+            next.disarmed = false;
+        }
+        if next.active && next.expired(now) {
             return Err(
                 "This alert has expired: send a later expires_at, or an empty string to take it off"
                     .into(),

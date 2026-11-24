@@ -1297,10 +1297,11 @@ what your client may do.
 - `expires_at`: when the alert stops, as unix seconds, unix ms or an ISO 8601 time, ahead of
   now and at most a year out. No price or close after it fires the alert, its feed is let go,
   and within a minute it is switched off (`active: false`), then deleted 7 days later like a
-  spent alert. Without it an alert has no end. `update_server_alert` sets a new one, or takes
-  it off with `""`; an alert that has expired resumes only with `active: true` and a later
-  `expires_at` (or `""`), and a new `condition`, `level` or `trigger` is refused on it until
-  then. A build from before this field runs such an alert with no end.
+  spent alert, counted from its expiry or its last fire, whichever is later. Without it an alert
+  has no end. `update_server_alert` sets a new one, or takes it off with `""`. An alert that has
+  expired, even before it shows `active: false`, runs again only with `active: true` and a
+  later `expires_at` (or `""`); a new end, condition, level or trigger alone is stored and leaves
+  it stopped. A build from before this field runs such an alert with no end.
 
 An alert in a list:
 
