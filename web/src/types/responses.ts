@@ -515,6 +515,38 @@ export const GetIndicatorsPayloadSchema = z.object({
 });
 export type GetIndicatorsPayload = z.infer<typeof GetIndicatorsPayloadSchema>;
 
+// get_indicators with `intervals`: one entry per interval, in request order.
+//   Each indicator is the summary shape less what only draws it (`reading_of`):
+//   no is_overlay, y_range, fills_count, decorative_dots, nor a line's index.
+export const IndicatorReadingSchema = SummaryIndicatorSchema.omit({
+  is_overlay: true,
+  y_range: true,
+  fills_count: true,
+  decorative_dots: true,
+}).extend({
+  lines: z.array(SummaryLineSchema.omit({ index: true })).optional(),
+  histogram: z.array(SummaryHistogramBucketSchema.omit({ index: true })).optional(),
+});
+
+export const GetIndicatorsIntervalsPayloadSchema = z.object({
+  symbol: z.string(),
+  intervals: z.array(
+    z.union([
+      z.object({
+        interval: z.string(),
+        source: z.enum(["engine_cache", "fetched"]),
+        bars: z.number().int().optional(),
+        indicators: z.record(
+          z.string(),
+          z.union([IndicatorReadingSchema, z.object({ error: z.string() })]),
+        ),
+      }),
+      z.object({ interval: z.string(), error: z.string() }),
+    ]),
+  ),
+});
+export type GetIndicatorsIntervalsPayload = z.infer<typeof GetIndicatorsIntervalsPayloadSchema>;
+
 // ---------------------------------------------------------------------------
 // get_quotes — `get_quotes` in `src/mcp.rs` (ADR-0011).
 //   One entry per distinct requested symbol, in request order: a quote,

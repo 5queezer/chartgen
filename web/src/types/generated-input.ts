@@ -442,6 +442,19 @@ export interface GetIndicatorsInput {
    */
   interval?: string;
   /**
+   * Several candle intervals in one call, each as interval (e.g. ["1h", "4h", "1d"]); repeats count once. Instead of interval, not with it.
+   *
+   * @minItems 1
+   * @maxItems 6
+   */
+  intervals?:
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string];
+  /**
    * Trading symbol (e.g. BTCUSDT, ETHUSDT, AAPL)
    */
   symbol: string;

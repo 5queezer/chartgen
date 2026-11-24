@@ -157,7 +157,7 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "get_indicators",
-                "description": "Compute technical indicators for a symbol and return raw numeric values as JSON. Fetches OHLCV data (or uses cached engine data if running in --trade mode) and computes the requested indicators, returning the last values of each line, dot presence, and horizontal reference levels. This is the key tool for automated technical analysis.",
+                "description": "Compute technical indicators for a symbol and return raw numeric values as JSON. Fetches OHLCV data (or uses cached engine data if running in --trade mode) and computes the requested indicators, returning the last values of each line, dot presence, and horizontal reference levels. This is the key tool for automated technical analysis. To read several timeframes in one call, pass intervals (e.g. [\"1h\", \"4h\", \"1d\"]) instead of interval: the answer is then {symbol, intervals: [...]}, one entry per interval in request order, each {interval, source, bars, indicators} or {interval, error} when that interval fails (the others still answer). In that answer each indicator leaves out what only draws it (is_overlay, y_range, fills_count, decorative_dots and the index of each line and histogram, whose order is kept).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -169,6 +169,13 @@ pub fn tools_list_result() -> Value {
                             "type": "string",
                             "description": "Candle interval, as generate_chart's timeframe (e.g. 1m, 7m, 45m, 1h, 4h, 8h, 1d, 2D, 2W)",
                             "default": "4h"
+                        },
+                        "intervals": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "minItems": 1,
+                            "maxItems": 6,
+                            "description": "Several candle intervals in one call, each as interval (e.g. [\"1h\", \"4h\", \"1d\"]); repeats count once. Instead of interval, not with it."
                         },
                         "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." },
                         "indicators": {
