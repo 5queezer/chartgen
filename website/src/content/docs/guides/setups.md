@@ -119,9 +119,7 @@ invalidation, `expired` the expiry and `cancelled` your cancel.
 
 **`won` is not the same as a gain.** The result is after costs, so a target nearer to the fill
 than the round-trip costs is `won` with a negative `result_r`. `net` says the sign after costs:
-`gain`, `loss` or `even` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)). This
-happens most often to a skip: its bracket is set around the last close of its interval, and it
-fills at the next 1m open, which may already be close to the target.
+`gain`, `loss` or `even` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)).
 
 ## Shadow results
 

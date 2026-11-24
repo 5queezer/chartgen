@@ -20,11 +20,7 @@ conclusions or that it could not ask.
    Its `result_r` is the move from the fill to the exit in R, less the assumed fee and slippage
    on both sides ([ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)). When the target
    is nearer to the fill than the round-trip costs, the setup is `won` and its result is
-   negative. The client counted such setups as wins. This happens most often on a skip. A
-   skip's bracket is set around the close of the last bar of its interval, and the skip fills
-   at the open of the next 1m bar. If the price has moved toward the target in between, the
-   fill can land almost on the target. A take can do the same when its target sits just
-   beyond a wide entry zone.
+   negative. The client counted such setups as wins.
 2. **No grouping by tag.** Tags are the client's own labels, for example `trigger:alert-…` and
    `trigger:scan-…` for what made it look. `list_setups` filters by tag, but `get_track_record`
    cannot count per tag, so the client cannot compare its triggers.
@@ -92,9 +88,6 @@ comparison would break if `won` meant something else. A new status (option 1) wo
 reader of the status at once: list filters, the web app, the event log, and clients that branch
 on `won`. Redefining `won` (option 2) would silently change stored history. Documentation alone
 (option 4) leaves every reader to do the arithmetic, which is how the mistake was made.
-
-The skip bracket's anchor, which causes most of these setups, is not changed here. That would
-change how skips are scored, and it needs a decision of its own (see Consequences).
 
 ### Tag prefixes (option 1)
 
@@ -166,11 +159,6 @@ group reads `null`, which looks like "not grouped" rather than "made without a v
   `unversioned`. The other groupings keep `null`.
 - Bad: a warning can be ignored, so a setup can still be made without a version by mistake.
   The record shows how many were.
-- Open: a skip's bracket is set around the last close of its interval, but the skip fills at
-  the next 1m open. When the price has moved in between, the distances in R from the fill are
-  not the 1 ATR and 2 ATR the tool describes, and a skip can be `won` from almost no move.
-  Anchoring the bracket on the fill would change how skips are scored, and needs its own
-  decision.
 
 ## Validation
 
