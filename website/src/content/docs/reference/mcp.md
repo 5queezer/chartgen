@@ -1722,7 +1722,8 @@ setups; `can_create` in the list says so.
   ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)). **Once your newest setup
   states one, `create_setup` makes a setup without one all the same and answers with
   `warnings`:** `["playbook_version missing; this setup is counted as unversioned"]`. If you
-  never state one, there is no warning. `unversioned` itself is refused as a version.
+  never state one, there is no warning. The key means "no usable version": a setup that
+  states `unversioned` is made, counted with them, and warned about.
 - `skip_reason` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)): with
   `decision: skip` only, why you did not take it, as a label of 1 to 32 characters such as
   `correlation-limit`, to group skips by. The why in words goes in the thesis. It is fixed as

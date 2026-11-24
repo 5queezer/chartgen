@@ -131,8 +131,8 @@ that never stated a version gets no warning, and other owners' setups do not cou
 `get_track_record` counts every setup without a version under the key **`unversioned`** with
 `group_by: playbook_version`, in place of `null`, and the filter `playbook_version:
 "unversioned"` selects them. A setup made before this decision without a version is counted
-the same way. `create_setup` refuses `unversioned` as a stated version, so the word always
-means "made without one". No stored setup states it.
+the same way. The key means "no usable version": a setup that states `unversioned` itself is
+made, counted with them, and its answer warns that the word is reserved.
 
 Refusing the setup (option 1) would catch the mistake at the moment it can still be fixed. A
 live client whose call is refused may not send it again, though, and then loses the setup,

@@ -153,7 +153,7 @@ export interface CreateSetupInput {
    */
   invalidation?: number;
   /**
-   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. A setup without one is counted as unversioned, a word you cannot state; once your newest setup states one, the answer warns when this one does not. Fixed once the setup is made.
+   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. A setup without one is counted as unversioned, and so is one that states unversioned, which the answer warns about; once your newest setup states a version, the answer also warns when this one has none. Fixed once the setup is made.
    */
   playbook_version?: string;
   /**

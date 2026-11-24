@@ -938,11 +938,28 @@ impl Setups {
         let mut view = self.view(&record, &log);
         self.write(&mut st, vec![(record, log)])?;
         self.sync_feeds(&mut st);
-        if unversioned {
-            view["warnings"] = json!([format!(
-                "playbook_version missing; this setup is counted as {}",
-                setups::UNVERSIONED
-            )]);
+        // The track record's word for "no version" is accepted as stated, and counted
+        // with the setups that have none (ADR-0079).
+        let reserved = view["playbook_version"] == setups::UNVERSIONED;
+        let warnings: Vec<String> = [
+            unversioned.then(|| {
+                format!(
+                    "playbook_version missing; this setup is counted as {}",
+                    setups::UNVERSIONED
+                )
+            }),
+            reserved.then(|| {
+                format!(
+                    "'{}' is reserved for setups without a version; this setup is counted with them",
+                    setups::UNVERSIONED
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !warnings.is_empty() {
+            view["warnings"] = json!(warnings);
         }
         Ok(view)
     }
