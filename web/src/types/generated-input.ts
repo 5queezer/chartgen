@@ -46,6 +46,19 @@ export interface CreateServerAlertInput {
    */
   condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less" | "bar_close";
   /**
+   * Compare each close with this drawing of one of your setups instead of a level: needs evaluate_on: close, and takes no level and no indicator. Its points are copied now, so revising the setup's drawings later does not move the alert. A trend line (segment) is read along its slope past its end and not before its start; a ray from its origin; an extended line both ways; a horizontal line or price label at its price; a horizontal ray from its point on; a rectangle from its left edge on, by its top for crossing_up and greater and its bottom for crossing_down and less (crossing is refused). The price is the line's at the open time of the bar that closed. Other tools are refused. Fixed after creation, though setup_id for the wake-up is set apart from it.
+   */
+  drawing?: {
+    /**
+     * The drawing's place in that setup's drawings, from 0, as get_setup lists them.
+     */
+    index: number;
+    /**
+     * One of your setups, on this symbol.
+     */
+    setup_id: string;
+  };
+  /**
    * live: every price update, like a browser alert. close: only when a bar of the interval closes.
    */
   evaluate_on?: "live" | "close";

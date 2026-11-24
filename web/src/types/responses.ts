@@ -665,6 +665,16 @@ export const IndicatorViewSchema = z.object({
   value: z.number().nullable(),
 });
 
+/** A drawing alert's drawing (ADR-0081): copied from one of the owner's setups. `level` is
+ * its price at the last close read, null before the first. */
+export const DrawingViewSchema = z.object({
+  setup_id: z.string(),
+  index: z.number().int(),
+  tool: z.string(),
+  points: z.array(z.object({ timestamp: z.number(), price: z.number() })),
+  level: z.number().nullable(),
+});
+
 export const ServerAlertSchema = z.object({
   id: z.string(),
   symbol: z.string(),
@@ -716,6 +726,8 @@ export const ServerAlertSchema = z.object({
    * the line at the last close it read, null until it has read one.
    */
   indicator: IndicatorViewSchema.optional(),
+  /** Present only on an alert on a drawing of a setup, at bar closes (ADR-0081). */
+  drawing: DrawingViewSchema.optional(),
 });
 export type ServerAlert = z.infer<typeof ServerAlertSchema>;
 
