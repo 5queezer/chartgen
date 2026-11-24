@@ -104,3 +104,4 @@ one and link both ways.
 | [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | The autodeploy follows a deployment until the platform finished it | Accepted | 2026-11-15 |
 | [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | get_quotes marks a quote that is not trading as stale | Accepted | 2026-11-15 |
 | [0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) | A setup records the market context it was made in | Accepted | 2026-11-15 |
+| [0083](/chartgen/decisions/0083-a-rule-based-strategy-tester/) | A rule-based strategy tester over replay fixtures | Proposed | 2026-11-24 |
