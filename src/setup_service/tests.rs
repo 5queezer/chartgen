@@ -2714,6 +2714,10 @@ async fn a_missing_playbook_version_is_made_with_a_warning_once_versions_are_use
     assert!(s.owned("owner", &id_of(&warned)).is_some(), "it was made");
     // The newest counts: after one without a version, the next is not warned.
     assert!(created(&s, "owner").get("warnings").is_none());
+    // The record's word for "none" cannot be stated, so it means only that.
+    let reserved = with(long(), json!({ "playbook_version": "unversioned" }));
+    let refused = call(&s, "create_setup", reserved, "owner").unwrap_err();
+    assert_eq!(errors(&refused), ["playbook_version"], "{refused}");
 }
 
 /// `skip_reason` is stated on a skip, fixed like the others, and refused on a take.

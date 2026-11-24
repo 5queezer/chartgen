@@ -153,7 +153,7 @@ export interface CreateSetupInput {
    */
   invalidation?: number;
   /**
-   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. A setup without one is counted as unversioned; once your newest setup states one, the answer warns when this one does not. Fixed once the setup is made.
+   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. A setup without one is counted as unversioned, a word you cannot state; once your newest setup states one, the answer warns when this one does not. Fixed once the setup is made.
    */
   playbook_version?: string;
   /**
@@ -588,7 +588,7 @@ export interface GetTrackRecordInput {
    */
   symbol?: string;
   /**
-   * With group_by: tag, the starts of the tags to count by, each a group, such as ["trigger:alert", "trigger:scan"]. A whole tag is a prefix of itself.
+   * With group_by: tag, the starts of the tags to count by, each a group, such as ["trigger:alert", "trigger:scan"]. Longer tags that start the same are in the group too: trigger:scan takes trigger:scan-4h.
    *
    * @minItems 1
    * @maxItems 10

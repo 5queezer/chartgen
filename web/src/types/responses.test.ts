@@ -388,6 +388,17 @@ describe("what a setup was made with, and the track record (ADR-0064)", () => {
     expect(grouped.groups.reduce((n, g) => n + g.count, 0)).toBe(grouped.total.count);
   });
 
+  it("parses the record grouped by tag prefix and by skip reason (ADR-0079)", () => {
+    const byTag = TrackRecordPayloadSchema.strict().parse(record.get_track_record_by_tag);
+    expect(byTag.group_by).toBe("tag");
+    expect(byTag.tag_prefixes).toEqual(["trigger:example-a", "trigger:example-b"]);
+    expect(byTag.groups.map((g) => g.key)).toEqual([null, "trigger:example-b"]);
+    const byReason = TrackRecordPayloadSchema.strict().parse(record.get_track_record_by_skip_reason);
+    expect(byReason.group_by).toBe("skip_reason");
+    expect(byReason.groups.map((g) => g.key)).toEqual([null, "example-reason"]);
+    expect(byReason.total.net_gain + byReason.total.net_loss).toBeLessThanOrEqual(byReason.total.count);
+  });
+
   it("refuses a field the server does not send, at every level of the record", () => {
     const strict = (change: (r: Record<string, any>) => void) => {
       const r = structuredClone(record.get_track_record_grouped) as Record<string, any>;

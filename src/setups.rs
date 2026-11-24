@@ -1200,6 +1200,18 @@ impl Draft {
         let probability = probability(args, problems);
         let playbook_version = match args.get("playbook_version") {
             None | Some(Value::Null) => None,
+            // The track record's name for setups without one (ADR-0079): stated, it
+            // could not be told apart from them.
+            Some(v) if v.as_str() == Some(UNVERSIONED) => {
+                problems.push(
+                    Problem::new(
+                        "playbook_version",
+                        format!("{UNVERSIONED} is what the track record calls a setup without a playbook_version"),
+                    )
+                    .hint("leave playbook_version out, or name the version otherwise"),
+                );
+                None
+            }
             Some(_) => text(args, "playbook_version", MAX_STATED_TEXT, problems),
         };
         let skip_reason = match args.get("skip_reason") {

@@ -1722,7 +1722,7 @@ setups; `can_create` in the list says so.
   ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)). **Once your newest setup
   states one, `create_setup` makes a setup without one all the same and answers with
   `warnings`:** `["playbook_version missing; this setup is counted as unversioned"]`. If you
-  never state one, there is no warning.
+  never state one, there is no warning. `unversioned` itself is refused as a version.
 - `skip_reason` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)): with
   `decision: skip` only, why you did not take it, as a label of 1 to 32 characters such as
   `correlation-limit`, to group skips by. The why in words goes in the thesis. It is fixed as
@@ -1779,7 +1779,8 @@ many match the filters.
   `ctx_trend_4h`, `ctx_trend_1d` and `ctx_fear_greed` included), `probability`
   (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol`, `direction`,
   `skip_reason`, or `tag` (with `tag_prefixes`, 1 to 10 starts of tags, such as
-  `["trigger:alert", "trigger:scan"]`, each a group whose `key` is the prefix). A setup that
+  `["trigger:alert", "trigger:scan"]`, each a group whose `key` is the prefix; a prefix that
+  is a whole tag also takes longer tags that start with it). A setup that
   stated no `playbook_version` is in the group `unversioned`; one that stated none of the
   others, or has no tag with any of the prefixes, is in the group whose `key` is `null`.
   **With `tag`, a setup is in the group of each prefix one of its tags starts with**, so the

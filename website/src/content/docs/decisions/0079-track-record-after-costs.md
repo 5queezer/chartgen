@@ -94,8 +94,9 @@ on `won`. Redefining `won` (option 2) would silently change stored history. Docu
 `get_track_record` takes `group_by: "tag"` with **`tag_prefixes`**, a list of 1 to 10 strings.
 Each prefix is a group, and its key is the prefix. A setup is in the group of each prefix that
 one of its tags starts with, and counts once in that group even when several of its tags match.
-A setup with no matching tag is in the `null` group. A whole tag is a prefix of itself, so
-listing tags groups by exact tags.
+A setup with no matching tag is in the `null` group. Matching is by start only, so a prefix
+that is a whole tag also takes the longer tags that start with it: `trigger:scan` takes
+`trigger:scan-4h`.
 
 **Groups can overlap**: a setup tagged `trigger:alert-x` and `trigger:scan-y` is in both
 groups, so the groups need not add up to `total`. The tool says so. The other groupings give
@@ -130,8 +131,8 @@ that never stated a version gets no warning, and other owners' setups do not cou
 `get_track_record` counts every setup without a version under the key **`unversioned`** with
 `group_by: playbook_version`, in place of `null`, and the filter `playbook_version:
 "unversioned"` selects them. A setup made before this decision without a version is counted
-the same way. An agent that states the word `unversioned` as its version is counted together
-with them, which is what the word says.
+the same way. `create_setup` refuses `unversioned` as a stated version, so the word always
+means "made without one". No stored setup states it.
 
 Refusing the setup (option 1) would catch the mistake at the moment it can still be fixed. A
 live client whose call is refused may not send it again, though, and then loses the setup,
