@@ -13,6 +13,7 @@ import {
   formatAmount,
   positionLabels,
   priceRangeLabel,
+  shortPositionLabels,
 } from "../../src/lib/drawingMath";
 
 const KEY = "chartgen.drawings.BTCUSDT";
@@ -298,5 +299,128 @@ test.describe("drawing tools 2", () => {
     // The release is not a click: nothing got armed.
     await expect(page.getByRole("menuitem", { name: "Date range", exact: true })).toBeVisible();
     await expect(btn).toHaveAttribute("aria-pressed", "false");
+  });
+});
+
+// Position labels at any zoom (fitPositionLabels in drawingMath, collision with
+// other positions in drawingOverlays). Positions are seeded in pixels of the view
+// on screen, so their size does not depend on the sample data's clock.
+const POS_LABEL_H = 12 + 2 * 3;
+
+interface Seed {
+  kind: "long" | "short";
+  /** Bars before the last bar on screen, of the left and right edge. */
+  from: number;
+  to: number;
+  /** Heights of the reward and risk zone, in px. */
+  reward: number;
+  risk: number;
+}
+
+type TestChart = {
+  getDataList: () => { timestamp: number }[];
+  getVisibleRange: () => { realTo: number };
+  getSize: (pane: string) => { height: number } | null;
+  convertFromPixel: (c: { y: number }[], f: { paneId: string }) => { value: number }[];
+  setBarSpace: (space: number) => void;
+};
+
+async function seedPositions(page: Page, seeds: Seed[]): Promise<void> {
+  await page.evaluate(
+    ({ key, seeds }) => {
+      const c = (window as unknown as { __chartgenTest: { chart: () => TestChart } }).__chartgenTest.chart();
+      const list = c.getDataList();
+      const last = Math.min(c.getVisibleRange().realTo, list.length) - 1;
+      const mid = c.getSize("candle_pane")!.height / 2;
+      const value = (y: number) => c.convertFromPixel([{ y }], { paneId: "candle_pane" })[0]!.value;
+      const records = seeds.map((s, i) => {
+        // y grows downwards: a long's target is above the entry.
+        const up = s.kind === "long" ? -1 : 1;
+        return {
+          id: `seed-${i}`,
+          name: s.kind === "long" ? "cgLong" : "cgShort",
+          points: [
+            { timestamp: list[last - s.from]!.timestamp, value: value(mid) },
+            { timestamp: list[last - s.to]!.timestamp, value: value(mid + up * s.reward) },
+            { timestamp: list[last - s.to]!.timestamp, value: value(mid - up * s.risk) },
+          ],
+          lock: false,
+          visible: true,
+        };
+      });
+      localStorage.setItem(key, JSON.stringify(records));
+    },
+    { key: KEY, seeds },
+  );
+  await reloadApp(page);
+  await expect.poll(async () => (await overlays(page)).length).toBe(seeds.length);
+}
+
+const texts = (o: Live) => {
+  const [e, t, s] = o.points.map((p) => p.value) as [number, number, number];
+  const kind = o.name === "cgLong" ? "long" : "short";
+  return {
+    full: positionLabels(kind, e, t, s, o.precision),
+    short: shortPositionLabels(kind, e, t, s, o.precision),
+  };
+};
+
+/** Box size on screen: width, and heights of the reward and risk zone. */
+const boxOf = (o: Live) => {
+  const [e, t, s] = o.pixels as [At, At, At];
+  return { width: Math.abs(t.x - e.x), reward: Math.abs(t.y - e.y), risk: Math.abs(s.y - e.y) };
+};
+
+test.describe("position labels at any zoom", () => {
+  test("a low box drops the ratio and keeps target and stop; zoomed out, no full text", async ({
+    bootedApp: page,
+  }) => {
+    // As in the zoomed-out report: a short about as low as one label, with a thin stop zone.
+    await seedPositions(page, [{ kind: "short", from: 60, to: 20, reward: 20, risk: 4 }]);
+    const [o] = await overlays(page);
+    const box = boxOf(o!);
+    // The premise, with margin: the scale may move a little on the reload.
+    expect(box.reward + box.risk).toBeGreaterThanOrEqual(POS_LABEL_H + 2);
+    expect(box.risk).toBeLessThanOrEqual(POS_LABEL_H / 2 - 2);
+    expect(box.width).toBeGreaterThan(250);
+    const { full, short } = texts(o!);
+    await expect.poll(async () => (await overlays(page))[0]?.labels).toEqual([full.target, full.stop]);
+
+    // Zoomed out the box is 40 px wide: room for no full text, at most the short ones.
+    await page.evaluate(() =>
+      (window as unknown as { __chartgenTest: { chart: () => TestChart } }).__chartgenTest.chart().setBarSpace(1),
+    );
+    await expect.poll(async () => boxOf((await overlays(page))[0]!).width).toBeLessThanOrEqual(41);
+    const allowed = new Set([short.target, short.stop, short.ratio]);
+    await expect
+      .poll(async () => ((await overlays(page))[0]?.labels ?? []).every((l) => allowed.has(l)))
+      .toBe(true);
+  });
+
+  test("a large box keeps all three full labels", async ({ bootedApp: page }) => {
+    await seedPositions(page, [{ kind: "long", from: 60, to: 20, reward: 80, risk: 40 }]);
+    const [o] = await overlays(page);
+    const box = boxOf(o!);
+    expect(Math.min(box.reward, box.risk)).toBeGreaterThan(POS_LABEL_H);
+    const { full } = texts(o!);
+    await expect.poll(async () => (await overlays(page))[0]?.labels).toEqual([
+      full.target,
+      full.stop,
+      full.ratio,
+    ]);
+  });
+
+  test("labels of positions close together do not overlap", async ({ bootedApp: page }) => {
+    // Two positions on top of each other, and a third apart from them.
+    const big = { kind: "long", reward: 80, risk: 40 } as const;
+    await seedPositions(page, [
+      { ...big, from: 60, to: 25 },
+      { ...big, from: 60, to: 25 },
+      { ...big, from: 130, to: 95 },
+    ]);
+    const shown = async () => (await overlays(page)).map((o) => o.labels?.length ?? 0);
+    // Of the two on top of each other one draws its labels and the other none; the third all.
+    await expect.poll(async () => (await shown()).slice(0, 2).sort()).toEqual([0, 3]);
+    expect((await shown())[2]).toBe(3);
   });
 });

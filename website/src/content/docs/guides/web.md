@@ -507,6 +507,13 @@ cross, so alerts are not offered on it.
   and percent, and `Risk/Reward Ratio: 2.00` updates while you drag. The
   zones are green (reward) and red (risk); the labels stay centered on the
   part of the box that is on screen. The style bar's color is the entry line.
+  When the box is small on screen (zoomed out, or narrow in time) the labels
+  make room: a label reaches past the box by at most its own height on each
+  side, else it shows only the price (`R/R 2.00` for the ratio), else it is
+  left out. Target and stop go when the whole box is lower than one label, and
+  the ratio when it would cross the target or stop line. A label that would
+  cover one of another position is left out too. The zones and the entry line
+  always stay, so entry, stop, target and side remain visible.
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
 - **Right-click** a drawing for its [menu](#right-click-menus): Style, Clone,
