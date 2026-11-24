@@ -1683,7 +1683,7 @@ setups; `can_create` in the list says so.
 | `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags`, `features`, `probability`, `playbook_version` | The setup with its log |
 | `revise_setup` | `id`, `reason`; any of `thesis`, `drawings`, `tags`, `entry`, `invalidation`, `targets`, `expires_at` | The setup with its log |
 | `get_setup` | `id` | The setup with its log |
-| `list_setups` | optional `status`, `symbol`, `tags` (only setups that have all of them), `limit` (default 50, at most 500) | `{enabled, can_create, replay, total, limits, setups: [...]}`, newest first, without logs |
+| `list_setups` | optional `status`, `symbol`, `tags` (only setups that have all of them), `limit` (default 50, at most 500), `fields` (only these fields of each setup) | `{enabled, can_create, replay, total, limits, open_risk, setups: [...]}`, newest first, without logs |
 | `cancel_setup` | `id`, `reason` | The setup with its log |
 | `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature` | `{replay, closed, open, truncated, group_by, feature, total, groups: [...], shadows}` |
 
@@ -1755,6 +1755,21 @@ entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `c
 
 A call that fails a check answers with an error whose text is JSON:
 `{error, setup_errors: [{field, message, hint}]}`, one entry per problem, and stores nothing.
+
+`list_setups` returns whole setups, a few KB each with the thesis, drawings and shadow results.
+With `fields`, a list of the fields above (`log` is not one), each setup has only those and its
+`id`, and a field a setup does not have, such as `probability` where none was stated, stays out:
+`{"fields": ["status", "result_r", "tags", "created_at"]}` is enough to see what happened, and
+`get_setup` reads the rest ([ADR-0078](/chartgen/decisions/0078-compact-tool-answers/)). A field
+that is not one is refused.
+
+`open_risk` in the list adds up your open takes, whatever the call's `status`, `symbol`, `tags`
+and `limit`: `long` and `short`, and `by_symbol` with a `{symbol, direction}` entry for each pair
+that has one. Each has `takes` (watching or triggered), `risk_r` (each take risks 1 R, its own
+risk from fill to invalidation, which is fixed from the fill on, so this is the number of takes),
+`filled` (of them, triggered) and `filled_at_stop_r` (what the filled ones would end at together,
+after costs, if each went out at its invalidation now: a little below -1 R each). Skips are not
+trades and are not in it. It reports; the server limits nothing by it.
 
 #### Your track record
 

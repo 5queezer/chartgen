@@ -512,7 +512,7 @@ pub fn setup_tools() -> Vec<Value> {
         CONTEXT_PREFIX, FEE_BPS_PER_SIDE, MAX_FEATURES, MAX_REASON, MAX_RECORD_GROUPS,
         MAX_STATED_TEXT, MAX_TAG, MAX_TAGS, MAX_TARGETS, MAX_THESIS, MIN_RISK_IN_ROUND_TRIP_COSTS,
         SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR, SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
-        STOCK_FEE_BPS_PER_SIDE, STOCK_SLIPPAGE_BPS_PER_SIDE,
+        STOCK_FEE_BPS_PER_SIDE, STOCK_SLIPPAGE_BPS_PER_SIDE, VIEW_FIELDS,
     };
     let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." });
     let time = "unix seconds, unix ms or an ISO 8601 time";
@@ -596,7 +596,7 @@ pub fn setup_tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_setups",
-            "description": "List your setups, newest first, without their logs, with what you may do (can_create) and the limits. On a server without setups this returns {enabled: false, setups: []}.",
+            "description": "List your setups, newest first, without their logs, with what you may do (can_create) and the limits. Each setup is as get_setup describes it, a few KB with its thesis, drawings and shadow results; pass fields for only some of them, such as [\"status\", \"result_r\", \"tags\", \"created_at\"] (id is always there), and read the rest with get_setup. Without fields every setup is whole, as before. open_risk adds up your open takes, whatever this call's filters: per direction (long, short) and per symbol and direction, takes (watching or triggered), risk_r (each take risks 1 R, its own risk from fill to invalidation, fixed from the fill on, so risk_r is the number of takes), filled (of them, triggered) and filled_at_stop_r (what the filled ones would end at together, after costs, if each went out at its invalidation now: a little below -1 R each). Skips are not trades and are not in it. It reports and limits nothing. On a server without setups this returns {enabled: false, setups: []}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -604,6 +604,7 @@ pub fn setup_tools() -> Vec<Value> {
                     "symbol": { "type": "string", "description": "Only this symbol's." },
                     "tags": { "type": "array", "items": tag, "maxItems": MAX_TAGS, "description": "Only setups that have every one of these tags." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Most setups to return; total says how many matched." },
+                    "fields": { "type": "array", "items": { "type": "string", "enum": VIEW_FIELDS.as_slice() }, "description": "Only these fields of each setup, and its id. A field a setup does not have, such as probability where none was stated, stays out. Omit for whole setups." },
                     "as_of": as_of.clone()
                 }
             }
