@@ -115,7 +115,7 @@ at each 4h close, the model reads RSI with `get_indicators` and decides. 540 ses
 for t in closes("4h", window):                       # time-major: the replay clock only moves forward
     for sym in symbols:
         s = generate_chart(sym, "4h", format="series", indicators=[{"name": "rsi", "length": 14}],
-                           bars=2, as_of=t)
+                           bars=2, warmup=999, as_of=t)   # warmup: computed over 999 earlier bars, as an alert
         prev, now = s.rsi[-2], s.rsi[-1]
         if prev < 70 <= now and not open_setup(sym):
             bar = s.bars[-1]
@@ -126,8 +126,10 @@ for t in closes("4h", window):                       # time-major: the replay cl
 ```
 
 (`get_indicators` takes indicator names with default params and returns no bar fields, so the
-script reads a `series` chart.) The entry has to be a zone; "at that close" becomes a narrow
-zone the next 1m bar usually reaches.
+script reads a `series` chart; without `warmup` a two-bar series would compute RSI over two
+bars.) The entry has to be a zone; "at that close" becomes a narrow zone the next 1m bar usually
+reaches. The target is fixed before the fill, so where the fill lands inside the zone the reward
+is not exactly 2R of the risk at the fill: one of the limits of this option.
 
 **3. An alert condition and a bracket.**
 
@@ -190,14 +192,19 @@ in the library's terms, over bars the library loads.
   widened (the skip's `floor` bracket widens; whether a rule may opt into that is a question
   below).
 - **The targets** in R from the fill, **the expiry** in bars of the interval (at most 90 days).
+- **Checked at the fill, not at the signal.** The levels are set once the fill price is known,
+  and checked as `create_setup` checks them: a fill at or beyond the stop (a gap through the
+  signal bar's extreme), or one that leaves less risk than the floor, is not traded and counted
+  as `refused_at_fill`.
 - **The end of the fixture.** A trade still open when the fixture's 1m bars run out has no
   result. It is counted as `open_at_end` and listed, and is not in the closed figures, as an open
   setup is not in a live track record. Shadow variants still open there are counted as open, as
   `shadow_record` does. A rule whose expiry is long beside the window loses trades this way, and
   the count says how many.
-- **Overlap:** by default one open position per rule and symbol; a signal while one is open is
-  counted as `skipped_open`. Live, an owner has at most 20 open setups; the tester counts what it
-  skipped instead of pretending capital was unlimited.
+- **Overlap and limits:** by default one open position per rule and symbol; a signal while one is
+  open is counted as `skipped_open`. The live per-owner limits apply too (20 open setups, 5
+  symbols with an open setup), so a run never holds a trade a live owner could not have opened;
+  a signal they turn away is counted as `skipped_limit`.
 - Each signal becomes a `Record` scored by `apply_bar` over the fixture's 1m bars, with the live
   `Costs`, so it has `result_r`, `mae_r`/`mfe_r` and the three shadow variants exactly as a live
   setup would. `ctx_` features are `unknown`, as on any replay (ADR-0077).
@@ -214,7 +221,7 @@ A run's answer holds the same figures `get_track_record` gives, computed by the 
   "rule": { "...": "as given" }, "rule_sha256": "…",
   "fixtures": { "from": "2026-08-01", "to": "2026-10-31", "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"], "sha256": "…" },
   "costs": { "fee_bps_per_side": 5.0, "slippage_bps_per_side": 2.0 },
-  "signals": 41, "traded": 32, "refused_min_risk": 3, "skipped_open": 6, "before_warmup": 0, "open_at_end": 1,
+  "signals": 41, "traded": 32, "refused_min_risk": 3, "skipped_open": 6, "skipped_limit": 0, "refused_at_fill": 0, "before_warmup": 0, "open_at_end": 1,
   "total": { "count": 31, "won": 13, "invalidated": 15, "expired": 3, "mean_r": 0.11, "...": "as get_track_record" },
   "groups": [ { "key": "BTCUSDT", "...": "per symbol" } ],
   "by_month": [ { "key": "2026-08", "...": "per month" } ],
