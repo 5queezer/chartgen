@@ -5018,6 +5018,7 @@ async fn an_alert_fires_only_where_every_clause_holds_at_that_close() {
     assert_eq!(a.lock().alerts[&never].fire_count, 0, "106 is not under 50");
     let view = get(&a, "me", &id).await;
     assert_eq!(view["and"][0]["condition"], "greater");
+    assert!(view["and"][0]["level"].is_null(), "compare: close has none");
     assert_eq!(view["and"][0]["indicator"]["line"], "SMA 5");
     assert!((view["and"][0]["indicator"]["value"].as_f64().unwrap() - 102.0).abs() < 1e-9);
     let view = get(&a, "me", &never).await;

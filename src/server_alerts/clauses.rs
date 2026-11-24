@@ -107,7 +107,11 @@ impl Clause {
 
     /// As the alert's owner and its deliveries show it; `value` at the last close read.
     pub(super) fn view(&self, value: Option<f64>) -> Value {
-        let mut v = json!({ "condition": self.condition, "level": self.level });
+        // An indicator's level is in its spec, as on the alert itself.
+        let level = self
+            .level
+            .or_else(|| self.indicator.as_ref().and_then(|s| s.level));
+        let mut v = json!({ "condition": self.condition, "level": level });
         match &self.indicator {
             Some(spec) => v["indicator"] = indicator::view(spec, value),
             None => v["price"] = json!(value),
@@ -172,6 +176,11 @@ mod tests {
             parse(&json!({ "and": [{ "condition": "less", "indicator": "rsi", "level": 30 }] }))
                 .unwrap();
         assert_eq!(rsi[0].indicator.as_ref().unwrap().line, "RSI");
-        assert!(rsi[0].level.is_none());
+        assert_eq!(
+            rsi[0].view(Some(28.0))["level"],
+            30.0,
+            "shown as the alert's own is"
+        );
+        assert_eq!(rsi[0].view(Some(28.0))["indicator"]["value"], 28.0);
     }
 }
