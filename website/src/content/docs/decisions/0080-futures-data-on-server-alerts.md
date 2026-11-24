@@ -84,7 +84,9 @@ Chosen: **a**, **ii** and **y**, in `src/server_alerts/indicator.rs` and `src/se
   For each, a blocking task reads the series over the last 50 closed bars (`FUTURES_BARS`),
   with the symbol and interval, and then takes the lock and evaluates the alert with that
   reading. A read that comes back after a later close's is dropped. A failed read skips the
-  close and is logged; the next close reads again.
+  close and is logged, and the alert keeps the value it read before: funding moves only at a
+  settlement, so its crossing shows at one close, and the next read still finds it, a close
+  late.
 - **A crossing** compares the value now with the value this alert read at its previous close,
   kept in memory. So, as for a price alert and unlike a bar-only indicator alert, the first
   close after creating the alert or after a restart never fires a crossing. `greater` and

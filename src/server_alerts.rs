@@ -1255,10 +1255,9 @@ impl ServerAlerts {
         st.futures_bars.insert(id.to_string(), bar_time);
         match read {
             Ok(r) => self.evaluate(st, key, id, price, bar_time, Instant::now(), Some(r)),
-            Err(e) => {
-                st.values.remove(id);
-                eprintln!("[alerts] {} {}: {e}", key.0, key.1);
-            }
+            // The value read before stays: funding moves at a settlement only, so its
+            // crossing shows at one close, and the next read can still find it.
+            Err(e) => eprintln!("[alerts] {} {}: {e}", key.0, key.1),
         }
     }
 

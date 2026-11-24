@@ -1413,7 +1413,8 @@ interval like any indicator alert.
 - A symbol with no futures market is refused when the alert is created, with the reason.
 - The rate is read off the alerts' lock, from Binance's funding history through the same cache
   and budget as a chart: one short read per symbol and close, shared by every alert and chart
-  on it. If that read fails, the close is skipped; the next one reads again.
+  on it. If that read fails, the close is skipped and the alert keeps the value it read before,
+  so the next close still sees a crossing, a close late.
 
 #### An alert at a bar's close
 

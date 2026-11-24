@@ -4979,9 +4979,13 @@ async fn a_bar_close_wake_up_from_the_log_has_no_level() {
 
 // ---- Futures-data alerts (ADR-0080) ----
 
+/// A FLAKY symbol's futures read fails while this is set.
+static FLAKY_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The futures read in tests, in place of Binance: funding in percent is the last
 /// close over 1000, on every bar, as a settlement shows on the bars nearest it; a
-/// NOFUT symbol has no futures market, and a SLOW one takes 400 ms.
+/// NOFUT symbol has no futures market, a SLOW one takes 400 ms, and a FLAKY one
+/// fails while `FLAKY_FAILS` is set.
 pub(super) fn read_futures(
     spec: &indicator::Spec,
     bars: &[Bar],
@@ -4990,6 +4994,9 @@ pub(super) fn read_futures(
 ) -> Result<indicator::Reading, String> {
     if symbol.starts_with("SLOW") {
         std::thread::sleep(Duration::from_millis(400));
+    }
+    if symbol.starts_with("FLAKY") && FLAKY_FAILS.load(Ordering::SeqCst) {
+        return Err("funding rate: Binance returned status 503".into());
     }
     if symbol.starts_with("NOFUT") {
         return Err(format!(
@@ -5100,4 +5107,42 @@ async fn a_funding_alert_needs_a_futures_market_and_a_level() {
     args["evaluate_on"] = json!("live");
     assert!(call(&a, "create_server_alert", args, "me").await.is_err());
     assert!(a.lock().alerts.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_funding_read_keeps_the_value_before_it() {
+    let (store, _) = store_at("funding-flaky");
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let id = create(&a, on_funding("FLAKYUSDT", "crossing_up", 0.06), "me").await;
+    let k = ("FLAKYUSDT".to_string(), "1h".to_string());
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    // 0.055% read; the next close fails to read; the one after reads 0.07%.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 55.0)));
+    until("the first read", || a.lock().values.contains_key(&id)).await;
+    FLAKY_FAILS.store(true, Ordering::SeqCst);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    until("the failed read", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + 2 * HOUR))
+    })
+    .await;
+    FLAKY_FAILS.store(false, Ordering::SeqCst);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    // The crossing is against the last value read, a close late rather than never.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 70.0)));
+    until("the late fire", || a.lock().alerts[&id].fire_count == 1).await;
 }
