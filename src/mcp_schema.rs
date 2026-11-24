@@ -493,11 +493,11 @@ pub const EVENT_TOOLS: [&str; 1] = ["list_events"];
 pub fn event_tools() -> Vec<Value> {
     vec![json!({
         "name": "list_events",
-        "description": "What happened that could wake your agent, read back: your alerts that fired with notify_agent, the status changes of your setups (triggered, won, invalidated, expired, cancelled), and a take that went 0.8 R against it (setup.near_stop, once per setup). Every event is logged before any wake-up is tried and stays for 7 days whether or not it was delivered, so this answers what you missed while your receiver was away. Oldest first. Pass the cursor of the last answer as after to read on. An event says what happened and when; read the setup or alert as it is now with get_setup and list_server_alerts.",
+        "description": "What happened that could wake your agent, read back: your alerts that fired with notify_agent, the status changes of your setups (triggered, won, invalidated, expired, cancelled), and a take that went 0.8 R against it (setup.near_stop, once per setup). Every event is logged before any wake-up is tried and stays for 7 days whether or not it was delivered, so this answers what you missed while your receiver was away. Oldest first. Keep the cursor of the last answer and pass it as after to read on; more: true means another page waits. truncated: true means events after your cursor are gone (older than 7 days or beyond your newest 1000), so read your setups and alerts as they are now. It does not depend on more: a last page can be truncated, and so is every read from after 0 once your oldest events aged out. An event says what happened and when; read the setup or alert as it is now with get_setup and list_server_alerts.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "after": { "type": "integer", "minimum": 0, "default": 0, "description": "Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept." },
+                "after": { "type": "integer", "minimum": 0, "default": 0, "description": "Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept, and truncated once your oldest events aged out." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50, "description": "Most events to return; more says whether others wait." }
             }
         }

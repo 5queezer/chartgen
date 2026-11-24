@@ -1644,6 +1644,12 @@ kept, and repeats while `more` is true.**
   next start, under its own id and with the time of its fire, and is sent from there.
 - The newest 1000 events are kept, for 7 days. **`truncated: true` means events after your
   cursor are gone:** read your setups and alerts as they are instead of relying on the log.
+- `truncated` and `more` are independent. `more` says whether another page waits after this
+  one; `truncated` says whether events behind it are gone. A last page (`more: false`) can be
+  `truncated: true`, and without a cursor (`after` 0) `truncated` is true as soon as your
+  oldest events aged out, so keep the `cursor` between calls. The `cursor` moves past what is
+  gone, also when nothing is left to return, so the next call with it is truncated only if more
+  went meanwhile.
 - Listed where server alerts or setups run. A replay server has no log and refuses the call.
 
 **Push** ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). `push: true` on an alert,
