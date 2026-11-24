@@ -1150,12 +1150,14 @@ On any touch screen:
 | Drag after a long press | Moves the crosshair instead of panning |
 | Tap elsewhere | Hides the crosshair |
 | Tap an indicator's legend row | Shows its alert, hide, settings and remove buttons |
+| One-finger drag on the price pane's axis | Scales it and turns `auto` off |
+| Double tap on the price pane's axis | Turns `auto` back on |
 
 The page itself does not scroll or pull to refresh, so gestures on the chart
 only reach the chart. A drawing dragged past its pane stops at the pane's edge, and
-lifting your finger on the separator there keeps the drag. Dragging an axis does nothing on touch, because klinecharts
-only scales axes for the mouse. Use a pinch for the time axis, and the `auto` and
-`log` buttons for the price axis.
+lifting your finger on the separator there keeps the drag. Dragging the time axis or an
+indicator pane's axis does nothing on touch, because klinecharts only scales those for
+the mouse. Use a pinch for the time axis.
 
 Touch has no right-click, and a long press belongs to the crosshair, so the
 [right-click menus](#right-click-menus) open only with a mouse. Their actions are
