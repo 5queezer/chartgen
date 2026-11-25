@@ -220,6 +220,80 @@ fn read_problem(field: &str, message: impl Into<String>) -> String {
     .unwrap_or_default()
 }
 
+/// `list_setups`'s `fields`: names of a setup's view (ADR-0078).
+fn view_fields(given: &Value) -> Result<HashSet<&'static str>, String> {
+    let wrong = || {
+        field_problem(
+            "fields",
+            format!(
+                "fields must be a list of a setup's fields: {}",
+                setups::VIEW_FIELDS.join(", ")
+            ),
+        )
+    };
+    given
+        .as_array()
+        .ok_or_else(wrong)?
+        .iter()
+        .map(|f| {
+            f.as_str()
+                .and_then(|f| setups::VIEW_FIELDS.iter().find(|v| **v == f).copied())
+                .ok_or_else(wrong)
+        })
+        .collect()
+}
+
+/// The risk of the caller's open takes, by direction and by symbol and direction
+/// (ADR-0078). Each risks 1 R, its own risk from fill to invalidation, which is fixed
+/// from the fill on; `filled_at_stop_r` is what the filled ones would end at together,
+/// after costs, if each went out at its invalidation now. Skips are not trades and count
+/// nowhere. It reports; it enforces nothing.
+fn open_risk<'a>(setups: impl Iterator<Item = &'a Record>, now: i64) -> Value {
+    #[derive(Default)]
+    struct Risk {
+        takes: u32,
+        filled: u32,
+        at_stop: f64,
+    }
+    impl Risk {
+        fn add(&mut self, r: &Record, now: i64) {
+            self.takes += 1;
+            if let Some(at_stop) = r.at_stop_r(now) {
+                self.filled += 1;
+                self.at_stop += at_stop;
+            }
+        }
+        fn json(&self, mut row: Value) -> Value {
+            row["takes"] = json!(self.takes);
+            row["risk_r"] = json!(self.takes);
+            row["filled"] = json!(self.filled);
+            row["filled_at_stop_r"] = json!((self.at_stop * 10_000.0).round() / 10_000.0);
+            row
+        }
+    }
+    let (mut long, mut short) = (Risk::default(), Risk::default());
+    let mut by_symbol: BTreeMap<(&str, &str), Risk> = BTreeMap::new();
+    for r in setups.filter(|r| r.status.is_open() && r.decision == Decision::Take) {
+        let (side, name) = match r.direction {
+            setups::Direction::Long => (&mut long, "long"),
+            setups::Direction::Short => (&mut short, "short"),
+        };
+        side.add(r, now);
+        by_symbol.entry((&r.symbol, name)).or_default().add(r, now);
+    }
+    let by_symbol: Vec<Value> = by_symbol
+        .iter()
+        .map(|((symbol, direction), risk)| {
+            risk.json(json!({ "symbol": symbol, "direction": direction }))
+        })
+        .collect();
+    json!({
+        "long": long.json(json!({})),
+        "short": short.json(json!({})),
+        "by_symbol": by_symbol,
+    })
+}
+
 impl Setups {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -800,7 +874,7 @@ impl Setups {
             "create_setup" => self.create(args, owner, now),
             "revise_setup" => self.revise(args, owner, now),
             "get_setup" => self.get(args, owner),
-            "list_setups" => self.list(args, owner),
+            "list_setups" => self.list(args, owner, now),
             "get_track_record" => self.track_record(args, owner, now),
             "cancel_setup" => self.cancel(args, owner, now),
             _ => Err(format!("Unknown tool: {tool}")),
@@ -1119,8 +1193,9 @@ impl Setups {
         Ok(self.view(&record, &self.log_of(&record)))
     }
 
-    /// The caller's setups, newest first, without their logs.
-    fn list(&self, args: &Value, owner: &str) -> Result<Value, String> {
+    /// The caller's setups, newest first, without their logs; only the asked `fields`
+    /// of each, when asked (ADR-0078).
+    fn list(&self, args: &Value, owner: &str, now: i64) -> Result<Value, String> {
         let status = match args.get("status").filter(|v| !v.is_null()) {
             None => None,
             Some(v) => match v.as_str() {
@@ -1148,6 +1223,10 @@ impl Setups {
                 setups::tags(v, &mut problems).ok_or_else(|| setups::problems_text(&problems))?
             }
         };
+        let fields = match args.get("fields").filter(|v| !v.is_null()) {
+            None => None,
+            Some(v) => Some(view_fields(v)?),
+        };
         let limit = match args.get("limit").filter(|v| !v.is_null()) {
             None => 50,
             Some(v) => v
@@ -1157,11 +1236,14 @@ impl Setups {
                 as usize,
         };
         let st = self.lock();
-        let mut mine: Vec<&Record> = st
-            .setups
-            .values()
-            .map(|h| &h.record)
-            .filter(|r| r.owner == owner)
+        let of_owner = || {
+            st.setups
+                .values()
+                .map(|h| &h.record)
+                .filter(|r| r.owner == owner)
+        };
+        let open_risk = open_risk(of_owner(), now);
+        let mut mine: Vec<&Record> = of_owner()
             .filter(|r| symbol.as_ref().is_none_or(|s| *s == r.symbol))
             .filter(|r| tags.iter().all(|t| r.tags.contains(t)))
             .filter(|r| match status {
@@ -1173,7 +1255,17 @@ impl Setups {
             .collect();
         mine.sort_by(|a, b| (b.created_at, &b.id).cmp(&(a.created_at, &a.id)));
         let total = mine.len();
-        let views: Vec<Value> = mine.into_iter().take(limit).map(Record::view).collect();
+        let views: Vec<Value> = mine
+            .into_iter()
+            .take(limit)
+            .map(|r| {
+                let mut view = r.view();
+                if let (Some(fields), Some(map)) = (&fields, view.as_object_mut()) {
+                    map.retain(|k, _| k == "id" || fields.contains(k.as_str()));
+                }
+                view
+            })
+            .collect();
         Ok(json!({
             "enabled": true,
             "can_create": self.access.may_create(owner),
@@ -1187,6 +1279,7 @@ impl Setups {
                 "changes_per_minute": self.limits.changes_per_minute,
                 "bytes": self.limits.bytes_per_owner,
             },
+            "open_risk": open_risk,
             "setups": views,
         }))
     }

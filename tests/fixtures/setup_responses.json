@@ -350,6 +350,21 @@
       "setups": 500,
       "symbols": 5
     },
+    "open_risk": {
+      "by_symbol": [],
+      "long": {
+        "filled": 0,
+        "filled_at_stop_r": 0.0,
+        "risk_r": 0,
+        "takes": 0
+      },
+      "short": {
+        "filled": 0,
+        "filled_at_stop_r": 0.0,
+        "risk_r": 0,
+        "takes": 0
+      }
+    },
     "replay": true,
     "setups": [
       {
@@ -624,6 +639,170 @@
       }
     ],
     "total": 3
+  },
+  "list_setups_open": {
+    "can_create": true,
+    "enabled": true,
+    "limits": {
+      "bytes": 4194304,
+      "changes_per_minute": 10,
+      "open_setups": 20,
+      "revisions_per_setup": 50,
+      "setups": 500,
+      "symbols": 5
+    },
+    "open_risk": {
+      "by_symbol": [
+        {
+          "direction": "long",
+          "filled": 0,
+          "filled_at_stop_r": 0.0,
+          "risk_r": 1,
+          "symbol": "BTCUSDT",
+          "takes": 1
+        },
+        {
+          "direction": "short",
+          "filled": 0,
+          "filled_at_stop_r": 0.0,
+          "risk_r": 1,
+          "symbol": "ETHUSDT",
+          "takes": 1
+        }
+      ],
+      "long": {
+        "filled": 0,
+        "filled_at_stop_r": 0.0,
+        "risk_r": 1,
+        "takes": 1
+      },
+      "short": {
+        "filled": 0,
+        "filled_at_stop_r": 0.0,
+        "risk_r": 1,
+        "takes": 1
+      }
+    },
+    "replay": true,
+    "setups": [
+      {
+        "agent_revisions": 0,
+        "bars_to_exit": null,
+        "bars_to_fill": null,
+        "bars_to_mae": null,
+        "bars_to_mfe": null,
+        "bracket": "agent",
+        "closest_approach_r": null,
+        "costs": {
+          "fee_bps_per_side": 5.0,
+          "slippage_bps_per_side": 2.0
+        },
+        "created_at": 1767268800000,
+        "decision": "take",
+        "direction": "short",
+        "drawings": [],
+        "entry": {
+          "high": 3003.2327499999997,
+          "low": 2997.2442499999997
+        },
+        "exit": null,
+        "expires_at": 1767297600000,
+        "features": {
+          "ctx_fear_greed": "unknown",
+          "ctx_trend_1d": "unknown",
+          "ctx_trend_4h": "unknown"
+        },
+        "fill": null,
+        "gap": false,
+        "id": "setup-000003",
+        "interval": "1h",
+        "invalidation": 3024.1925,
+        "mae_at": null,
+        "mae_r": null,
+        "mfe_at": null,
+        "mfe_r": null,
+        "net": null,
+        "pending": [],
+        "result_r": null,
+        "revisions": 1,
+        "scored_through": null,
+        "shadow_results": null,
+        "status": "watching",
+        "symbol": "ETHUSDT",
+        "tags": [],
+        "targets": [
+          2964.3075
+        ],
+        "thesis": "example thesis"
+      },
+      {
+        "agent_revisions": 1,
+        "bars_to_exit": null,
+        "bars_to_fill": null,
+        "bars_to_mae": null,
+        "bars_to_mfe": null,
+        "bracket": "agent",
+        "closest_approach_r": 0.1431,
+        "costs": {
+          "fee_bps_per_side": 5.0,
+          "slippage_bps_per_side": 2.0
+        },
+        "created_at": 1767261600000,
+        "decision": "take",
+        "direction": "long",
+        "drawings": [
+          {
+            "points": [
+              {
+                "bar": 36,
+                "price": 59736.23,
+                "snap": "low",
+                "time": "2026-01-01T09:00:00Z",
+                "timestamp": 1767258000000
+              }
+            ],
+            "style": {},
+            "tool": "horizontalStraightLine"
+          }
+        ],
+        "entry": {
+          "high": 60196.413329999996,
+          "low": 60075.89999
+        },
+        "exit": null,
+        "expires_at": 1767297600000,
+        "features": {
+          "ctx_fear_greed": "unknown",
+          "ctx_trend_1d": "unknown",
+          "ctx_trend_4h": "unknown"
+        },
+        "fill": null,
+        "gap": false,
+        "id": "setup-000001",
+        "interval": "15m",
+        "invalidation": 59654.103299999995,
+        "mae_at": null,
+        "mae_r": null,
+        "mfe_at": null,
+        "mfe_r": null,
+        "net": null,
+        "pending": [],
+        "result_r": null,
+        "revisions": 2,
+        "scored_through": 1767268740000,
+        "shadow_results": null,
+        "status": "watching",
+        "symbol": "BTCUSDT",
+        "tags": [
+          "strategy:example"
+        ],
+        "targets": [
+          60618.21002
+        ],
+        "thesis": "second thesis"
+      }
+    ],
+    "total": 2
   },
   "revise_setup": {
     "agent_revisions": 1,

@@ -2283,8 +2283,16 @@ impl Record {
         }
     }
 
+    /// What a filled take would end at, in R after costs, if it went out at its
+    /// invalidation now; None for a skip and before a fill. Its levels are fixed from the
+    /// fill on, so this is its risk at the fill (-1 R) and the costs of both sides.
+    pub fn at_stop_r(&self, now_ms: i64) -> Option<f64> {
+        let fill = self.fill.filter(|_| self.decision == Decision::Take)?;
+        Some(self.score_at(fill.price, self.levels.invalidation, now_ms))
+    }
+
     /// As a tool answers it: everything but the owner, the levels as fields of the
-    /// setup, and its durations.
+    /// setup, and its durations. Its keys are `VIEW_FIELDS`.
     pub fn view(&self) -> Value {
         let mut v = serde_json::to_value(self).unwrap_or_default();
         if let Some(map) = v.as_object_mut() {
@@ -2311,6 +2319,55 @@ impl Record {
         })
     }
 }
+
+/// The keys of a setup as `Record::view` answers it, in that order; those a setup does
+/// not have (`features` and the other stated or stock-only fields) are left out of its
+/// view. `list_setups` returns only some of them when asked (ADR-0078).
+pub const VIEW_FIELDS: [&str; 43] = [
+    "id",
+    "symbol",
+    "interval",
+    "direction",
+    "decision",
+    "thesis",
+    "drawings",
+    "bracket",
+    "status",
+    "created_at",
+    "costs",
+    "fill",
+    "exit",
+    "result_r",
+    "scored_through",
+    "gap",
+    "pending",
+    "revisions",
+    "agent_revisions",
+    "tags",
+    "mae_r",
+    "mfe_r",
+    "mae_at",
+    "mfe_at",
+    "closest_approach_r",
+    "shadow_results",
+    "features",
+    "probability",
+    "playbook_version",
+    "skip_reason",
+    "market",
+    "last_close",
+    "adjustments",
+    "near_stop_at",
+    "entry",
+    "invalidation",
+    "targets",
+    "expires_at",
+    "bars_to_fill",
+    "bars_to_exit",
+    "bars_to_mae",
+    "bars_to_mfe",
+    "net",
+];
 
 /// What `get_track_record` groups closed setups by (ADR-0064).
 #[derive(Clone, Debug, PartialEq)]

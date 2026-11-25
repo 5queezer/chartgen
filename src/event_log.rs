@@ -79,9 +79,11 @@ fn answer(store: &Store, owner: &str, args: &Value) -> Result<Value, String> {
     // Fewer kept after the cursor than were numbered after it: the reader missed some
     // for good. Counted, since a wake-up that still waits is kept past its neighbours.
     let truncated = after < last && kept < last - after;
-    // A cursor ahead of the log, from another server or a typo, comes back as the log's
-    // end: the next event is then not skipped.
-    let cursor = events.last().map_or(after.min(last), |e| e.seq);
+    // With nothing to return, the cursor moves to the log's end. A cursor ahead of the
+    // log, from another server or a typo, then does not skip the next event; one behind
+    // a log whose events after it are all gone is told so once and not on every call,
+    // since nothing kept lies between it and the end.
+    let cursor = events.last().map_or(last, |e| e.seq);
     Ok(json!({
         "events": events.iter().map(view).collect::<Vec<_>>(),
         "cursor": cursor,
@@ -180,11 +182,15 @@ mod tests {
         let later = chrono::Utc::now().timestamp() + persistence::EVENT_TTL_SECS + 1;
         store.sweep_events(later).unwrap();
         let behind = answer(&store, "me", &json!({ "after": 3 })).unwrap();
+        let last = persistence::EVENTS_PER_OWNER + 10;
         assert_eq!(
             (seqs(&behind), behind["truncated"].clone()),
             (vec![], json!(true))
         );
-        let last = persistence::EVENTS_PER_OWNER + 10;
+        // Told once: the cursor moves to the end, so the next call is not truncated.
+        assert_eq!(behind["cursor"], last);
+        let next = answer(&store, "me", &json!({ "after": behind["cursor"] })).unwrap();
+        assert_eq!(next["truncated"], false);
         let caught_up = answer(&store, "me", &json!({ "after": last })).unwrap();
         assert_eq!(
             (caught_up["truncated"].clone(), caught_up["cursor"].clone()),
@@ -194,6 +200,35 @@ mod tests {
         assert_eq!(
             answer(&store, "me", &json!({ "after": last + 500 })).unwrap()["cursor"],
             last
+        );
+    }
+
+    /// `truncated` and `more` are apart: the first says events behind the page are gone,
+    /// the second that events wait after it. A reader with no cursor is truncated once
+    /// its oldest events aged out, on its last page too; with the cursor it was given it
+    /// is not, as nothing went since.
+    #[test]
+    fn truncated_is_about_what_went_and_more_about_what_waits() {
+        let store = Store::in_memory().unwrap();
+        log(&store, "me", 1..=3);
+        let later = chrono::Utc::now().timestamp() + persistence::EVENT_TTL_SECS + 1;
+        store.sweep_events(later).unwrap();
+        log(&store, "me", 4..=5);
+        let no_cursor = answer(&store, "me", &json!({})).unwrap();
+        assert_eq!(seqs(&no_cursor), [4, 5]);
+        assert_eq!(
+            (no_cursor["more"].clone(), no_cursor["truncated"].clone()),
+            (json!(false), json!(true))
+        );
+        let first = answer(&store, "me", &json!({ "limit": 1 })).unwrap();
+        assert_eq!(
+            (first["more"].clone(), first["truncated"].clone()),
+            (json!(true), json!(true))
+        );
+        let next = answer(&store, "me", &json!({ "after": first["cursor"] })).unwrap();
+        assert_eq!(
+            (seqs(&next), next["more"].clone(), next["truncated"].clone()),
+            (vec![5], json!(false), json!(false))
         );
     }
 
