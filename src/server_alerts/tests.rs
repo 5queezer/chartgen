@@ -1257,10 +1257,28 @@ async fn a_client_is_held_to_its_share_of_the_slots() {
 async fn a_silent_receiver_cannot_fill_the_global_queue() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    // It reads what each delivery sends and never answers, so every delivery it gets
+    // stays in flight.
+    let heard: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = heard.clone();
     tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Ok((s, _)) = listener.accept().await {
-            held.push(s);
+        while let Ok((mut s, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16 * 1024];
+                let mut got = Vec::new();
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    got.extend_from_slice(&buf[..n]);
+                    log.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&got).into_owned());
+                }
+                // Held open, unanswered, until the delivery gives up.
+                std::future::pending::<()>().await;
+            });
         }
     });
     let (store, _) = store_at("silent");
@@ -1297,7 +1315,11 @@ async fn a_silent_receiver_cannot_fill_the_global_queue() {
         .as_ref()
         .and_then(|d| d.error.clone());
     assert_eq!(error, None, "the victim's webhook was refused");
-    assert_eq!(a.lock().queues["victim"].len(), 1);
+    // And it is sent: the receiver hears it, however soon the dispatcher took it.
+    until("the victim's delivery", || {
+        heard.lock().unwrap().iter().any(|r| r.contains(&victim))
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
