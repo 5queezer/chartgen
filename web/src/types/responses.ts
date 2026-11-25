@@ -1059,6 +1059,35 @@ export type SetupRevision = z.infer<typeof SetupRevisionSchema>;
 export const SetupPayloadSchema = SetupSchema.extend({ log: z.array(SetupRevisionSchema) });
 export type SetupPayload = z.infer<typeof SetupPayloadSchema>;
 
+/**
+ * The risk of a set of open takes (ADR-0078): each risks 1 R, so risk_r is the count;
+ * filled_at_stop_r is what the filled ones end at together, after costs, if each goes out
+ * at its invalidation now. Skips are not in it.
+ */
+export const SetupRiskSchema = z
+  .object({
+    takes: z.number().int().nonnegative(),
+    risk_r: z.number().nonnegative(),
+    filled: z.number().int().nonnegative(),
+    filled_at_stop_r: z.number(),
+  })
+  .strict();
+export type SetupRisk = z.infer<typeof SetupRiskSchema>;
+
+export const SetupOpenRiskSchema = z
+  .object({
+    long: SetupRiskSchema,
+    short: SetupRiskSchema,
+    // Only the symbol and direction pairs that have an open take, by symbol, long first.
+    by_symbol: z.array(
+      SetupRiskSchema.extend({ symbol: z.string(), direction: z.enum(["long", "short"]) }).strict(),
+    ),
+  })
+  .strict();
+export type SetupOpenRisk = z.infer<typeof SetupOpenRiskSchema>;
+
+// `list_setups` as the web app asks for it: whole setups. The tool's `fields` argument
+// (ADR-0078) returns only some fields of each; the web app never sends it.
 export const SetupsPayloadSchema = z.object({
   enabled: z.boolean(),
   // The rest is absent when the server has setups off.
@@ -1076,6 +1105,8 @@ export const SetupsPayloadSchema = z.object({
       bytes: z.number().int(),
     })
     .optional(),
+  // Over all the caller's open takes, whatever the call's filters (ADR-0078).
+  open_risk: SetupOpenRiskSchema.optional(),
   setups: z.array(SetupSchema),
 });
 export type SetupsPayload = z.infer<typeof SetupsPayloadSchema>;

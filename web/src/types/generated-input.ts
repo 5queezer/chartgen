@@ -649,6 +649,52 @@ export interface ListSetupsInput {
    */
   as_of?: number | string;
   /**
+   * Only these fields of each setup, and its id. A field a setup does not have, such as probability where none was stated, stays out. Omit for whole setups.
+   */
+  fields?: (
+    | "id"
+    | "symbol"
+    | "interval"
+    | "direction"
+    | "decision"
+    | "thesis"
+    | "drawings"
+    | "bracket"
+    | "status"
+    | "created_at"
+    | "costs"
+    | "fill"
+    | "exit"
+    | "result_r"
+    | "scored_through"
+    | "gap"
+    | "pending"
+    | "revisions"
+    | "agent_revisions"
+    | "tags"
+    | "mae_r"
+    | "mfe_r"
+    | "mae_at"
+    | "mfe_at"
+    | "closest_approach_r"
+    | "shadow_results"
+    | "features"
+    | "probability"
+    | "playbook_version"
+    | "market"
+    | "last_close"
+    | "adjustments"
+    | "near_stop_at"
+    | "entry"
+    | "invalidation"
+    | "targets"
+    | "expires_at"
+    | "bars_to_fill"
+    | "bars_to_exit"
+    | "bars_to_mae"
+    | "bars_to_mfe"
+  )[];
+  /**
    * Most setups to return; total says how many matched.
    */
   limit?: number;
