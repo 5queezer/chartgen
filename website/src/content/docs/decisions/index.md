@@ -108,3 +108,4 @@ one and link both ways.
 | [0079](/chartgen/decisions/0079-track-record-after-costs/) | The record says a result's sign after costs, groups by tag prefix and skip reason, and counts a setup without a playbook version as unversioned | Accepted | 2026-11-24 |
 | [0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) | Server alerts on futures data: funding | Accepted | 2026-11-24 |
 | [0082](/chartgen/decisions/0082-recording-open-interest-history/) | Recording open interest beyond the 30 days Binance keeps | Proposed | 2026-11-24 |
+| [0083](/chartgen/decisions/0083-a-rule-based-strategy-tester/) | A rule-based strategy tester over replay fixtures | Proposed | 2026-11-24 |
