@@ -1296,7 +1296,7 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `drawing`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"`, `condition: "bar_close"` or `drawing`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `drawing`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
 | `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |

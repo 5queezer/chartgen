@@ -5081,7 +5081,19 @@ async fn a_rectangle_breaks_out_at_its_top_or_its_bottom() {
     .unwrap_err();
     assert!(err.starts_with("On a rectangle"), "{err}");
     let args = json!({"alert_id": up, "condition": "crossing"});
-    assert!(call(&a, "update_server_alert", args, "me").await.is_err());
+    let err = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("On a rectangle"), "{err}");
+    assert_eq!(
+        a.lock().alerts[&up].condition,
+        Condition::CrossingUp,
+        "unchanged"
+    );
+    // Another side is a change it takes.
+    let args = json!({"alert_id": up, "condition": "crossing_down"});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["condition"], "crossing_down");
 }
 
 #[tokio::test(flavor = "multi_thread")]
