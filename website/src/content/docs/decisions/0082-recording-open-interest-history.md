@@ -1,12 +1,14 @@
 ---
 title: "0082 — Recording open interest beyond the 30 days Binance keeps"
-description: "Proposed. Binance keeps open interest history for 30 days; what is not recorded now cannot be had later. The options for chartgen to record it itself: not at all, a series per symbol and period in the SQLite store, or files beside it, and what each costs. get_indicators' change_bars answers the change within the 30 days without any of them."
+description: "Binance keeps open interest history for 30 days, and what is not recorded then is lost. A server with a store records the 5m open interest of the symbols its setups and server alerts watch, and of a configured list, for a year by default, in a table of the SQLite store, and the oi indicator reads it for bars older than Binance keeps."
 sidebar:
   order: 82
 ---
 
-**Status:** Proposed
-**Date:** 2026-11-24
+**Status:** Accepted
+**Date:** 2026-11-25 (proposed 2026-11-24)
+**Amends:** [ADR-0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/) (an
+open interest alert's `change_bars` reaches past the 30 days where the server recorded them)
 
 ## Context and Problem Statement
 
@@ -102,14 +104,69 @@ the same.
 
 ## Decision Outcome
 
-None yet. If recording is wanted, option 2 at 5m for a configured list of symbols, with a
-retention in days, is the smallest that answers open interest (and the long/short ratios) at
-every interval and keeps one store; the taker ratio would need a row per period. The choice
-of symbols and retention is the owner's. Until then, `change_bars` answers the change within
-the 30 days.
+Chosen: **option 2**, open interest at 5m, in `src/indicators/external/record.rs`, the store
+(`src/scripting/persistence.rs`) and `hist_values` in `src/indicators/external.rs`.
+
+**What is recorded.** `futures_series` as above, `WITHOUT ROWID` since the key is the row:
+`kind` `oi`, `period` `5m`, `value` the `sumOpenInterestValue` the `oi` panel shows. One 5m series
+answers every interval, since a coarser period's row is the 5m row of the same time (checked
+again for BTCUSDT: 11 of 11 4h rows and 2 of 2 1d rows equal, on the epoch grid of their
+period). The long/short ratios could be recorded the same way under another `kind`, and the
+taker ratio per period; neither is asked for yet.
+
+**Which symbols, and how long.** The Binance symbols of every setup and server alert in the
+store, whoever owns them, and those of `CHARTGEN_OI_RECORD_SYMBOLS`, for
+`CHARTGEN_OI_RECORD_DAYS` (default 365; `0` records nothing). The watched symbols are the ones
+an agent asks about later, and need no list kept by hand; the list adds a symbol before anything
+watches it, since a history begins only when its recording does. A symbol stays recorded while
+a setup or alert names it, and its rows stay for the retention after that. One year is what a
+question about a quarter, or a backtest over the replay fixtures, needs, at about 4 MB a symbol.
+
+**How.** A thread, started with the server when it has a store (not on a replay server), runs
+every 6 hours. For each symbol it reads from after its newest recorded row (the first time, as
+far back as Binance keeps) up to 10 minutes ago, 500 rows a request with `startTime` and
+`endTime` both set (with `startTime` alone Binance answers the newest 500), and writes each
+page as it comes. The last 10 minutes wait for the next round, so a row is never recorded before
+it is final. It waits 2 s after each request, through the same gate and budget as the charts.
+Then it drops rows older than the retention, a symbol at a time along the key: one delete over
+the whole table held the store's lock for about 350 ms on a year of 10 symbols, one per symbol
+0.3 ms.
+
+**How it is read.** Within the 30 days the `oi` indicator reads Binance as before, and answers
+the same values. A window reaching further back takes the recorded rows before Binance's first
+row, on its period's grid, when its read from Binance comes back whole; they are kept with that
+series in the cache (`SeriesCache`), so the store is asked once per such read, not at every
+recompute of a chart. Such a read is complete from the window's start or Binance's 30 days,
+whichever is older, so a window reaching further back reads again and gets its recorded rows
+too. A window older than Binance keeps altogether is read from the store alone, and says
+`last 30 days only` as before when nothing was recorded for it. `get_indicators`' `change_bars`
+and an open interest alert's `change_bars`
+([ADR-0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/)) read through it:
+an alert reaching past 30 days is accepted when the rows it needs were recorded.
+
+### Cost
+
+Measured with SQLite 3.50: a year of 10 symbols is 1.05 million rows and 41.5 MB, 40 bytes a
+row, so per symbol 288 rows and about 11 kB a day, about 4.2 MB a year. Requests per symbol: 18
+at its first round, then 4 a day, against the 1000 per 5 minutes Binance allows these endpoints
+(chartgen refuses at 800); with 2 s between requests a first round of many symbols takes at most
+150 in any 5 minutes. Reading 1000 bars of 4h (166 days) from a year of rows took 6 ms, 1000 of
+1h 0.6 ms.
+
+### Consequences
+
+- Questions about open interest older than 30 days are answerable for the watched symbols, from
+  30 days before this build first ran: on its first day the history is Binance's 30 days, after
+  N days it is N + 30 days long, up to the retention.
+- A server stopped for less than 30 days loses nothing: the round at its start fills the gap.
+  A longer stop leaves a gap that cannot be filled; those bars have no value.
+- The store grows by about 4 MB a symbol and year, and is backed up with everything else in it.
+- A build from before this ignores the table and records nothing; rolling forward again needs no
+  step.
 
 ## More Information
 
 - `get_indicators` `change_bars`: [MCP reference](/chartgen/reference/mcp/#change-over-n-bars).
+- Running it (settings, cost, rollback): [deploy guide](/chartgen/guides/deploy/#open-interest-beyond-30-days).
 - Binance retention and budget: `RETENTION_MS` in `src/indicators/external.rs`,
   `futures_data_budget` in `src/binance_gate.rs`.

@@ -74,6 +74,8 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_AGENT_WEBHOOK_OWNER` | `src/webhook.rs` | The one owner whose alerts may ask for that receiver: an account (`github:<id>`, `google:<sub>`) with sign-in on, a client id with it off. It must also be named in `CHARTGEN_SERVER_ALERT_CLIENTS`. |
 | `CHARTGEN_AGENT_WEBHOOK_SECRET` | `src/webhook.rs` | The signing key, the same string the receiver has: `whsec_<base64>` or any string of at least 24 characters. Never logged. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
+| `CHARTGEN_OI_RECORD_DAYS` | `src/indicators/external/record.rs` | Days of [open interest the server records](#open-interest-beyond-30-days) beyond the 30 Binance keeps. Default 365; `0` records nothing. Needs the store. |
+| `CHARTGEN_OI_RECORD_SYMBOLS` | `src/indicators/external/record.rs` | Comma-separated Binance futures symbols to record besides those of the setups and server alerts, such as `BTCUSDT,ETHUSDT`. |
 | `CHARTGEN_SETUPS` | `src/setup_service.rs` | `1` enables [setups](/chartgen/guides/setups/): five MCP tools for trading setups the server scores on paper. Off when unset; setups already stored wait in `chartgen.db`. Needs a build with the `scripting` feature and the store. It does not need `CHARTGEN_SERVER_ALERTS`. Read [before turning it on](#setups). |
 | `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` | `src/setup_service.rs` | Symbols one owner may have open setups on. Default 5. |
 | `CHARTGEN_BIND` | `src/server.rs` | The IP address `--serve` and `--trade` listen on, such as `127.0.0.1` or a VPN overlay address in the CGNAT range `100.64.0.0/10`. Default `0.0.0.0`, every interface, which a container needs. A replay server warns when it is neither loopback nor such an overlay address ([private replay](/chartgen/guides/replay/#run-a-private-replay-server)). |
@@ -114,6 +116,37 @@ nothing and the next caller tries again, up to one request per round trip per ch
 All of it answers to the rate gate of [ADR-0038](/chartgen/decisions/0038-custom-intervals/). When
 the gate refuses, clients see an error starting `Binance rate limit:`. Yahoo is not shared this
 way: every chart load and poll of a Yahoo symbol is its own request, with no gate in front.
+
+### Open interest beyond 30 days
+
+Binance keeps open interest for 30 days. A server with a store records it further back
+([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/)): every 6 hours a thread
+reads the 5 minute open interest of each watched symbol from its newest recorded row on, writes
+it to the store's `futures_series` table, and drops rows older than `CHARTGEN_OI_RECORD_DAYS`.
+Watched are the Binance symbols of every setup and server alert in the store, whoever owns it,
+and those of `CHARTGEN_OI_RECORD_SYMBOLS`. The `oi` indicator, in charts, `get_indicators` (its
+`change_bars` too) and server alerts, reads those rows for bars older than Binance keeps, at each
+bar's open; within the 30 days it reads Binance as before.
+
+- **What it costs, per symbol:** 288 rows and about 11 kB a day, about 4.2 MB a year (measured
+  with SQLite 3.50 on a year of 10 symbols: 1.05 million rows, 41.5 MB, 40 bytes a row).
+  Requests: 18 at its first round (30 days, 500 rows a request), then one every 6 hours, 4 a
+  day. They count against Binance's 1000 requests per 5 minutes for these endpoints, which the
+  charts share; the thread waits 2 s after each, so a first round of many symbols takes at most
+  150 of them in any 5 minutes.
+- **History starts with the recording.** The first round reaches back 30 days, so the first
+  answers older than Binance's come 30 days after the first start of this build, and after N
+  days the history is N + 30 days long, up to the retention.
+- **Restarts and gaps.** Each round reads from the newest recorded row, so a server stopped
+  for less than 30 days loses nothing; the round at its start fills the gap. A longer stop
+  leaves a gap that cannot be filled, and bars in it have no value.
+- **The log** says after each round how many rows were recorded for how many symbols, how many
+  old ones went, and which symbols failed and why: a spot-only pair, such as `BTCFDUSD`, fails
+  every round, as Binance has no futures market for it. A stock is not asked for.
+- **Off** with `CHARTGEN_OI_RECORD_DAYS=0`, without a store, and on a replay server.
+- **After a rollback:** a build from before this ignores the table and reads Binance's 30 days
+  only, and it records nothing, so while it runs longer than 30 days a gap grows. No step is
+  needed on the file in either direction.
 
 ## Sign-in through GitHub and Google
 

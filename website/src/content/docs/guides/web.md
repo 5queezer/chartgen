@@ -1404,7 +1404,7 @@ empty, not drawn as zero. When a panel has no values at all, its legend says why
 | `Funding (Binance futures only)` | The symbol is not on Binance: a stock, index, FX pair, or `BTC-USD`. |
 | `Funding (no futures market)` | Binance has no futures rows for it: a spot-only pair such as `BTCFDUSD`, a spot symbol whose future has another name (`SHIBUSDT` is `1000SHIBUSDT` there), or a futures market that did not exist yet for these bars. |
 | `Funding (unavailable)` | The request failed, or the server's request budget for Binance was used up. The server log has the reason (`[futures] ...`). |
-| `OI (last 30 days only)` | Every bar is older than the 30 days Binance keeps. |
+| `OI (last 30 days only)` | Every bar is older than the 30 days Binance keeps, and the server has not recorded open interest that far back ([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/)). |
 
 A panel that loaded as `unavailable` while Binance was refusing requests is
 loaded again by the web app once values return (a bounded reload, up to three,
@@ -1417,7 +1417,10 @@ How far back the values go:
   every 8 hours). Older bars stay empty. Scrolling back reads the older window
   the same way.
 - **Open interest**, the **long/short ratios** and the **taker buy/sell ratio** are
-  kept by Binance for the last 30 days only. Bars older than that are empty on any chart. Reading goes back up
+  kept by Binance for the last 30 days only. Bars older than that are empty on any chart,
+  except open interest on a server that records it: its own record of the symbols it
+  watches, from the day it started ([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/),
+  [what it records](/chartgen/guides/deploy/#open-interest-beyond-30-days)). Reading goes back up
   to 4000 rows (about 14 days of 5 minute rows) in one chart, so a zoomed-out
   5 minute chart can have empty bars before that.
 - A bar takes the nearest row within two bar lengths (funding: within 8 hours).
