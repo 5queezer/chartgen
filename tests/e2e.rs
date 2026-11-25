@@ -2043,6 +2043,44 @@ fn test_get_indicators_answers_open_interest_change() {
     assert!(oi(190)["indicators"]["oi"]["lines"][0]["change"].is_null());
 }
 
+/// Past the 30 days Binance keeps, open interest is what the server recorded
+/// (ADR-0082): its 5m rows, read at the times of 4h bars.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_get_indicators_reads_recorded_open_interest_past_30_days() {
+    const STEP: i64 = 300_000;
+    let db = store_path("oi-recorded");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let rows: Vec<(i64, f64)> = ((now - 60 * 86_400_000) / STEP..(now - 29 * 86_400_000) / STEP)
+        .map(|i| (i * STEP, 1.0e9))
+        .collect();
+    chartgen::scripting::persistence::Store::open(&db)
+        .unwrap()
+        .save_futures_rows("oi", "BTCUSDT", "5m", &rows)
+        .unwrap();
+    let port = free_port();
+    let mut cmd = server_command(port, None, &db, false);
+    cmd.env("CHARTGEN_DATA_SOURCE", "sample");
+    let srv = start_server(cmd, port);
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let answer = call_tool(
+        srv.port,
+        &token,
+        "get_indicators",
+        serde_json::json!({"symbol": "BTCUSDT", "interval": "4h", "indicators": ["oi"],
+                           "change_bars": 190}),
+    )
+    .unwrap();
+    let line = &answer["indicators"]["oi"]["lines"][0];
+    // The sample feed's open interest is 2.0e9 to 2.5e9; the recorded rows are 1.0e9.
+    assert_eq!(line["change"]["from"], 1.0e9, "{answer}");
+    assert!(line["last_value"].as_f64().unwrap() >= 2.0e9);
+}
+
 /// Off unless asked for: not listed, and only the list answers, saying so.
 #[test]
 fn test_server_alerts_are_off_by_default() {
