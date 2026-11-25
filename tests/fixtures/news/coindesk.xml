@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The structure of CoinDesk's feed as read on 2026-11-25; the headlines are made up. -->
+<rss xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" version="2.0">
+  <channel>
+    <title>CoinDesk: Bitcoin, Ethereum, Crypto News and Price Data</title>
+    <link>https://www.coindesk.com/</link>
+    <atom:link rel="self" type="application/rss+xml" href="https://www.coindesk.com/arc/outboundfeeds/rss/"/>
+    <description>Example feed</description>
+    <item>
+      <title><![CDATA[Solana developers propose a fix for slow block production]]></title>
+      <link>https://www.coindesk.com/tech/2026/11/25/solana-fix-example</link>
+      <media:content url="https://cdn.example.com/a.png?fm=jpg&amp;w=800" type="image/*" medium="image"><media:title>Bitcoin image title, not the item's</media:title></media:content>
+      <guid isPermaLink="false">091c783d-0000-0000-0000-000000000001</guid>
+      <pubDate>Wed, 25 Nov 2026 06:33:10 +0000</pubDate>
+      <description><![CDATA[Bitcoin is named only in the description, which is not matched.]]></description>
+      <dc:creator>Example Author</dc:creator>
+      <content:encoded/>
+      <category domain="https://www.coindesk.com/tech"><![CDATA[Tech]]></category>
+      <category domain="https://www.coindesk.com/">News</category>
+    </item>
+    <item>
+      <title><![CDATA[BTC slips below $90K as ETF outflows continue]]></title>
+      <link>https://www.coindesk.com/markets/2026/11/25/btc-slips-example</link>
+      <guid isPermaLink="false">091c783d-0000-0000-0000-000000000002</guid>
+      <pubDate>Wed, 25 Nov 2026 05:15:08 +0000</pubDate>
+      <category domain="https://www.coindesk.com/markets"><![CDATA[Markets]]></category>
+    </item>
+    <item>
+      <title><![CDATA[Ether options traders turn bearish into year-end]]></title>
+      <link>https://www.coindesk.com/markets/2026/11/24/ether-options-example</link>
+      <guid isPermaLink="false">091c783d-0000-0000-0000-000000000003</guid>
+      <pubDate>Tue, 24 Nov 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title><![CDATA[Bitcoin miners sell reserves as hashprice falls]]></title>
+      <link>https://www.coindesk.com/markets/2026/11/23/bitcoin-miners-example</link>
+      <guid isPermaLink="false">091c783d-0000-0000-0000-000000000004</guid>
+      <pubDate>Mon, 23 Nov 2026 15:29:01 +0000</pubDate>
+    </item>
+    <item>
+      <title><![CDATA[An item without a date is left out: Bitcoin]]></title>
+      <link>https://www.coindesk.com/markets/2026/11/23/no-date-example</link>
+    </item>
+  </channel>
+</rss>

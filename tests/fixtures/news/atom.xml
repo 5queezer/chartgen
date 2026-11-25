@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An Atom feed, as a configured feed may be; the entries are made up. -->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>https://news.example.com</id>
+  <title>Example Atom News</title>
+  <updated>2026-11-25T07:21:37.820Z</updated>
+  <link rel="alternate" href="https://news.example.com/"/>
+  <entry>
+    <title type="html">Solana&#8217;s validators vote on fee changes</title>
+    <id>https://news.example.com/solana-validators</id>
+    <link rel="enclosure" href="https://img.example.com/a.png" type="image/png"/>
+    <link href="https://news.example.com/solana-validators"/>
+    <updated>2026-11-25T07:00:00.000Z</updated>
+    <published>2026-11-25T06:00:00.000Z</published>
+    <author><name>Example Author</name></author>
+    <category label="Markets" term="Markets"/>
+  </entry>
+  <entry>
+    <title>A story filed under a coin</title>
+    <id>https://news.example.com/filed-under</id>
+    <link rel="alternate" href="https://news.example.com/filed-under"/>
+    <updated>2026-11-25T02:00:00Z</updated>
+    <category term="Solana"/>
+  </entry>
+</feed>

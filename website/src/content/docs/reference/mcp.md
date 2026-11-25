@@ -105,14 +105,14 @@ retracement from a swing high to a swing low. `initialize` announces the
 
 ## Tool catalog
 
-24 tools on every server. The 12 trading tools require `--trade`; attempting to call them
+25 tools on every server. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
 lists the 5 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
 and with `CHARTGEN_SERVER_ALERTS=1` the 6
 [server alert tools](#server-alerts-chartgen_server_alerts1). With `CHARTGEN_SETUPS=1`, or on
 a replay server, it lists the 6 [setup tools](#setups-chartgen_setups1). With server alerts or
 setups on, and not on a replay server, it lists
-[`list_events`](#reading-back-what-happened) too: 42 tools at most.
+[`list_events`](#reading-back-what-happened) too: 43 tools at most.
 
 ### Charting (always available)
 
@@ -1098,6 +1098,77 @@ index once in ten minutes; within that, every caller gets the held answer, and c
 come during a read wait for it. There is no macro
 calendar here, so whether a macro blackout is on is not part of it. A replay server refuses
 the tool.
+
+#### `get_news`
+
+Recent crypto headlines about one symbol, from the public RSS feeds of a few crypto news
+outlets, so an agent needs no web search for them
+([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)).
+
+| Argument | Default | |
+|----------|---------|---|
+| `symbol` | required | Ticker symbol, e.g. `BTCUSDT`. |
+| `hours` | 24 | How far back, 1 to 168. |
+| `limit` | 10 | Most headlines returned, 1 to 50. |
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "terms": ["BTC", "Bitcoin"],
+  "hours": 24,
+  "items": [
+    {
+      "time": "2026-11-25T07:26:57Z", "source": "The Block",
+      "title": "Example headline about bitcoin",
+      "url": "https://www.theblock.co/news/…"
+    }
+  ],
+  "more": 24,
+  "sources": ["CoinDesk", "Cointelegraph", "Decrypt", "The Block", "Bitcoin Magazine"],
+  "sources_failed": []
+}
+```
+
+- `items`: the newest first. `time` is when the outlet published it, ISO 8601 UTC; `source`
+  the outlet; `url` the article, without `utm_` parameters. Headlines only, no article text. A
+  link that two feeds carry is shown once.
+- `more`: how many more matched than `limit`; absent when none.
+- `sources`: the feeds read; `sources_failed`: the feeds that could not be read, each
+  `{source, error}` (`HTTP 503`, `timed out`, `not a feed: …`, `no headlines in it`). A feed
+  that fails never fails the call.
+- `terms`: the words a headline was matched by.
+
+**How a headline is matched, a heuristic.** The coin is read off the symbol: the quote
+(`USDT`, `USDC`, `FDUSD`, `BUSD`, `USD`, `-USD`) is dropped, and so is Binance's `1000` or `1M`
+scale (`1000PEPEUSDT` is PEPE). A headline is about the coin when its title, or one of the
+outlet's categories for it, holds the ticker in capitals (`BTC`, `$BTC`) or one of the coin's
+names in any case (`Bitcoin`, `bitcoin's`), as a whole word: `Etherscan` is not Ether, `link`
+is not LINK. Descriptions are not matched. About 30 large coins have names:
+
+| Ticker | Names |
+|--------|-------|
+| BTC | Bitcoin |
+| ETH | Ethereum, Ether |
+| SOL | Solana |
+| XRP | Ripple |
+| BNB | BNB Chain |
+| DOGE, ADA, AVAX, LINK, DOT | Dogecoin, Cardano, Avalanche, Chainlink, Polkadot |
+| TRX, TON, LTC, BCH, SHIB | Tron, Toncoin, Litecoin, Bitcoin Cash, Shiba Inu |
+| SUI, APT, ARB, OP, POL | Sui, Aptos, Arbitrum, Optimism, Polygon |
+| ATOM, UNI, AAVE, XLM, HBAR | Cosmos, Uniswap, Aave, Stellar, Hedera |
+| XMR, ETC, FIL, HYPE, ENA | Monero, Ethereum Classic, Filecoin, Hyperliquid, Ethena |
+| TAO, WLD, INJ, NEAR | Bittensor, Worldcoin, Injective, NEAR Protocol |
+
+Any other coin is found by its ticker alone. A two-letter ticker with a name (`OP`) is found by
+its name only. It can miss a story whose title names neither, and take one that names the coin
+in passing: read the titles as leads.
+
+**The feeds** are CoinDesk, Cointelegraph, Decrypt, The Block and Bitcoin Magazine, none of
+which needs a key. `CHARTGEN_NEWS_FEEDS` replaces them
+([environment variables](/chartgen/guides/deploy/#environment-variables)). All are read at once,
+each at most once in ten minutes, with 8 s per request; a feed that failed is tried again after
+a minute. History is what the feeds still carry, usually one to three days, so a larger
+`hours` rarely finds more. A replay server refuses the tool.
 
 #### `search_symbols`
 

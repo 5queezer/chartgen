@@ -5,6 +5,7 @@ mod fetch;
 mod intrabars;
 mod market_context;
 mod mcp;
+mod news;
 mod replay;
 mod replay_fixtures;
 mod search;
