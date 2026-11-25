@@ -1,12 +1,12 @@
 ---
 title: "0083 — A rule-based strategy tester over replay fixtures"
-description: "Proposed, not decided. A playbook rule that can be written down mechanically (an indicator condition, an entry, a bracket) could be tested over a past quarter in minutes, with no model in the loop: the rule finds its signals in replay fixtures, and each signal is scored as a setup by the live scorer, with the live costs and exit variants. Six options are laid out; the recommendation is an entry rule in the shape of a server alert's condition, scored by Record::apply_bar, run as a CLI over fixtures first. The owner decides."
+description: "Accepted: option 3. A playbook rule that can be written down mechanically (an indicator condition, an entry, a bracket) could be tested over a past quarter in minutes, with no model in the loop: the rule finds its signals in replay fixtures, and each signal is scored as a setup by the live scorer, with the live costs and exit variants. Of six options, the owner chose an entry rule in the shape of a server alert's conditions (AND-joined), with a bracket, scored by Record::apply_bar, run as the CLI chartgen backtest over fixtures first."
 sidebar:
   order: 83
 ---
 
-**Status:** Proposed
-**Date:** 2026-11-24
+**Status:** Accepted
+**Date:** 2026-11-24 (proposed), 2026-11-25 (accepted)
 **Builds on:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (the setup scorer),
 [ADR-0064](/chartgen/decisions/0064-a-setups-record/) (the track record),
 [ADR-0066](/chartgen/decisions/0066-shadow-exit-variants/) (the exit variants),
@@ -15,8 +15,10 @@ bar closes), [ADR-0068](/chartgen/decisions/0068-replay-over-real-history/) (rep
 real history) and [ADR-0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) (the
 market context on a setup)
 
-This ADR proposes; it decides nothing. No code is written for it until the owner has chosen an
-option and answered the questions at the end.
+Proposed on 2026-11-24 with the questions at the end; the owner chose option 3 on 2026-11-25.
+The answers and what was built are under [Decision Outcome](#decision-outcome). The options and
+their discussion below are kept as they were proposed. The guide is
+[Strategy tester](/chartgen/guides/strategy-tester/).
 
 ## Context and Problem Statement
 
@@ -308,21 +310,73 @@ leaves them out unless asked.
 
 ## Decision Outcome
 
-**Proposed, not decided.** The recommendation is **option 3**, built as one scoring core and one
-front end:
+Chosen option: **option 3**, an entry rule in the shape of a server alert's conditions plus a
+bracket, scored by `Record::apply_bar`, run as a CLI over fixtures. It is built smaller than
+proposed above: no separate signals core and no code moved into the library. The tester is a
+subcommand of the binary, `src/backtest.rs`, which reads the alerts' own condition parser and
+reading (`server_alerts::clauses`, now `pub(crate)`) and the replay's own loader and bar
+builder (`replay.rs`) in place.
 
-- **The core** takes a list of signals (time, symbol, direction, entry, stop, targets, expiry),
-  scores each as a `Record` over fixture 1m bars with the replay's scoring step (which moves out
-  of the binary into the library beside the scorer), and reports as above. It does
-  not care where the signals came from.
-- **The front end** evaluates an entry rule whose `when` is the indicator condition of a server
-  alert, with the alert's own parser and 999-bar reading over a lead of native bars before the
-  window, at every close of the rule's interval.
-  It moves out of the binary's `server_alerts` module so both use one copy.
-- **It runs as a CLI first,** `chartgen backtest --fixtures <dir> --rule rule.json`, on the
-  machine that holds the fixtures (a workstation), with no server, no store and no Binance
-  request. A tool on a replay server, and later on the live server for an agent client to call
-  itself, are later steps.
+```bash
+chartgen backtest --rule rule.json --fixtures <dir> [--trades trades.csv]
+```
+
+### The questions, answered
+
+1. **Which option?** Option 3. Option 2 was not run first.
+2. **Where does it run?** A CLI on the machine that holds the fixtures, with no server, no store
+   and no Binance request. A tool on a replay server or on the live server is a later step, with
+   its own decision.
+3. **How much can a rule say?** What an alert can say now: up to four conditions joined by AND
+   (an alert's own condition and its three `and` clauses, [ADR-0084](/chartgen/decisions/0084-conditions-joined-by-and/)),
+   each a price level or one of the ten bar-only indicators of ADR-0067, all on the rule's one
+   interval. Each is parsed by the parser an alert's `and` clause goes through, so a rule's
+   condition is accepted, refused and read exactly as one. Funding and open interest are refused
+   (the fixtures hold neither), and so are drawings. `bar_close` is refused, as in a clause.
+4. **Entry and bracket.** In at the open of the first 1m bar that opens at or after the signal
+   bar's close. The levels are set from that fill price, not from the signal close, so a target
+   of 1.5 R is 1.5 R of the risk at the fill: the stop is `atr` times the ATR(14) of the rule's
+   interval at the signal (the skip bracket's ATR), or `pct` percent of the fill; the targets are
+   R multiples of that risk, nearest first, at most four; the expiry is a duration from the
+   signal (`24h`, `3d`), at most 90 days. The trade is a take whose entry zone is the fill price,
+   so it fills in that bar, and is scored by `apply_bar` exactly as a setup. Levels that
+   `create_setup` would refuse, in practice a stop closer than the risk floor, and levels with a
+   price at or below 0 (`Levels::positive`), are not traded and are counted as `refused`; they
+   are never widened. The stop at the signal bar's extreme is
+   not in this first version. **Overlap:** one open trade per rule and symbol. A signal before
+   the 1m bar in which that trade ended has closed is counted as `skipped_open`. A trade whose
+   exit variants are still open does not hold the symbol. The per-owner limits of a server
+   (open setups, symbols with an open setup) are not applied: a run holds at most one trade per
+   symbol it names.
+5. **Reporting:** the live record's figures only: `track_record` (in all and by symbol) and
+   `shadow_record` over the closed trades, all of them, plus a `summary` (n, won, invalidated,
+   expired, win rate, mean R, net R) that restates `total`. No interval or spread figure.
+6. **Warm-up:** inside the window, for now. This is not the recommendation: the fixtures that
+   exist hold no lead of native bars, and the format change is its own piece of work. A close
+   where a condition (or the ATR of an `atr` stop) has no value yet is counted as
+   `before_warmup`. After that, a condition is read over the closed bars the fixture has, up to
+   999, so in a window's first 999 bars an indicator is seeded over fewer bars than a live
+   alert's, and a signal near its threshold can differ from a live alert's there. A lead of
+   native bars in the fixture remains the way to exact parity from the first close.
+7. **Costs:** the live costs by default (5 bps fee and 2 bps slippage per side on Binance). A
+   rule may set its own `costs`, for a stressed run beside the live one; the answer says which
+   costs it used. A stressed line is a second run, not a second figure in one answer.
+8. **Overfitting and what counts:** chartgen does not enforce a second window; the guide asks
+   for one. A run writes nothing to a setups store and its answer says `"backtest": true`, so its
+   trades cannot enter a live track record; whether an agent client counts them toward its own
+   rules is the client's rule.
+
+### What was not built, and why
+
+- **Stock fixtures** are refused: a stock's session grid, splits and dividends (`stocks::score`)
+  are not wired in yet.
+- **The `skipped_limit`, `refused_at_fill` and `refused_min_risk` counts** of the proposal are
+  one count, `refused`, since the levels are checked once, at the fill; and per-owner limits are
+  not applied (above).
+- **`groups` by month** and a fixture hash are not in the answer; the answer gives each
+  symbol's first and last minute and its count of minutes instead, and the rule's SHA-256.
+
+### As proposed
 
 Why this one:
 
@@ -336,7 +390,7 @@ Why this one:
 - The signals input lets a script (option 2) or an external library (option 6) hand signals to
   the live scorer later, which removes their main weakness.
 
-**What can be done before any decision:** option 2 needs no chartgen code and works on a replay
+**What could be done before a decision:** option 2 needs no chartgen code and works on a replay
 server today. If the owner wants a first answer on one rule this week, a script of about a day
 gives it, within the replay's limits (500 setups and 5 open symbols per owner: one OAuth client
 per run). It is a good way to learn whether a tester is worth building at all.
@@ -418,6 +472,8 @@ If option 3 is chosen:
 
 ## Questions for the owner
 
+As proposed; each is answered under [Decision Outcome](#decision-outcome).
+
 1. **Which option?** The recommendation is 3. Or run option 2 first, with no code, and decide
    after one rule's result?
 2. **Where does it run?** A CLI on a workstation over fixtures (recommended first), a tool on a
@@ -441,18 +497,17 @@ If option 3 is chosen:
 
 ## Confirmation
 
-If option 3 is accepted, its PR shows:
+The PR that implements this shows, in tests of `src/backtest.rs` on small fixtures whose outcome
+is worked out by hand:
 
 - A run of the same rule on the same fixtures twice gives byte-identical answers.
-- For each allowed indicator, its value at every close equals the value the server alert reads
-  there (same parser, same 999 bars, read over the lead), and a fixture that differs only after a signal gives the
-  same signals up to it.
-- A signal's fill is never inside the signal bar; a stop under the risk floor is refused and
-  counted; overlap is counted.
-- Scored trades equal setups made with the same levels on a replay server, field for field
-  (`result_r`, `mae_r`, `mfe_r`, `shadow_results`), a stock held across an ex-date and one whose
-  expiry falls after its last bar included.
-- The report's `total` and `shadows` equal `track_record` and `shadow_record` over the same
-  records.
-- A trade still open when the fixture ends is counted as `open_at_end` and is in no closed figure.
-- Nothing is written to a setups store.
+- Fixtures cut after a signal give the same signals up to it, and a fill is never inside its
+  signal bar.
+- A stop under the risk floor is refused and counted; a signal while the trade is open is
+  counted as `skipped_open`; a trade still open when the fixture ends is counted as
+  `open_at_end` and is in no closed figure.
+- Each trade's fill, exit, status and `result_r` after costs, by hand, and the report's
+  `total`, `by_symbol` and `shadows` from `track_record` and `shadow_record` over the trades.
+- A rule's conditions are refused and read by the parser and reading of an alert's `and`
+  clause, `server_alerts::clauses`, and are read over at most the 999 closed bars an alert reads.
+- Nothing is written to a setups store: the CLI opens none.

@@ -43,6 +43,24 @@ spare. A rerun keeps the symbols already written for the same window; an `--out`
 another window is refused. Rate limits are waited out and the page read again, up to 5 times.
 It exits with status 1 on any error.
 
+## `backtest`
+
+`chartgen backtest` tests a rule over replay fixtures, each signal scored as a setup, with no
+model in the loop, prints the answer as JSON and exits. The guide is
+[Strategy tester](/chartgen/guides/strategy-tester/).
+
+```bash
+chartgen backtest --rule rule.json --fixtures fixtures/2026-q3 [--trades trades.csv]
+```
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--rule` | path | The rule, a JSON file. Required. |
+| `--fixtures` | path | A directory of replay fixtures. Required. |
+| `--trades` | path | Also write every trade: CSV if it ends in `.csv`, else JSON. |
+
+It writes to no store and sends no request. It exits with status 1 on any error.
+
 ## Operating modes
 
 `chartgen` has four modes, picked by the **first** matching flag in this
