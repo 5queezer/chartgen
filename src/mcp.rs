@@ -2569,16 +2569,59 @@ fn ohlcv_summary(data: &chartgen::data::OhlcvData) -> Value {
 // get_indicators (#32)
 // ---------------------------------------------------------------------------
 
+/// Most intervals of one `get_indicators` call.
+const MAX_INDICATOR_INTERVALS: usize = 6;
+
+/// `intervals`: 1 to `MAX_INDICATOR_INTERVALS` spellings, canonical and without repeats.
+fn intervals_arg(v: &Value) -> Result<Vec<String>, String> {
+    let arr = v
+        .as_array()
+        .filter(|a| (1..=MAX_INDICATOR_INTERVALS).contains(&a.len()))
+        .ok_or_else(|| {
+            format!("intervals must be an array of 1 to {MAX_INDICATOR_INTERVALS} intervals.")
+        })?;
+    let mut out: Vec<String> = Vec::new();
+    for v in arr {
+        let iv = check_interval(
+            v.as_str()
+                .ok_or("intervals must hold strings such as \"1h\".")?,
+        )?;
+        if !out.contains(&iv) {
+            out.push(iv);
+        }
+    }
+    Ok(out)
+}
+
+/// What an agent reads of one indicator in a several-interval answer: the
+/// `panel_result_to_json` fields without those that only draw it.
+fn reading_of(mut v: Value) -> Value {
+    if let Some(o) = v.as_object_mut() {
+        for k in ["is_overlay", "y_range", "fills_count", "decorative_dots"] {
+            o.remove(k);
+        }
+        for k in ["lines", "histogram"] {
+            for e in o
+                .get_mut(k)
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(e) = e.as_object_mut() {
+                    e.remove("index");
+                }
+            }
+        }
+    }
+    v
+}
+
 fn tool_get_indicators(
     id: Option<Value>,
     args: &Value,
     engine: Option<&Arc<RwLock<Engine>>>,
 ) -> Value {
     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    let interval = args
-        .get("interval")
-        .and_then(|v| v.as_str())
-        .unwrap_or("4h");
     let indicator_names: Vec<&str> = args
         .get("indicators")
         .and_then(|v| v.as_array())
@@ -2591,11 +2634,30 @@ fn tool_get_indicators(
     if indicator_names.is_empty() {
         return tool_err(id, "indicators array is required and must not be empty");
     }
-    let interval = match check_interval(interval) {
-        Ok(canonical) => canonical,
-        Err(e) => return tool_err(id, &e),
+    // Several intervals (`intervals`) or one (`interval`), not both.
+    let many = match args.get("intervals") {
+        None | Some(Value::Null) => None,
+        Some(_) if args.get("interval").is_some_and(|v| !v.is_null()) => {
+            return tool_err(id, "Give interval or intervals, not both.");
+        }
+        Some(v) => match intervals_arg(v) {
+            Ok(ivs) => Some(ivs),
+            Err(e) => return tool_err(id, &e),
+        },
     };
-    let interval = interval.as_str();
+    let interval = match &many {
+        Some(_) => String::new(),
+        None => {
+            let interval = args
+                .get("interval")
+                .and_then(|v| v.as_str())
+                .unwrap_or("4h");
+            match check_interval(interval) {
+                Ok(canonical) => canonical,
+                Err(e) => return tool_err(id, &e),
+            }
+        }
+    };
 
     // Validate indicator names
     let mut unknown = Vec::new();
@@ -2621,6 +2683,44 @@ fn tool_get_indicators(
         return tool_err(id, &e);
     }
 
+    let Some(intervals) = many else {
+        return match indicators_at(symbol, &interval, &indicator_names, engine) {
+            Ok(output) => tool_ok(id, output),
+            Err(e) => tool_err(id, &e),
+        };
+    };
+    // One entry per interval, in request order. One that fails says so and
+    // does not fail the others.
+    let readings: Vec<Value> = intervals
+        .iter()
+        .map(
+            |iv| match indicators_at(symbol, iv, &indicator_names, engine) {
+                Ok(mut v) => {
+                    if let Some(o) = v.as_object_mut() {
+                        o.remove("symbol");
+                        if let Some(Value::Object(inds)) = o.get_mut("indicators") {
+                            for ind in inds.values_mut() {
+                                *ind = reading_of(ind.take());
+                            }
+                        }
+                    }
+                    v
+                }
+                Err(e) => json!({ "interval": iv, "error": e }),
+            },
+        )
+        .collect();
+    tool_ok_compact(id, &json!({ "symbol": symbol, "intervals": readings }))
+}
+
+/// `get_indicators` for one canonical interval: the engine's results when it
+/// runs this market, else computed over freshly fetched bars.
+fn indicators_at(
+    symbol: &str,
+    interval: &str,
+    indicator_names: &[&str],
+    engine: Option<&Arc<RwLock<Engine>>>,
+) -> Result<Value, String> {
     // Try to get cached results from the engine first
     if let Some(eng) = engine {
         let e = eng.read().unwrap();
@@ -2628,7 +2728,7 @@ fn tool_get_indicators(
             let mut output =
                 json!({ "symbol": symbol, "interval": interval, "source": "engine_cache" });
             let mut ind_results = json!({});
-            for name in &indicator_names {
+            for name in indicator_names {
                 if let Some(pr) = results.get(*name) {
                     ind_results[name] = panel_result_to_json(pr);
                 } else {
@@ -2636,32 +2736,28 @@ fn tool_get_indicators(
                 }
             }
             output["indicators"] = ind_results;
-            return tool_ok(id, output);
+            return Ok(output);
         }
     }
 
     // Fetch data and compute from scratch
     let bars = 200;
-    let fetch_result =
-        fetch::fetch_ohlcv(fetch::DataSource::from_env(), symbol, interval, bars, None)
-            .map(|f| f.data);
-    let mut ohlcv = match fetch_result {
-        Ok(d) => d,
-        Err(e) => return tool_err(id, &format!("Failed to fetch data: {e}")),
-    };
+    let mut ohlcv = fetch::fetch_ohlcv(fetch::DataSource::from_env(), symbol, interval, bars, None)
+        .map(|f| f.data)
+        .map_err(|e| format!("Failed to fetch data: {e}"))?;
     ohlcv.symbol = Some(symbol.to_uppercase());
     ohlcv.interval = Some(interval.to_string());
 
     let mut output = json!({ "symbol": symbol, "interval": interval, "bars": ohlcv.bars.len(), "source": "fetched" });
     let mut ind_results = json!({});
-    for name in &indicator_names {
+    for name in indicator_names {
         if let Some(ind) = indicators::by_name(name) {
             let pr = ind.compute(&ohlcv);
             ind_results[name] = panel_result_to_json(&pr);
         }
     }
     output["indicators"] = ind_results;
-    tool_ok(id, output)
+    Ok(output)
 }
 
 // get_footprint and get_tpo (ADR-0048)
@@ -3671,6 +3767,80 @@ mod tests {
         assert!(parsed["indicators"]["rsi"]["lines"].is_array());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_indicators_intervals_answers_each_once_without_drawing_fields() {
+        let dir = temp_dir("get_ind_intervals");
+        let engine = make_engine(dir.clone());
+        {
+            let mut e = engine.write().unwrap();
+            for i in 0..20 {
+                e.on_bar(make_bar(100.0 + i as f64));
+            }
+        }
+        // 60m and 1h are one interval: answered once, from the engine.
+        let args =
+            json!({ "symbol": "BTCUSDT", "intervals": ["60m", "1h"], "indicators": ["rsi"] });
+        let resp = tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        assert!(!is_error(&resp));
+        let text = response_text(&resp);
+        assert!(!text.contains('\n'), "compact JSON");
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["symbol"], "BTCUSDT");
+        let entries = parsed["intervals"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["interval"], "1h");
+        assert_eq!(entries[0]["source"], "engine_cache");
+        assert!(entries[0].get("symbol").is_none());
+        let rsi = &entries[0]["indicators"]["rsi"];
+        assert_eq!(rsi["label"], "RSI");
+        assert!(rsi.get("is_overlay").is_none() && rsi.get("y_range").is_none());
+        assert!(rsi["lines"][0].get("index").is_none());
+        assert!(rsi["hlines"].is_array(), "levels stay: some are data");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn get_indicators_intervals_refuses_bad_lists() {
+        let call = |args: Value| response_text(&tool_get_indicators(Some(json!(1)), &args, None));
+        let base = |extra: Value| {
+            let mut a = json!({ "symbol": "BTCUSDT", "indicators": ["rsi"] });
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        assert!(call(base(json!({ "interval": "4h", "intervals": ["1h"] }))).contains("not both"));
+        assert!(call(base(json!({ "intervals": [] }))).contains("1 to 6"));
+        assert!(call(base(json!({ "intervals": "1h" }))).contains("1 to 6"));
+        let seven = json!(["1m", "5m", "15m", "1h", "4h", "1d", "1w"]);
+        assert!(call(base(json!({ "intervals": seven }))).contains("1 to 6"));
+        assert!(call(base(json!({ "intervals": [60] }))).contains("strings"));
+        assert!(call(base(json!({ "intervals": ["61m"] }))).contains("Unsupported timeframe"));
+    }
+
+    #[test]
+    fn reading_of_keeps_values_and_levels_and_drops_drawing() {
+        let full = json!({
+            "label": "MACD", "is_overlay": false, "y_range": [0.0, 1.0], "fills_count": 1,
+            "decorative_dots": 3, "hlines": [{ "y": 0.0 }],
+            "lines": [{ "index": 0, "label": "MACD", "last_value": 1.5 }],
+            "histogram": [{ "index": 0, "last_value": -0.5 }],
+            "signals": [{ "x": 3, "y": 1.0, "label": "cross" }]
+        });
+        assert_eq!(
+            reading_of(full),
+            json!({
+                "label": "MACD", "hlines": [{ "y": 0.0 }],
+                "lines": [{ "label": "MACD", "last_value": 1.5 }],
+                "histogram": [{ "last_value": -0.5 }],
+                "signals": [{ "x": 3, "y": 1.0, "label": "cross" }]
+            })
+        );
+        // An engine's "not computed" entry passes as it is.
+        let missing = json!({ "error": "not computed in engine" });
+        assert_eq!(reading_of(missing.clone()), missing);
     }
 
     // --- set_alert / list_alerts / cancel_alert roundtrip ---

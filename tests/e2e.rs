@@ -1947,6 +1947,74 @@ fn call_tool(
     }
 }
 
+/// `get_indicators` with `intervals` answers each interval once, in request order, with
+/// what the one-interval call answers less the fields that only draw it.
+#[test]
+fn test_get_indicators_reads_several_intervals_in_one_call() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let names = serde_json::json!(["rsi", "macd", "oi"]);
+    let many = call_tool(
+        srv.port,
+        &token,
+        "get_indicators",
+        serde_json::json!({"symbol": "BTCUSDT", "intervals": ["1h", "4h", "60m", "1d"], "indicators": names}),
+    )
+    .unwrap();
+    assert_eq!(many["symbol"], "BTCUSDT");
+    let entries = many["intervals"].as_array().unwrap();
+    let order: Vec<&str> = entries
+        .iter()
+        .map(|e| e["interval"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, ["1h", "4h", "1d"]);
+
+    let one = call_tool(
+        srv.port,
+        &token,
+        "get_indicators",
+        serde_json::json!({"symbol": "BTCUSDT", "interval": "4h", "indicators": names}),
+    )
+    .unwrap();
+    let four = &entries[1];
+    assert_eq!(four["source"], one["source"]);
+    assert_eq!(four["bars"], one["bars"]);
+    for name in ["rsi", "macd", "oi"] {
+        let (full, read) = (&one["indicators"][name], &four["indicators"][name]);
+        assert_eq!(read["label"], full["label"], "{name}");
+        // The same fields less those that only draw it. Values are not compared: the
+        // sample feed's forming bar moves between the two calls.
+        let drawn = ["is_overlay", "y_range", "fills_count", "decorative_dots"];
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.retain(|k| !drawn.contains(&k.as_str()));
+            k
+        };
+        assert_eq!(keys(read), keys(full), "{name}");
+        assert!(drawn.iter().all(|k| read.get(k).is_none()), "{name}");
+        let lines = |v: &serde_json::Value| -> Vec<serde_json::Value> {
+            v["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l["label"].clone())
+                .collect()
+        };
+        assert_eq!(lines(read), lines(full), "{name}");
+        assert!(read["lines"][0].get("index").is_none());
+        assert!(read["lines"][0]["last_value"].is_number(), "{name}");
+    }
+
+    let both = call_tool(
+        srv.port,
+        &token,
+        "get_indicators",
+        serde_json::json!({"symbol": "BTCUSDT", "interval": "4h", "intervals": ["1h"], "indicators": names}),
+    );
+    assert!(both.unwrap_err().contains("not both"));
+}
+
 /// Off unless asked for: not listed, and only the list answers, saying so.
 #[test]
 fn test_server_alerts_are_off_by_default() {

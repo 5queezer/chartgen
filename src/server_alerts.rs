@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chartgen::data::{self, Bar};
+use chartgen::drawings;
 use chartgen::feed::FeedEvent;
 use chartgen::interval::Interval;
 use chartgen::push::{DeviceKeys, Vapid};
@@ -351,6 +352,11 @@ struct Record {
     /// An indicator's line at bar closes instead of the price (ADR-0067).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     indicator: Option<indicator::Spec>,
+    /// When it stops (ms): no tick or close after it fires it, and the sweep then
+    /// switches it off. Written only when set; a build from before it runs the alert
+    /// with no end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<i64>,
 }
 
 impl Record {
@@ -369,6 +375,10 @@ impl Record {
 
     fn json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
+    }
+
+    fn expired(&self, now: i64) -> bool {
+        self.expires_at.is_some_and(|t| now >= t)
     }
 }
 
@@ -743,8 +753,9 @@ impl ServerAlerts {
 
     /// A client the operator took off the list does not run, from the restart that
     /// read the new list.
+    /// Nor does an alert past its expiry, before the sweep switches it off.
     fn runs(&self, a: &Record) -> bool {
-        a.active && self.access.may_create(&a.owner)
+        a.active && !a.expired(now_ms()) && self.access.may_create(&a.owner)
     }
 
     fn wanted_feeds(&self, st: &State) -> HashSet<FeedKey> {
@@ -1564,12 +1575,36 @@ impl ServerAlerts {
                 None
             }
         };
+        // Past its expiry: switched off, and kept as long as a spent alert.
+        let ran_out: Vec<String> = st
+            .alerts
+            .values()
+            .filter(|a| a.active && a.expired(now))
+            .map(|a| a.id.clone())
+            .collect();
+        for id in ran_out {
+            let mut next = st.alerts[&id].clone();
+            next.active = false;
+            next.disarmed = false;
+            match self.store.save_server_alert(&id, &next.owner, &next.json()) {
+                Ok(()) => {
+                    st.baselines.remove(&id);
+                    st.alerts.insert(id, next);
+                }
+                Err(e) => eprintln!("[alerts] cannot switch off an expired alert: {e}"),
+            }
+        }
         let expired: Vec<String> = st
             .alerts
             .values()
             .filter(|a| {
-                let spent =
-                    !a.active && a.last_triggered_at.is_some_and(|t| now - t > SPENT_TTL_MS);
+                // Kept for the TTL after the later of its last fire and its expiry, so an
+                // old fire cannot delete an alert that has just expired.
+                let ended = [a.last_triggered_at, a.expires_at.filter(|&t| t <= now)]
+                    .into_iter()
+                    .flatten()
+                    .max();
+                let spent = !a.active && ended.is_some_and(|t| now - t > SPENT_TTL_MS);
                 let idle = last_tokens.as_ref().is_some_and(|tokens| {
                     let last = tokens.get(&a.owner).map_or(0, |secs| secs * 1000);
                     !self.access.keeps_idle_alerts(&a.owner)
@@ -2280,6 +2315,7 @@ impl ServerAlerts {
             false => evaluate_on.unwrap_or(EvaluateOn::Live),
         };
         let message = message_arg(args)?.filter(|m| !m.is_empty());
+        let expires_at = expires_arg(args, now_ms())?.flatten();
         let (webhook_url, sign) = webhook_args(args)?;
         let webhook_url = webhook_url.filter(|u| !u.is_empty());
         if sign == Some(true) && webhook_url.is_none() {
@@ -2364,6 +2400,7 @@ impl ServerAlerts {
             setup_id,
             fired_bar: None,
             indicator: spec,
+            expires_at,
         };
         // With setups: nobody else may take a pair between this check and the write.
         let _pairs = pair_gate();
@@ -2423,6 +2460,7 @@ impl ServerAlerts {
             (false, Some(compare)) => indicator::level_arg(args, compare)?,
         };
         let message = message_arg(args)?;
+        let expires_at = expires_arg(args, now_ms())?;
         let active = match args.get("active") {
             None | Some(Value::Null) => None,
             Some(v) => Some(v.as_bool().ok_or("active must be true or false")?),
@@ -2454,6 +2492,9 @@ impl ServerAlerts {
             .cloned()
             .ok_or("No such alert")?;
         let was_spent = is_spent(&next);
+        let now = now_ms();
+        // Expired, whether or not the sweep has switched it off yet.
+        let was_expired = next.expired(now);
         // What decides when it fires: a note or a webhook does not bring a spent alert
         // back, and neither does the dialog sending the same values again.
         let redefined = condition.is_some_and(|c| c != next.condition)
@@ -2499,6 +2540,21 @@ impl ServerAlerts {
                 next.webhook = Some(Hook { url, secret });
             }
             None => {}
+        }
+        if let Some(at) = expires_at {
+            next.expires_at = at;
+        }
+        // Only an explicit resume runs an expired alert again: not a new end on its own,
+        // nor a new condition, level or trigger.
+        if was_expired && active != Some(true) {
+            next.active = false;
+            next.disarmed = false;
+        }
+        if next.active && next.expired(now) {
+            return Err(
+                "This alert has expired: send a later expires_at, or an empty string to take it off"
+                    .into(),
+            );
         }
         next.push = push.unwrap_or(next.push);
         next.notify_agent = notify_agent.unwrap_or(next.notify_agent);
@@ -2638,6 +2694,9 @@ impl ServerAlerts {
         }
         if let Some(setup) = &a.setup_id {
             view["setup_id"] = json!(setup);
+        }
+        if let Some(at) = a.expires_at {
+            view["expires_at"] = json!(at);
         }
         if let Some(spec) = &a.indicator {
             view["indicator"] = indicator::view(spec, st.values.get(&a.id).copied());
@@ -2913,6 +2972,25 @@ fn level_arg(args: &Value) -> Result<Option<f64>, String> {
             Some(l) if l.is_finite() && l > 0.0 => Ok(Some(l)),
             _ => Err("level must be a number greater than 0".into()),
         },
+    }
+}
+
+/// `expires_at`: absent, an empty string (none), or a time ahead of `now`.
+fn expires_arg(args: &Value, now: i64) -> Result<Option<Option<i64>>, String> {
+    match args.get("expires_at") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(Some(None)),
+        Some(v) => {
+            let at = drawings::parse_time(v, now).map_err(|e| format!("expires_at: {e}"))?;
+            if at <= now {
+                return Err(format!(
+                    "expires_at {} has passed; it is {} now",
+                    drawings::iso(at),
+                    drawings::iso(now)
+                ));
+            }
+            Ok(Some(Some(at)))
+        }
     }
 }
 

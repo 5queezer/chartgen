@@ -878,7 +878,8 @@ Compute indicators and return raw numeric values as JSON. Fetches OHLCV (or
 uses cached engine data under `--trade`) and reports each indicator's last
 line values, dot presence (signals), and horizontal reference levels.
 
-Required: `symbol`, `indicators` (array of names). Optional: `interval` (default `4h`).
+Required: `symbol`, `indicators` (array of names). Optional: `interval` (default `4h`),
+or `intervals` for several at once (below).
 
 Response shape:
 
@@ -898,6 +899,32 @@ Response shape:
 `source` is `engine_cache` when hitting the running trading engine's rolling
 window, `fetched` when the tool fell back to fresh OHLCV. The per-indicator
 object is the same shape `generate_chart` returns under `format=summary`.
+
+##### Several intervals in one call
+
+Pass `intervals` (1 to 6, e.g. `["1h", "4h", "1d"]`) instead of `interval` to read
+several timeframes at once; giving both is an error, and two spellings of one interval
+(`60m`, `1h`) count once. The answer is compact JSON with one entry per interval, in
+request order. An interval that fails says so in its entry; the others still answer:
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "intervals": [
+    { "interval": "1h", "source": "fetched", "bars": 200,
+      "indicators": { "rsi": { "label": "RSI", "lines": [{ "label": "RSI", "last_value": 40.6 }],
+                               "hlines": [{ "y": 70.0 }, { "y": 30.0 }, { "y": 50.0 }] } } },
+    { "interval": "4h", "source": "fetched", "bars": 200, "indicators": { "rsi": { "...": "..." } } },
+    { "interval": "1d", "error": "Failed to fetch data: ..." }
+  ]
+}
+```
+
+Each indicator is the one-interval object less the fields that only draw it:
+`is_overlay`, `y_range`, `fills_count`, `decorative_dots`, and the `index` of each line
+and histogram bucket (their order is kept). Values, signals, levels, patterns and
+divergences are all there. Three intervals of a typical set of nine indicators answer in
+about 4.5 KB, against about 12 KB for three one-interval calls.
 
 #### `get_quotes`
 
@@ -1286,9 +1313,9 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
-| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; a new `webhook_secret`, once, with `sign: true` |
+| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
 | `subscribe_push` | `endpoint`, `p256dh`, `auth` | `{devices}`: registers this browser's push subscription |
 | `unsubscribe_push` | `endpoint` | `{removed, devices}` |
@@ -1313,6 +1340,14 @@ what your client may do.
   and a new URL drops the signing secret unless `sign: true` is sent with it. `sign: false` stops
   signing. Symbol, interval and `evaluate_on` cannot change, nor can an indicator alert's
   `indicator`, `params`, `line` and `compare`.
+- `expires_at`: when the alert stops, as unix seconds, unix ms or an ISO 8601 time, ahead of
+  now and at most a year out. No price or close after it fires the alert, its feed is let go,
+  and within a minute it is switched off (`active: false`), then deleted 7 days later like a
+  spent alert, counted from its expiry or its last fire, whichever is later. Without it an alert
+  has no end. `update_server_alert` sets a new one, or takes it off with `""`. An alert that has
+  expired, even before it shows `active: false`, runs again only with `active: true` and a
+  later `expires_at` (or `""`); a new end, condition, level or trigger alone is stored and leaves
+  it stopped. A build from before this field runs such an alert with no end.
 
 An alert in a list:
 
@@ -1344,7 +1379,7 @@ Times are unix milliseconds. `webhook` shows the host only, never the URL or the
 An alert that [wakes your agent](#waking-your-agent) also has `"notify_agent": true`, and
 `"setup_id"` if it is about a setup; other alerts have neither field.
 An [indicator alert](#indicator-alerts-on-the-server) also has `"indicator"`, and its `level` is
-`null` when it compares the close with the line.
+`null` when it compares the close with the line. An alert with an end has `"expires_at"`.
 `feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
@@ -1663,6 +1698,13 @@ kept, and repeats while `more` is true.**
   next start, under its own id and with the time of its fire, and is sent from there.
 - The newest 1000 events are kept, for 7 days. **`truncated: true` means events after your
   cursor are gone:** read your setups and alerts as they are instead of relying on the log.
+- `truncated` and `more` are independent. `more` says whether another page waits after this
+  one; `truncated` says whether events behind it are gone. A last page (`more: false`) can be
+  `truncated: true`, and without a cursor (`after` 0) `truncated` is true as soon as your
+  oldest events aged out, so keep the `cursor` between calls. An answer with no events gives
+  the log's end as its `cursor`, so a reader whose events after its cursor are all gone is told
+  once and not on every call. A page that does return events ends at its last one, and the
+  next page can still be `truncated` where events between kept ones are gone.
 - Listed where server alerts or setups run. A replay server has no log and refuses the call.
 
 **Push** ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). `push: true` on an alert,
