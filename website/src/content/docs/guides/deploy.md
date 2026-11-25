@@ -74,7 +74,7 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_AGENT_WEBHOOK_OWNER` | `src/webhook.rs` | The one owner whose alerts may ask for that receiver: an account (`github:<id>`, `google:<sub>`) with sign-in on, a client id with it off. It must also be named in `CHARTGEN_SERVER_ALERT_CLIENTS`. |
 | `CHARTGEN_AGENT_WEBHOOK_SECRET` | `src/webhook.rs` | The signing key, the same string the receiver has: `whsec_<base64>` or any string of at least 24 characters. Never logged. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
-| `CHARTGEN_OI_RECORD_DAYS` | `src/indicators/external/record.rs` | Days of [open interest the server records](#open-interest-beyond-30-days) beyond the 30 Binance keeps. Default 365; `0` records nothing. Needs the store. |
+| `CHARTGEN_OI_RECORD_DAYS` | `src/indicators/external/record.rs` | How many days back [open interest the server records](#open-interest-beyond-30-days) is kept, counted from now: the whole history, Binance's 30 days included. Default 365; `0` records nothing. Needs the store. |
 | `CHARTGEN_OI_RECORD_SYMBOLS` | `src/indicators/external/record.rs` | Comma-separated Binance futures symbols to record besides those of the setups and server alerts, such as `BTCUSDT,ETHUSDT`. |
 | `CHARTGEN_SETUPS` | `src/setup_service.rs` | `1` enables [setups](/chartgen/guides/setups/): five MCP tools for trading setups the server scores on paper. Off when unset; setups already stored wait in `chartgen.db`. Needs a build with the `scripting` feature and the store. It does not need `CHARTGEN_SERVER_ALERTS`. Read [before turning it on](#setups). |
 | `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` | `src/setup_service.rs` | Symbols one owner may have open setups on. Default 5. |
@@ -137,9 +137,11 @@ bar's open; within the 30 days it reads Binance as before.
 - **History starts with the recording.** The first round reaches back 30 days, so the first
   answers older than Binance's come 30 days after the first start of this build, and after N
   days the history is N + 30 days long, up to the retention.
-- **Restarts and gaps.** Each round reads from the newest recorded row, so a server stopped
-  for less than 30 days loses nothing; the round at its start fills the gap. A longer stop
-  leaves a gap that cannot be filled, and bars in it have no value.
+- **Restarts and gaps.** Each round reads from the newest recorded row, so the round at a
+  start fills the time the server was stopped, as long as Binance still keeps it. At a stop
+  up to the last 6 hours 10 minutes may not have been read yet, so a stop of up to about 29
+  days loses nothing. A longer one leaves a gap that cannot be filled, and bars in it have no
+  value.
 - **The log** says after each round how many rows were recorded for how many symbols, how many
   old ones went, and which symbols failed and why: a spot-only pair, such as `BTCFDUSD`, fails
   every round, as Binance has no futures market for it. A stock is not asked for.

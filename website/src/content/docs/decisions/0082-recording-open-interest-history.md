@@ -128,7 +128,8 @@ far back as Binance keeps) up to 10 minutes ago, 500 rows a request with `startT
 `endTime` both set (with `startTime` alone Binance answers the newest 500), and writes each
 page as it comes. The last 10 minutes wait for the next round, so a row is never recorded before
 it is final. It waits 2 s after each request, through the same gate and budget as the charts.
-Then it drops rows older than the retention, a symbol at a time along the key: one delete over
+Then it drops rows older than the retention, for every symbol in the table, watched or not,
+a symbol at a time along the key: one delete over
 the whole table held the store's lock for about 350 ms on a year of 10 symbols, one per symbol
 0.3 ms.
 
@@ -158,8 +159,10 @@ at its first round, then 4 a day, against the 1000 per 5 minutes Binance allows 
 - Questions about open interest older than 30 days are answerable for the watched symbols, from
   30 days before this build first ran: on its first day the history is Binance's 30 days, after
   N days it is N + 30 days long, up to the retention.
-- A server stopped for less than 30 days loses nothing: the round at its start fills the gap.
-  A longer stop leaves a gap that cannot be filled; those bars have no value.
+- The round at a start fills the time the server was stopped, as long as Binance still keeps
+  it. Up to the last 6 hours 10 minutes may not have been read at a stop, so a stop of up to
+  about 29 days loses nothing; a longer one leaves a gap that cannot be filled, and those bars
+  have no value.
 - The store grows by about 4 MB a symbol and year, and is backed up with everything else in it.
 - A build from before this ignores the table and records nothing; rolling forward again needs no
   step.

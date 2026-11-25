@@ -971,21 +971,18 @@ fn with_recorded(
 
 /// What this server recorded of open interest (ADR-0082) from `from` to `to`, on the
 /// grid of `period`: Binance's row of a period is the 5m row of the same time. `None`
-/// without a store, as in a build without one.
+/// without a store, as in a build without one, and when the store fails, so the read
+/// is not taken as complete and the next one asks again.
 fn recorded_rows(symbol: &str, period: &str, from: i64, to: i64) -> Option<Vec<(i64, f64)>> {
     #[cfg(feature = "scripting")]
     {
         let store = crate::scripting::persistence::global()?;
         let symbol = symbol.to_uppercase();
         let every = period_ms(period);
-        Some(
-            store
-                .futures_rows(record::KIND, &symbol, record::PERIOD, (from, to), every)
-                .unwrap_or_else(|e| {
-                    eprintln!("[futures] recorded open interest {symbol}: {e}");
-                    Vec::new()
-                }),
-        )
+        store
+            .futures_rows(record::KIND, &symbol, record::PERIOD, (from, to), every)
+            .inspect_err(|e| eprintln!("[futures] recorded open interest {symbol}: {e}"))
+            .ok()
     }
     #[cfg(not(feature = "scripting"))]
     {

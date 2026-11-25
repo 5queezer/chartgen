@@ -151,14 +151,16 @@ fn catch_up(
     let mut written = 0;
     while start <= newest {
         let end = (start + (PAGE_ROWS as i64 - 1) * STEP_MS).min(newest);
-        let mut rows = page(
+        let rows = page(
             symbol,
             Query {
                 start: Some(start),
                 end: Some(end),
             },
-        )?;
+        );
+        // After a failure too, so failing symbols do not ask in a burst.
         pace();
+        let mut rows = rows?;
         rows.retain(|(t, _)| (start..=end).contains(t));
         store
             .save_futures_rows(KIND, symbol, PERIOD, &rows)
@@ -299,6 +301,10 @@ mod tests {
         store
             .save_futures_rows(KIND, "BTCUSDT", PERIOD, &[(year_ago, 1.0)])
             .unwrap();
+        let unwatched = [(year_ago, 1.0), (NOW - DAY_MS, 1.0)];
+        store
+            .save_futures_rows(KIND, "XRPUSDT", PERIOD, &unwatched)
+            .unwrap();
 
         let mut asked = Vec::new();
         let listed = ["FAILUSDT".to_string(), "BTCUSDT".to_string()];
@@ -320,6 +326,23 @@ mod tests {
         assert!(
             rows(&store, "BTCUSDT")[0].0 > year_ago,
             "older than a year: dropped"
+        );
+        // A symbol nothing watches any more is not read, and its rows still age out.
+        assert_eq!(rows(&store, "XRPUSDT"), [(NOW - DAY_MS, 1.0)]);
+        // A failing symbol is paced like the others.
+        let mut paced = 0;
+        let listed = ["FAILUSDT".to_string()];
+        sweep(
+            &store,
+            &listed,
+            365,
+            NOW,
+            &mut binance(&mut asked),
+            &mut || paced += 1,
+        );
+        assert_eq!(
+            paced, 1,
+            "the watched symbols are up to date; the failure waits"
         );
     }
 
