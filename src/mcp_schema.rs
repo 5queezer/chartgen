@@ -157,7 +157,7 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "get_indicators",
-                "description": "Compute technical indicators for a symbol and return raw numeric values as JSON. Fetches OHLCV data (or uses cached engine data if running in --trade mode) and computes the requested indicators, returning the last values of each line, dot presence, and horizontal reference levels. This is the key tool for automated technical analysis.",
+                "description": "Compute technical indicators for a symbol and return raw numeric values as JSON. Fetches OHLCV data (or uses cached engine data if running in --trade mode) and computes the requested indicators, returning the last values of each line, dot presence, and horizontal reference levels. This is the key tool for automated technical analysis. To read several timeframes in one call, pass intervals (e.g. [\"1h\", \"4h\", \"1d\"]) instead of interval: the answer is then {symbol, intervals: [...]}, one entry per interval in request order, each {interval, source, bars, indicators} or {interval, error} when that interval fails (the others still answer). In that answer each indicator leaves out what only draws it (is_overlay, y_range, fills_count, decorative_dots and the index of each line and histogram, whose order is kept).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -169,6 +169,13 @@ pub fn tools_list_result() -> Value {
                             "type": "string",
                             "description": "Candle interval, as generate_chart's timeframe (e.g. 1m, 7m, 45m, 1h, 4h, 8h, 1d, 2D, 2W)",
                             "default": "4h"
+                        },
+                        "intervals": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "minItems": 1,
+                            "maxItems": 6,
+                            "description": "Several candle intervals in one call, each as interval (e.g. [\"1h\", \"4h\", \"1d\"]); repeats count once. Instead of interval, not with it."
                         },
                         "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." },
                         "indicators": {
@@ -493,11 +500,11 @@ pub const EVENT_TOOLS: [&str; 1] = ["list_events"];
 pub fn event_tools() -> Vec<Value> {
     vec![json!({
         "name": "list_events",
-        "description": "What happened that could wake your agent, read back: your alerts that fired with notify_agent, the status changes of your setups (triggered, won, invalidated, expired, cancelled), and a take that went 0.8 R against it (setup.near_stop, once per setup). Every event is logged before any wake-up is tried and stays for 7 days whether or not it was delivered, so this answers what you missed while your receiver was away. Oldest first. Pass the cursor of the last answer as after to read on. An event says what happened and when; read the setup or alert as it is now with get_setup and list_server_alerts.",
+        "description": "What happened that could wake your agent, read back: your alerts that fired with notify_agent, the status changes of your setups (triggered, won, invalidated, expired, cancelled), and a take that went 0.8 R against it (setup.near_stop, once per setup). Every event is logged before any wake-up is tried and stays for 7 days whether or not it was delivered, so this answers what you missed while your receiver was away. Oldest first. Keep the cursor of the last answer and pass it as after to read on; more: true means another page waits. truncated: true means events after your cursor are gone (older than 7 days or beyond your newest 1000), so read your setups and alerts as they are now. It does not depend on more: a last page can be truncated, and so is every read from after 0 once your oldest events aged out. An event says what happened and when; read the setup or alert as it is now with get_setup and list_server_alerts.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "after": { "type": "integer", "minimum": 0, "default": 0, "description": "Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept." },
+                "after": { "type": "integer", "minimum": 0, "default": 0, "description": "Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept, and truncated once your oldest events aged out." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50, "description": "Most events to return; more says whether others wait." }
             }
         }
@@ -512,7 +519,7 @@ pub fn setup_tools() -> Vec<Value> {
         CONTEXT_PREFIX, FEE_BPS_PER_SIDE, MAX_FEATURES, MAX_REASON, MAX_RECORD_GROUPS,
         MAX_STATED_TEXT, MAX_TAG, MAX_TAGS, MAX_TARGETS, MAX_THESIS, MIN_RISK_IN_ROUND_TRIP_COSTS,
         SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR, SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
-        STOCK_FEE_BPS_PER_SIDE, STOCK_SLIPPAGE_BPS_PER_SIDE,
+        STOCK_FEE_BPS_PER_SIDE, STOCK_SLIPPAGE_BPS_PER_SIDE, VIEW_FIELDS,
     };
     let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." });
     let time = "unix seconds, unix ms or an ISO 8601 time";
@@ -596,7 +603,7 @@ pub fn setup_tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_setups",
-            "description": "List your setups, newest first, without their logs, with what you may do (can_create) and the limits. On a server without setups this returns {enabled: false, setups: []}.",
+            "description": "List your setups, newest first, without their logs, with what you may do (can_create) and the limits. Each setup is as get_setup describes it, a few KB with its thesis, drawings and shadow results; pass fields for only some of them, such as [\"status\", \"result_r\", \"tags\", \"created_at\"] (id is always there), and read the rest with get_setup. Without fields every setup is whole, as before. open_risk adds up your open takes, whatever this call's filters: per direction (long, short) and per symbol and direction, takes (watching or triggered), risk_r (each take risks 1 R, its own risk from fill to invalidation, fixed from the fill on, so risk_r is the number of takes), filled (of them, triggered) and filled_at_stop_r (what the filled ones would end at together, after costs, if each went out at its invalidation now: a little below -1 R each). Skips are not trades and are not in it. It reports and limits nothing. On a server without setups this returns {enabled: false, setups: []}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -604,6 +611,7 @@ pub fn setup_tools() -> Vec<Value> {
                     "symbol": { "type": "string", "description": "Only this symbol's." },
                     "tags": { "type": "array", "items": tag, "maxItems": MAX_TAGS, "description": "Only setups that have every one of these tags." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Most setups to return; total says how many matched." },
+                    "fields": { "type": "array", "items": { "type": "string", "enum": VIEW_FIELDS.as_slice() }, "description": "Only these fields of each setup, and its id. A field a setup does not have, such as probability where none was stated, stays out. Omit for whole setups." },
                     "as_of": as_of.clone()
                 }
             }
@@ -702,20 +710,21 @@ pub fn server_alert_tools() -> Vec<Value> {
                             "required": ["condition"],
                             "additionalProperties": false
                         },
-                        "description": "Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them, with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. Fixed after creation."
-                    }
+                        "description": "Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them, with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. A condition that cannot be read (too little history, no bars yet) does not hold. A fire held back keeps nothing: once stays armed, and with every and greater or less the re-arming follows the alert's own condition only. Fixed after creation."
+                    },
+                    "expires_at": { "type": ["integer", "string"], "description": "When the alert stops, as unix seconds, unix ms or an ISO 8601 time, in the future and at most a year ahead: no price or close after it fires it, and within a minute it is switched off (active: false) and deleted 7 days later. Default: no end." }
                 },
                 "required": ["symbol", "condition", "trigger"]
             }
         }),
         json!({
             "name": "list_server_alerts",
-            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, the and conditions with what each read at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, expires_at (unix ms, when set), feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, the and conditions with what each read at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "update_server_alert",
-            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on, an indicator alert's indicator, params, line and compare, and the and conditions cannot change: delete and create instead.",
+            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. An alert past its expires_at runs again only with active: true and a later expires_at, or an empty one; without active: true it stays stopped. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on, an indicator alert's indicator, params, line and compare, and the and conditions cannot change: delete and create instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -729,7 +738,8 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "sign": { "type": "boolean", "description": "true: sign with a new secret. false: stop signing." },
                     "push": { "type": "boolean", "description": "Notify your devices when it fires, or stop." },
                     "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires, or stop. Not together with a webhook_url." },
-                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about, or an empty string to take it off. Needs notify_agent." }
+                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about, or an empty string to take it off. Needs notify_agent." },
+                    "expires_at": { "type": ["integer", "string"], "description": "A new end, in the future, or an empty string for none. It does not switch on an alert that has expired, even one the sweep has not switched off yet: send active: true with it." }
                 },
                 "required": ["alert_id"]
             }

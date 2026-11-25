@@ -38,7 +38,7 @@ export interface CancelSetupInput {
 
 export interface CreateServerAlertInput {
   /**
-   * Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them, with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. Fixed after creation.
+   * Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them, with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. A condition that cannot be read (too little history, no bars yet) does not hold. A fire held back keeps nothing: once stays armed, and with every and greater or less the re-arming follows the alert's own condition only. Fixed after creation.
    *
    * @maxItems 3
    */
@@ -140,6 +140,10 @@ export interface CreateServerAlertInput {
    * live: every price update, like a browser alert. close: only when a bar of the interval closes.
    */
   evaluate_on?: "live" | "close";
+  /**
+   * When the alert stops, as unix seconds, unix ms or an ISO 8601 time, in the future and at most a year ahead: no price or close after it fires it, and within a minute it is switched off (active: false) and deleted 7 days later. Default: no end.
+   */
+  expires_at?: number | string;
   /**
    * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. Fixed after creation.
    */
@@ -533,6 +537,19 @@ export interface GetIndicatorsInput {
    */
   interval?: string;
   /**
+   * Several candle intervals in one call, each as interval (e.g. ["1h", "4h", "1d"]); repeats count once. Instead of interval, not with it.
+   *
+   * @minItems 1
+   * @maxItems 6
+   */
+  intervals?:
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string];
+  /**
    * Trading symbol (e.g. BTCUSDT, ETHUSDT, AAPL)
    */
   symbol: string;
@@ -721,7 +738,7 @@ export interface ListDrawingToolsInput {}
 
 export interface ListEventsInput {
   /**
-   * Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept.
+   * Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept, and truncated once your oldest events aged out.
    */
   after?: number;
   /**
@@ -739,6 +756,52 @@ export interface ListSetupsInput {
    * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
+  /**
+   * Only these fields of each setup, and its id. A field a setup does not have, such as probability where none was stated, stays out. Omit for whole setups.
+   */
+  fields?: (
+    | "id"
+    | "symbol"
+    | "interval"
+    | "direction"
+    | "decision"
+    | "thesis"
+    | "drawings"
+    | "bracket"
+    | "status"
+    | "created_at"
+    | "costs"
+    | "fill"
+    | "exit"
+    | "result_r"
+    | "scored_through"
+    | "gap"
+    | "pending"
+    | "revisions"
+    | "agent_revisions"
+    | "tags"
+    | "mae_r"
+    | "mfe_r"
+    | "mae_at"
+    | "mfe_at"
+    | "closest_approach_r"
+    | "shadow_results"
+    | "features"
+    | "probability"
+    | "playbook_version"
+    | "market"
+    | "last_close"
+    | "adjustments"
+    | "near_stop_at"
+    | "entry"
+    | "invalidation"
+    | "targets"
+    | "expires_at"
+    | "bars_to_fill"
+    | "bars_to_exit"
+    | "bars_to_mae"
+    | "bars_to_mfe"
+  )[];
   /**
    * Most setups to return; total says how many matched.
    */
@@ -1008,6 +1071,10 @@ export interface UpdateServerAlertInput {
    * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one. On an indicator alert the line is what crosses the level, or with compare: close the close crosses the line, and the previous reading is the bar before's. bar_close: a bar of the interval closed, whatever the price; it needs an interval of 1h or longer, takes no level, indicator or compare, and an alert cannot change into or out of it.
    */
   condition?: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less" | "bar_close";
+  /**
+   * A new end, in the future, or an empty string for none. It does not switch on an alert that has expired, even one the sweep has not switched off yet: send active: true with it.
+   */
+  expires_at?: number | string;
   /**
    * The price level, greater than 0, or an indicator alert's level, any number. Not on an alert with compare: close or condition: bar_close.
    */

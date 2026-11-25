@@ -1722,6 +1722,7 @@ async fn setup_answers_match_the_file_the_web_types_are_tested_against() {
                 "targets": [q * 0.99], "expires_at": at(600), "as_of": at(120),
             }),
         );
+        let open = ask("list_setups", json!({ "status": "open", "as_of": at(120) }));
         let cancelled = ask(
             "cancel_setup",
             json!({ "id": second["id"], "reason": "example reason", "as_of": at(121) }),
@@ -1733,6 +1734,7 @@ async fn setup_answers_match_the_file_the_web_types_are_tested_against() {
             "get_setup": later,
             "cancel_setup": cancelled,
             "list_setups": ask("list_setups", json!({ "as_of": at(400) })),
+            "list_setups_open": open,
         })
     });
     let path = dir.join("setup_responses.json");
@@ -1808,6 +1810,122 @@ async fn an_alert_cannot_name_a_setup_that_is_closed() {
         alert("update_server_alert", moved),
         (true, "That setup is closed".to_string())
     );
+}
+
+/// `fields` keeps those of each setup and its id; without it a setup is whole, and every
+/// key of a whole one is a field that can be asked for (ADR-0078).
+#[tokio::test]
+async fn list_setups_returns_only_the_fields_asked_for() {
+    let s = live();
+    let mut args = long();
+    args["tags"] = json!(["strategy:breakout"]);
+    args["probability"] = json!(0.6);
+    let made = call(&s, "create_setup", args, "owner").unwrap();
+    created(&s, "owner");
+    let whole = call(&s, "list_setups", json!({}), "owner").unwrap();
+    for row in whole["setups"].as_array().unwrap() {
+        for key in row.as_object().unwrap().keys() {
+            assert!(setups::VIEW_FIELDS.contains(&key.as_str()), "{key}");
+        }
+    }
+    assert!(whole["setups"][0]["thesis"].is_string());
+
+    let args = json!({ "fields": ["status", "result_r", "tags", "created_at", "probability"] });
+    let list = call(&s, "list_setups", args, "owner").unwrap();
+    assert_eq!(list["total"], 2);
+    let rows = list["setups"].as_array().unwrap();
+    let row = rows.iter().find(|r| r["id"] == made["id"]).unwrap();
+    assert_eq!(
+        row,
+        &json!({ "id": made["id"], "status": "watching", "result_r": null,
+            "tags": ["strategy:breakout"], "created_at": made["created_at"], "probability": 0.6 })
+    );
+    // One that stated no probability has none to give.
+    let other = rows.iter().find(|r| r["id"] != made["id"]).unwrap();
+    assert_eq!(other.as_object().unwrap().len(), 5);
+    assert_eq!(
+        call(&s, "list_setups", json!({ "fields": [] }), "owner").unwrap()["setups"][0]
+            .as_object()
+            .unwrap()
+            .len(),
+        1,
+        "the id alone"
+    );
+    for wrong in [
+        json!(["owner"]),
+        json!(["log"]),
+        json!("status"),
+        json!([1]),
+    ] {
+        let text = call(&s, "list_setups", json!({ "fields": wrong }), "owner").unwrap_err();
+        assert_eq!(errors(&text), ["fields"], "{wrong}");
+    }
+}
+
+/// open_risk adds up the open takes, whatever the list's filters: 1 R each, and what the
+/// filled ones end at after costs if they go out at their invalidation (ADR-0078). Skips
+/// and closed setups count nowhere.
+#[tokio::test]
+async fn list_setups_adds_up_the_risk_of_open_takes() {
+    let s = live();
+    // Both BTCUSDT longs fill on the same bar.
+    let filled = created(&s, "owner");
+    created(&s, "owner");
+    call(&s, "create_setup", long_on("ETHUSDT"), "owner").unwrap();
+    let p = price("BTCUSDT");
+    let short = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "direction": "short", "thesis": "example thesis",
+        "entry": { "low": p * 1.02, "high": p * 1.03 },
+        "invalidation": p * 1.05, "targets": [p * 0.95],
+        "expires_at": fetch::now_ms() + 86_400_000,
+    });
+    call(&s, "create_setup", short, "owner").unwrap();
+    let skip = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+        "decision": "skip", "thesis": "example reason" });
+    call(&s, "create_setup", skip, "owner").unwrap();
+    let cancelled = created(&s, "owner");
+    let args = json!({ "id": cancelled["id"], "reason": "example reason" });
+    call(&s, "cancel_setup", args, "owner").unwrap();
+    call(&s, "create_setup", long(), "someone else").unwrap();
+
+    let (t, m) = (first_bar(&filled), mid(&filled));
+    s.on_bar(&key(), bar(t, m, m, m * 0.975, m * 0.976));
+    let got = call(&s, "get_setup", json!({ "id": filled["id"] }), "owner").unwrap();
+    assert_eq!(got["status"], "triggered");
+    let (fill, stop) = (
+        got["fill"]["price"].as_f64().unwrap(),
+        got["invalidation"].as_f64().unwrap(),
+    );
+    let cost = (fill + stop) * 2.0 * (5.0 + 2.0) / 10_000.0 / 2.0 / (fill - stop);
+    let at_stop = ((-1.0 - cost) * 10_000.0).round() / 10_000.0;
+
+    let risk = call(
+        &s,
+        "list_setups",
+        json!({ "symbol": "ETHUSDT", "limit": 1 }),
+        "owner",
+    )
+    .unwrap()["open_risk"]
+        .clone();
+    let row = |takes: u32, filled: u32, at_stop_r: f64| json!({ "takes": takes, "risk_r": takes, "filled": filled, "filled_at_stop_r": at_stop_r });
+    let with = |mut row: Value, symbol: &str, direction: &str| {
+        row["symbol"] = json!(symbol);
+        row["direction"] = json!(direction);
+        row
+    };
+    assert_eq!(
+        risk,
+        json!({
+            "long": row(3, 2, 2.0 * at_stop),
+            "short": row(1, 0, 0.0),
+            "by_symbol": [
+                with(row(2, 2, 2.0 * at_stop), "BTCUSDT", "long"),
+                with(row(1, 0, 0.0), "BTCUSDT", "short"),
+                with(row(1, 0, 0.0), "ETHUSDT", "long"),
+            ],
+        })
+    );
+    assert!(at_stop < -1.0 && at_stop > -1.1, "{at_stop}");
 }
 
 #[tokio::test]

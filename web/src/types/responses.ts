@@ -515,6 +515,38 @@ export const GetIndicatorsPayloadSchema = z.object({
 });
 export type GetIndicatorsPayload = z.infer<typeof GetIndicatorsPayloadSchema>;
 
+// get_indicators with `intervals`: one entry per interval, in request order.
+//   Each indicator is the summary shape less what only draws it (`reading_of`):
+//   no is_overlay, y_range, fills_count, decorative_dots, nor a line's index.
+export const IndicatorReadingSchema = SummaryIndicatorSchema.omit({
+  is_overlay: true,
+  y_range: true,
+  fills_count: true,
+  decorative_dots: true,
+}).extend({
+  lines: z.array(SummaryLineSchema.omit({ index: true })).optional(),
+  histogram: z.array(SummaryHistogramBucketSchema.omit({ index: true })).optional(),
+});
+
+export const GetIndicatorsIntervalsPayloadSchema = z.object({
+  symbol: z.string(),
+  intervals: z.array(
+    z.union([
+      z.object({
+        interval: z.string(),
+        source: z.enum(["engine_cache", "fetched"]),
+        bars: z.number().int().optional(),
+        indicators: z.record(
+          z.string(),
+          z.union([IndicatorReadingSchema, z.object({ error: z.string() })]),
+        ),
+      }),
+      z.object({ interval: z.string(), error: z.string() }),
+    ]),
+  ),
+});
+export type GetIndicatorsIntervalsPayload = z.infer<typeof GetIndicatorsIntervalsPayloadSchema>;
+
 // ---------------------------------------------------------------------------
 // get_quotes — `get_quotes` in `src/mcp.rs` (ADR-0011).
 //   One entry per distinct requested symbol, in request order: a quote,
@@ -720,6 +752,8 @@ export const ServerAlertSchema = z.object({
   notify_agent: z.boolean().optional(),
   /** Present only on an alert that is about one of the owner's setups. */
   setup_id: z.string().optional(),
+  /** Present only on an alert with an end: unix ms after which it does not fire. */
+  expires_at: z.number().int().optional(),
   /**
    * Present only on an alert on an indicator's line at bar closes (ADR-0067). `value` is
    * the line at the last close it read, null until it has read one.
@@ -1070,6 +1104,35 @@ export type SetupRevision = z.infer<typeof SetupRevisionSchema>;
 export const SetupPayloadSchema = SetupSchema.extend({ log: z.array(SetupRevisionSchema) });
 export type SetupPayload = z.infer<typeof SetupPayloadSchema>;
 
+/**
+ * The risk of a set of open takes (ADR-0078): each risks 1 R, so risk_r is the count;
+ * filled_at_stop_r is what the filled ones end at together, after costs, if each goes out
+ * at its invalidation now. Skips are not in it.
+ */
+export const SetupRiskSchema = z
+  .object({
+    takes: z.number().int().nonnegative(),
+    risk_r: z.number().nonnegative(),
+    filled: z.number().int().nonnegative(),
+    filled_at_stop_r: z.number(),
+  })
+  .strict();
+export type SetupRisk = z.infer<typeof SetupRiskSchema>;
+
+export const SetupOpenRiskSchema = z
+  .object({
+    long: SetupRiskSchema,
+    short: SetupRiskSchema,
+    // Only the symbol and direction pairs that have an open take, by symbol, long first.
+    by_symbol: z.array(
+      SetupRiskSchema.extend({ symbol: z.string(), direction: z.enum(["long", "short"]) }).strict(),
+    ),
+  })
+  .strict();
+export type SetupOpenRisk = z.infer<typeof SetupOpenRiskSchema>;
+
+// `list_setups` as the web app asks for it: whole setups. The tool's `fields` argument
+// (ADR-0078) returns only some fields of each; the web app never sends it.
 export const SetupsPayloadSchema = z.object({
   enabled: z.boolean(),
   // The rest is absent when the server has setups off.
@@ -1087,6 +1150,8 @@ export const SetupsPayloadSchema = z.object({
       bytes: z.number().int(),
     })
     .optional(),
+  // Over all the caller's open takes, whatever the call's filters (ADR-0078).
+  open_risk: SetupOpenRiskSchema.optional(),
   setups: z.array(SetupSchema),
 });
 export type SetupsPayload = z.infer<typeof SetupsPayloadSchema>;
@@ -1276,6 +1341,9 @@ export const LoggedEventSchema = z.discriminatedUnion("type", [
       fire_count: z.number().int(),
       /** Only on an indicator alert's fire (ADR-0067). */
       indicator: IndicatorViewSchema.optional(),
+      /** Only on the fire of an alert with conditions joined by AND, each with what it read
+       * at that close (ADR-0084). */
+      and: z.array(AndClauseViewSchema).optional(),
     }),
   }),
   LoggedEventBaseSchema.extend({

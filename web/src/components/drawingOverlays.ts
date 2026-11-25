@@ -20,16 +20,21 @@ import { formatColor } from "../lib/color";
 import {
   arrowHead,
   barsBetween,
+  boxesOverlap,
   clampPosition,
   dateRangeLabel,
   defaultPosition,
   FIB_EXT_LEVELS,
   fibExtensionLevels,
+  fitPositionLabels,
   formatAmount,
+  labelBox,
   pitchforkLines,
   positionBars,
   positionLabels,
   priceRangeLabel,
+  shortPositionLabels,
+  type LabelBox,
   type PositionKind,
 } from "../lib/drawingMath";
 import { FONT_FAMILY, PALETTES } from "../lib/theme";
@@ -79,6 +84,7 @@ export function setPositionSize(size: { reward: number | null; bars: number | nu
 }
 
 const TEXT_PAD = 6;
+const TEXT_PAD_Y = 3;
 /**
  * Center of a box [left, right] for a label: the middle of the part inside
  * the pane (so it stays readable when the box runs off an edge), then
@@ -161,8 +167,8 @@ function label(
       family: FONT_FAMILY,
       paddingLeft: TEXT_PAD,
       paddingRight: TEXT_PAD,
-      paddingTop: 3,
-      paddingBottom: 3,
+      paddingTop: TEXT_PAD_Y,
+      paddingBottom: TEXT_PAD_Y,
       borderRadius: 3,
     },
     ignoreEvent: true,
@@ -323,6 +329,20 @@ registerOverlay({
 
 const POSITION_KINDS: Record<string, PositionKind> = { cgLong: "long", cgShort: "short" };
 
+// Label boxes the positions of each pane drew in the current pass, by overlay
+// id. klinecharts draws all overlays of a pane in one synchronous pass, so the
+// boxes are cleared in a microtask after it.
+const labelBoxes = new Map<string, Map<string, LabelBox[]>>();
+function positionLabelBoxes(pane: string): Map<string, LabelBox[]> {
+  let boxes = labelBoxes.get(pane);
+  if (!boxes) {
+    if (labelBoxes.size === 0) queueMicrotask(() => labelBoxes.clear());
+    boxes = new Map();
+    labelBoxes.set(pane, boxes);
+  }
+  return boxes;
+}
+
 for (const [name, kind] of Object.entries(POSITION_KINDS)) {
   registerOverlay({
     name,
@@ -352,17 +372,50 @@ for (const [name, kind] of Object.entries(POSITION_KINDS)) {
         },
         styles: { style: "stroke_fill", color: look.fill, borderColor: look.line },
       });
-      const text = positionLabels(kind, pe, pt, ps, pricePrecision(p));
-      logLabels(overlay.id, [text.target, text.stop, text.ratio]);
+      const prec = pricePrecision(p);
+      const size = textSize(overlay);
+      const width = (str: string) => utils.calcTextWidth(str, size, "normal", FONT_FAMILY) + 2 * TEXT_PAD;
+      const height = size + 2 * TEXT_PAD_Y;
+      // Shortened or left out when the box is small on screen (fitPositionLabels).
+      const text = fitPositionLabels(
+        positionLabels(kind, pe, pt, ps, prec),
+        shortPositionLabels(kind, pe, pt, ps, prec),
+        {
+          width: Math.max(0, Math.min(right, p.bounding.width) - Math.max(left, 0)),
+          reward: Math.abs(t.y - e.y),
+          risk: Math.abs(s.y - e.y),
+        },
+        width,
+        height,
+      );
       const line = userOr(overlay, "line", "color", "#787b86");
-      return [
+      const wanted = [
+        { text: text.target, y: t.y, bg: GREEN.line, baseline: t.y <= e.y ? "bottom" : "top" },
+        { text: text.stop, y: s.y, bg: RED.line, baseline: s.y >= e.y ? "top" : "bottom" },
+        { text: text.ratio, y: e.y, bg: line, baseline: "middle" },
+      ] as const;
+      const figs: OverlayFigure[] = [
         rect(e.y, t.y, GREEN),
         rect(e.y, s.y, RED),
         { type: "line", attrs: { coordinates: [{ x: left, y: e.y }, { x: right, y: e.y }] }, styles: { color: line } },
-        label(at(text.target), t.y, text.target, GREEN.line, t.y <= e.y ? "bottom" : "top", overlay),
-        label(at(text.stop), s.y, text.stop, RED.line, s.y >= e.y ? "top" : "bottom", overlay),
-        label(at(text.ratio), e.y, text.ratio, line, "middle", overlay),
       ];
+      // A label that would overlap one of another position on the pane is left out.
+      const pane = positionLabelBoxes(`${overlay.groupId}:${overlay.paneId}`);
+      const others = [...pane].flatMap(([id, boxes]) => (id === overlay.id ? [] : boxes));
+      const mine: LabelBox[] = [];
+      const shown: string[] = [];
+      for (const l of wanted) {
+        if (l.text === null) continue;
+        const x = at(l.text);
+        const box = labelBox(x, l.y, width(l.text), height, l.baseline);
+        if (others.some((o) => boxesOverlap(o, box))) continue;
+        mine.push(box);
+        shown.push(l.text);
+        figs.push(label(x, l.y, l.text, l.bg, l.baseline, overlay));
+      }
+      pane.set(overlay.id, mine);
+      logLabels(overlay.id, shown);
+      return figs;
     },
     performEventMoveForDrawing: ({ currentStep, points, performPoint }) => {
       // setPoints replays this with step 2 when a stored drawing is restored.
