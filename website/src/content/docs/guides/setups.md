@@ -233,6 +233,28 @@ stop is that far and the target twice that; `bracket` on the setup says which ap
 `floor`; `agent` for a setup with your own levels). A skip has an expiry after 24 bars of the setup's interval, at most 90 days. A skip cannot be
 cancelled.
 
+## Listing them
+
+`list_setups` returns your setups newest first, each whole as `get_setup` has it but without the
+log: a few KB a setup with its thesis, drawings and shadow results. To look over many, ask for
+the fields you need ([ADR-0078](/chartgen/decisions/0078-compact-tool-answers/)):
+
+```json
+{ "status": "closed", "limit": 100, "fields": ["status", "result_r", "tags", "created_at"] }
+```
+
+Each setup then has those fields and its `id`, and `get_setup` reads the rest of the one you
+want. Without `fields` every setup is whole, as before.
+
+### Open risk
+
+The list also adds up your open takes in `open_risk`, whatever its filters: per direction, and
+per symbol and direction. Each open take risks 1 R, its own risk from fill to invalidation, so
+`risk_r` is the number of takes, watching or triggered; `filled_at_stop_r` is what the filled
+ones would end at together, after costs, if each went out at its invalidation now. Three shorts
+open on correlated symbols read as `"short": {"takes": 3, "risk_r": 3, ...}`. Skips are not in
+it. Whether that is too much is your rule: the server reports and enforces nothing.
+
 ## Limits
 
 Per owner: 20 open setups, 500 in total, open setups on 5 symbols, 50 revisions per setup (tags

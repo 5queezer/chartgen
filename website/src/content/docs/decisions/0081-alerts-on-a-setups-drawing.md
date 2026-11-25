@@ -70,7 +70,9 @@ Chosen: **a**, **i** and **x**, in `src/server_alerts/drawing.rs` and `src/serve
   (text, fib levels, channels, positions) are refused, as are a vertical line and a ray that
   runs left.
 - **The price at a close** is the drawing's at the open time of the bar that closed, as the chart
-  draws the candle against the line.
+  draws the candle against the line. A line is read linearly in price between its points, as on
+  a linear price axis; the web app on a log axis draws the same two points as a curve in price,
+  so there the alert and the drawn line part between and beyond the points.
 - **Checks when it is made:** the setup is the owner's and on the alert's symbol, the index
   names a drawing, `evaluate_on` is `close`, and no `level` or `indicator` is given. The setup
   may be open or closed; the drawing is only geometry. `drawing.setup_id` is apart from
@@ -92,5 +94,8 @@ Chosen: **a**, **i** and **x**, in `src/server_alerts/drawing.rs` and `src/serve
 - The web app lists such an alert as "close crossing down trend line (121.00)" and does not offer
   the price dialog for it.
 - **After a rollback**, a build from before this reads a stored drawing alert as a price alert
-  with no level: it never fires and shows `level: null`. When that build stores the alert again
-  (an edit), the drawing is gone from it.
+  with no level: it never fires and shows `level: null`. When that build stores the alert again,
+  the drawing is gone from it: on an edit, and also on its own writes, such as when it finishes a
+  delivery or wake-up that was waiting or moves a client's alerts to a signed-in owner. The alert
+  then stays active with no level and never fires, without saying why: delete such alerts after
+  rolling forward, and make them again.
