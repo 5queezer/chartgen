@@ -36,6 +36,7 @@ export default defineConfig({
             { label: 'Scripted indicators', slug: 'guides/scripted-indicators' },
             { label: 'Setups', slug: 'guides/setups' },
             { label: 'Replay over real history', slug: 'guides/replay' },
+            { label: 'Strategy tester', slug: 'guides/strategy-tester' },
             { label: 'Web frontend', slug: 'guides/web' },
             { label: 'TradingView parity', slug: 'guides/tradingview-parity' },
             { label: 'Testing', slug: 'guides/testing' },

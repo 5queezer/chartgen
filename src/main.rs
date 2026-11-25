@@ -1,3 +1,5 @@
+#[cfg(feature = "scripting")]
+mod backtest;
 mod chart_push;
 #[cfg(feature = "scripting")]
 mod event_log;
@@ -89,6 +91,9 @@ struct Cli {
 enum Command {
     /// Write replay fixtures of real 1m bars, from Binance or for a US stock from Yahoo, for CHARTGEN_REPLAY_FIXTURES (ADR-0068, ADR-0070)
     ReplayFixtures(replay_fixtures::Args),
+    /// Test a rule over replay fixtures, each signal scored as a setup, with no model in the loop (ADR-0083)
+    #[cfg(feature = "scripting")]
+    Backtest(backtest::Args),
 }
 
 fn main() {
@@ -99,6 +104,14 @@ fn main() {
 
     if let Some(Command::ReplayFixtures(args)) = &cli.command {
         if let Err(e) = replay_fixtures::run(args) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(feature = "scripting")]
+    if let Some(Command::Backtest(args)) = &cli.command {
+        if let Err(e) = backtest::run(args) {
             eprintln!("{e}");
             std::process::exit(1);
         }

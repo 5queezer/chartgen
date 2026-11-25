@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 /// Bars a feed keeps for its indicator alerts: one Binance page. The read leaves out
 /// the forming bar, so an alert can count on one fewer.
-pub(super) const WINDOW_BARS: usize = 1000;
+pub(crate) const WINDOW_BARS: usize = 1000;
 
 /// Indicators that rescan a window of `period` bars at every bar, so they cost bars
 /// times period; and the most of each of their params on a server alert (ADR-0067).
