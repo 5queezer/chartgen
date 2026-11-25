@@ -38,7 +38,7 @@ export interface CancelSetupInput {
 
 export interface CreateServerAlertInput {
   /**
-   * Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them, with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. A condition that cannot be read (too little history, no bars yet) does not hold. A fire held back keeps nothing: once stays armed, and with every and greater or less the re-arming follows the alert's own condition only. Fixed after creation.
+   * Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them (not funding: make that the alert's own indicator), with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. A condition that cannot be read (too little history, no bars yet) does not hold. A fire held back keeps nothing: once stays armed, and with every and greater or less the re-arming follows the alert's own condition only. Fixed after creation.
    *
    * @maxItems 3
    */
@@ -137,6 +137,19 @@ export interface CreateServerAlertInput {
    */
   condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less" | "bar_close";
   /**
+   * Compare each close with this drawing of one of your setups instead of a level: needs evaluate_on: close, and takes no level and no indicator. Its points are copied now, so revising the setup's drawings later does not move the alert. A trend line (segment) is read along its slope past its end and not before its start; a ray from its origin; an extended line both ways; a horizontal line or price label at its price; a horizontal ray from its point on; a rectangle from its left edge on, by its top for crossing_up and greater and its bottom for crossing_down and less (crossing is refused). The price is the line's at the open time of the bar that closed. Other tools are refused. Fixed after creation, though setup_id for the wake-up is set apart from it.
+   */
+  drawing?: {
+    /**
+     * The drawing's place in that setup's drawings, from 0, as get_setup lists them.
+     */
+    index: number;
+    /**
+     * One of your setups, on this symbol.
+     */
+    setup_id: string;
+  };
+  /**
    * live: every price update, like a browser alert. close: only when a bar of the interval closes.
    */
   evaluate_on?: "live" | "close";
@@ -145,9 +158,9 @@ export interface CreateServerAlertInput {
    */
   expires_at?: number | string;
   /**
-   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. Fixed after creation.
+   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the settlement nearest its open): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. Fixed after creation.
    */
-  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx" | "funding";
   /**
    * Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert. Required with condition bar_close, 1h or longer.
    */
@@ -248,13 +261,17 @@ export interface CreateSetupInput {
    */
   invalidation?: number;
   /**
-   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. Fixed once the setup is made.
+   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. A setup without one is counted as unversioned, and so is one that states unversioned, which the answer warns about; once your newest setup states a version, the answer also warns when this one has none. Fixed once the setup is made.
    */
   playbook_version?: string;
   /**
    * Optional. Your own estimate, from 0 to 1, that this setup reaches its first target. Fixed once the setup is made; get_track_record shows it beside what happened.
    */
   probability?: number;
+  /**
+   * Optional, with decision: skip only. Why you did not take it, as a short label of at most 32 characters such as correlation-limit, to group skips by with get_track_record. The why in words goes in the thesis. Fixed once the setup is made.
+   */
+  skip_reason?: string;
   /**
    * A Binance symbol, e.g. BTCUSDT, or a stock or ETF listed in the US (Nasdaq, NYSE, NYSE American, NYSE Arca or Cboe BZX), e.g. NVDA or SPY. An index such as ^GSPC cannot be traded: use an ETF that tracks it, such as SPY.
    */
@@ -529,6 +546,10 @@ export interface GetIndicatorsInput {
    */
   as_of?: number | string;
   /**
+   * Also answer each line's and histogram's change over this many bars, ending at the bar its last_value is from: change {from, abs (last_value - from), pct (abs over |from|, in %, null when from is 0)}, or change null when either end has no value (nothing that far back, or a line with no value on its last bar, such as an inactive Supertrend line). Open interest (oi) and the long/short ratios have none older than the 30 days Binance keeps (about 185 bars on 4h, 31 on 1d). The answer then also carries change_bars.
+   */
+  change_bars?: number;
+  /**
    * List of indicator names to compute (e.g. ["rsi", "macd", "adx"])
    */
   indicators: string[];
@@ -680,17 +701,34 @@ export interface GetTrackRecordInput {
    */
   from?: number | string;
   /**
-   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). A setup that stated none is in the group whose key is null. More than 50 groups are refused.
+   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated no playbook_version is in the group unversioned; one that stated none of the others, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
    */
-  group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction";
+  group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction" | "tag" | "skip_reason";
   /**
-   * Only setups made with this playbook_version.
+   * Only setups made with this playbook_version; unversioned for those made without one.
    */
   playbook_version?: string;
   /**
    * Only setups on this symbol.
    */
   symbol?: string;
+  /**
+   * With group_by: tag, the starts of the tags to count by, each a group, such as ["trigger:alert", "trigger:scan"]. Longer tags that start the same are in the group too: trigger:scan takes trigger:scan-4h.
+   *
+   * @minItems 1
+   * @maxItems 10
+   */
+  tag_prefixes?:
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string];
   /**
    * Only setups made before this time, as unix seconds, unix ms or an ISO 8601 time.
    */
@@ -747,7 +785,12 @@ export interface ListEventsInput {
   limit?: number;
 }
 
-export interface ListIndicatorsInput {}
+export interface ListIndicatorsInput {
+  /**
+   * full: each indicator with its description, category, aliases and every parameter's type, range and description. compact: only its name, params (each parameter's default, by name, null where it has none; params is absent when the indicator has no parameters) and, for a script of yours, source: "user" (generate_chart takes those; get_indicators computes built-ins only).
+   */
+  detail?: "full" | "compact";
+}
 
 export interface ListServerAlertsInput {}
 
@@ -789,6 +832,7 @@ export interface ListSetupsInput {
     | "features"
     | "probability"
     | "playbook_version"
+    | "skip_reason"
     | "market"
     | "last_close"
     | "adjustments"
@@ -801,6 +845,7 @@ export interface ListSetupsInput {
     | "bars_to_exit"
     | "bars_to_mae"
     | "bars_to_mfe"
+    | "net"
   )[];
   /**
    * Most setups to return; total says how many matched.

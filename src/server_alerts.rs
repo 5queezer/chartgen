@@ -356,6 +356,10 @@ struct Record {
     /// before them ignores them, and fires on its own condition alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     and: Vec<clauses::Clause>,
+    /// A drawing of a setup at bar closes instead of a level (ADR-0081). A build from
+    /// before it reads such a row as a price alert with no level, which never fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drawing: Option<drawing::Spec>,
     /// When it stops (ms): no tick or close after it fires it, and the sweep then
     /// switches it off. Written only when set; a build from before it runs the alert
     /// with no end.
@@ -454,6 +458,9 @@ struct State {
     values: HashMap<String, f64>,
     /// What each `and` clause read at the alert's last close.
     and_values: HashMap<String, Vec<Option<f64>>>,
+    /// The newest close each futures-data alert was evaluated at: a read can come back
+    /// after a later close's (ADR-0080).
+    futures_bars: HashMap<String, i64>,
     changes: Window,
     fires: Window,
     /// Per client, and under "" every delivery of either kind.
@@ -1025,10 +1032,7 @@ impl ServerAlerts {
             .filter(|a| self.runs(a) && a.reads_bars() && a.feed() == *key)
             .map(|a| a.id.clone())
             .collect();
-        let now = Instant::now();
-        for id in ids {
-            self.evaluate(st, key, &id, close, t, now);
-        }
+        self.evaluate_all(st, key, ids, close, t, Instant::now());
     }
 
     /// The feed went on without us: the baselines start over, and the bars, which
@@ -1129,9 +1133,7 @@ impl ServerAlerts {
             })
             .map(|a| a.id.clone())
             .collect();
-        for id in ids {
-            self.evaluate(st, key, &id, price, bar_time, now);
-        }
+        self.evaluate_all(st, key, ids, price, bar_time, now);
         if reseed {
             self.seed_windows(st);
         }
@@ -1148,6 +1150,7 @@ impl ServerAlerts {
         id: &str,
         price: f64,
         bar_time: i64,
+        given: Option<indicator::Reading>,
     ) -> Option<(Option<f64>, f64, Option<f64>)> {
         let alert = st.alerts.get(id)?;
         // A close fires an alert once: a feed can send it again after a restart.
@@ -1165,18 +1168,42 @@ impl ServerAlerts {
             }
             return Some((None, 0.0, None));
         }
+        // With clauses, a price or drawing alert reads a close once the bars hold it, as
+        // an indicator alert does: read before, its baseline would move on while its
+        // clauses cannot be read, and the read once the bars are back would miss the
+        // crossing.
+        if !alert.and.is_empty() && alert.indicator.is_none() {
+            let bars = st.watches.get(key)?.bars.as_ref()?;
+            if !bars.iter().rev().any(|b| bar_time_of(b) == Some(bar_time)) {
+                return None;
+            }
+        }
+        if let Some(d) = &alert.drawing {
+            let level = d.level(alert.condition, bar_time * 1000)?;
+            let dist = price - level;
+            // The distance, not the price: a line moves between two closes.
+            let prev = st.baselines.insert(id.to_string(), dist);
+            st.values.insert(id.to_string(), level);
+            return Some((prev, dist, Some(level)));
+        }
         let Some(spec) = &alert.indicator else {
             let level = alert.level?;
-            // With clauses, a close is read once the bars hold it, as an indicator's is.
-            if !alert.and.is_empty() {
-                let bars = st.watches.get(key)?.bars.as_ref()?;
-                if !bars.iter().rev().any(|b| bar_time_of(b) == Some(bar_time)) {
-                    return None;
-                }
-            }
             let prev = st.baselines.insert(id.to_string(), price);
             return Some((prev.map(|p| p - level), price - level, None));
         };
+        // Read off the lock, by `read_futures_later`. The reading before is the value
+        // this alert read at its close before, not the series one bar back: a bar is
+        // given the settlement nearest its open, which can be the one that just came,
+        // and would hide the crossing (ADR-0080). It is a baseline as a price's is:
+        // lost on a restart, and started again by a resume, a new definition or a
+        // gap in the feed. Both against the level as it is now.
+        if spec.reads_futures() {
+            let r = given?;
+            let level = spec.level?;
+            st.values.insert(id.to_string(), r.value);
+            let prev = st.baselines.insert(id.to_string(), r.value);
+            return Some((prev.map(|v| v - level), r.value - level, Some(r.value)));
+        }
         let bars = st.watches.get(key)?.bars.as_ref()?;
         let end = bars.partition_point(|b| bar_time_of(b).is_some_and(|t| t <= bar_time));
         if end == 0 || bar_time_of(&bars[end - 1]) != Some(bar_time) {
@@ -1214,6 +1241,98 @@ impl ServerAlerts {
         read.iter().all(|(h, _)| *h)
     }
 
+    /// `ids` at `price` on the bar opening at `bar_time`: futures-data alerts once
+    /// their read is back, the others now.
+    fn evaluate_all(
+        &self,
+        st: &mut State,
+        key: &FeedKey,
+        ids: Vec<String>,
+        price: f64,
+        bar_time: i64,
+        now: Instant,
+    ) {
+        let (futures, now_read): (Vec<String>, Vec<String>) = ids.into_iter().partition(|id| {
+            st.alerts
+                .get(id)
+                .and_then(|a| a.indicator.as_ref())
+                .is_some_and(indicator::Spec::reads_futures)
+        });
+        for id in now_read {
+            self.evaluate(st, key, &id, price, bar_time, now, None);
+        }
+        if !futures.is_empty() {
+            self.read_futures_later(st, key, futures, price, bar_time);
+        }
+    }
+
+    /// A futures-data indicator reads Binance's futures rows, which can take seconds:
+    /// on a blocking thread, with no lock held, from the closed bars up to this one.
+    fn read_futures_later(
+        &self,
+        st: &State,
+        key: &FeedKey,
+        ids: Vec<String>,
+        price: f64,
+        bar_time: i64,
+    ) {
+        let Some(bars) = st.watches.get(key).and_then(|w| w.bars.as_ref()) else {
+            return;
+        };
+        let end = bars.partition_point(|b| bar_time_of(b).is_some_and(|t| t <= bar_time));
+        if end == 0 || bar_time_of(&bars[end - 1]) != Some(bar_time) {
+            return;
+        }
+        let tail = bars[end.saturating_sub(indicator::FUTURES_BARS)..end].to_vec();
+        for id in ids {
+            let Some(spec) = st.alerts.get(&id).and_then(|a| a.indicator.clone()) else {
+                continue;
+            };
+            let (me, key, tail) = (self.me.clone(), key.clone(), tail.clone());
+            self.runtime.spawn(async move {
+                let read = {
+                    let key = key.clone();
+                    tokio::task::spawn_blocking(move || read_futures(&spec, &tail, &key.0, &key.1))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                };
+                if let Some(this) = me.upgrade() {
+                    this.futures_read(&key, &id, price, bar_time, read);
+                }
+            });
+        }
+    }
+
+    fn futures_read(
+        &self,
+        key: &FeedKey,
+        id: &str,
+        price: f64,
+        bar_time: i64,
+        read: Result<indicator::Reading, String>,
+    ) {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        if !st
+            .alerts
+            .get(id)
+            .is_some_and(|a| self.runs(a) && a.feed() == *key)
+        {
+            return;
+        }
+        if st.futures_bars.get(id).is_some_and(|&t| t >= bar_time) {
+            return;
+        }
+        st.futures_bars.insert(id.to_string(), bar_time);
+        match read {
+            Ok(r) => self.evaluate(st, key, id, price, bar_time, Instant::now(), Some(r)),
+            // The value read before stays: funding moves at a settlement only, so its
+            // crossing shows at one close, and the next read can still find it.
+            Err(e) => eprintln!("[alerts] {} {}: {e}", key.0, key.1),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn evaluate(
         &self,
         st: &mut State,
@@ -1222,8 +1341,9 @@ impl ServerAlerts {
         price: f64,
         bar_time: i64,
         now: Instant,
+        given: Option<indicator::Reading>,
     ) {
-        let Some((prev, d, value)) = self.reading(st, key, id, price, bar_time) else {
+        let Some((prev, d, value)) = self.reading(st, key, id, price, bar_time, given) else {
             return;
         };
         let Some(alert) = st.alerts.get(id) else {
@@ -1357,6 +1477,9 @@ impl ServerAlerts {
         if let Some(and) = and {
             body["and"] = and.clone();
         }
+        if let Some(d) = &alert.drawing {
+            body["drawing"] = drawing::view(d, value);
+        }
         NewEvent {
             id: uuid::Uuid::new_v4().to_string(),
             owner: alert.owner.clone(),
@@ -1412,13 +1535,16 @@ impl ServerAlerts {
             "fired_at": at,
             "fire_count": alert.fire_count,
         });
-        // Only on an indicator alert, or one with clauses: a price alert's body is as it
-        // always was.
+        // Only on an indicator or drawing alert, or one with clauses: a price alert's body
+        // is as it always was.
         if let Some(spec) = &alert.indicator {
             body["indicator"] = indicator::view(spec, value);
         }
         if let Some(and) = and {
             body["and"] = and.clone();
+        }
+        if let Some(d) = &alert.drawing {
+            body["drawing"] = drawing::view(d, value);
         }
         let body = body.to_string();
         let limits = &self.limits;
@@ -1792,6 +1918,7 @@ impl ServerAlerts {
         st.baselines.remove(id);
         st.values.remove(id);
         st.and_values.remove(id);
+        st.futures_bars.remove(id);
         st.held_back.remove(id);
         let mut dropped = 0;
         for queue in st.queues.values_mut() {
@@ -2040,6 +2167,21 @@ impl ServerAlerts {
             eprintln!("[alerts] notify_agent refused for owner {owner}: CHARTGEN_AGENT_WEBHOOK_OWNER names another");
         }
         Err("This server only sends webhooks for sign-ins its operator allowed".into())
+    }
+
+    /// The drawings of the owner's setup `id`, which must be on `symbol`.
+    fn setup_drawings(&self, owner: &str, id: &str, symbol: &str) -> Result<Vec<Value>, String> {
+        if self.setups.get().and_then(Weak::upgrade).is_none() {
+            return Err("Setups are not enabled on this server".into());
+        }
+        let setup = self.setup_of(owner, id).ok_or("No such setup")?;
+        if setup.symbol != symbol {
+            return Err(format!(
+                "That setup is on {}, not {symbol}: its drawings are placed on its own bars",
+                setup.symbol
+            ));
+        }
+        Ok(setup.drawings)
     }
 
     /// A setup an alert may be about: the caller's own, and still open.
@@ -2347,12 +2489,28 @@ impl ServerAlerts {
         if at_close {
             bar_close_args(args, evaluate_on)?;
         }
+        let given = |k: &str| args.get(k).is_some_and(|v| !v.is_null());
+        if given("drawing") && given("indicator") {
+            return Err("An alert watches a drawing or an indicator, not both".into());
+        }
         let spec = indicator::parse(args)?;
         let and = clauses::parse(args)?;
         if !and.is_empty() && evaluate_on != Some(EvaluateOn::Close) && !at_close {
             return Err("An alert with and reads bar closes: send evaluate_on: close".into());
         }
+        let drawn = drawing::parse(args, condition, |id| {
+            self.setup_drawings(owner, id, &symbol)
+        })?;
+        if drawn.is_some() {
+            if args.get("level").is_some_and(|v| !v.is_null()) {
+                return Err("A drawing alert takes no level: the drawing is its level".into());
+            }
+            if evaluate_on != Some(EvaluateOn::Close) {
+                return Err("A drawing alert reads bar closes: send evaluate_on: close".into());
+            }
+        }
         let level = match (at_close, &spec) {
+            _ if drawn.is_some() => None,
             (true, _) | (false, Some(_)) => None,
             (false, None) => Some(level_arg(args)?.ok_or("level is required")?),
         };
@@ -2432,6 +2590,15 @@ impl ServerAlerts {
                 .check_symbol(&symbol, &feed.1)
                 .map_err(|e| format!("Cannot watch {symbol}: {e}"))?;
         }
+        // An alert on a series the symbol does not have would never fire (ADR-0080).
+        if let Some(spec) = spec.as_ref().filter(|s| s.reads_futures()) {
+            let bars = self
+                .hub
+                .seed_bars(&symbol, &feed.1, indicator::FUTURES_BARS)
+                .map_err(|e| format!("Cannot watch {symbol}: {e}"))?;
+            read_futures(spec, &bars, &symbol, &feed.1)
+                .map_err(|e| format!("Cannot watch {} on {symbol}: {e}", spec.name))?;
+        }
         let secret = (sign == Some(true)).then(new_secret);
         let record = Record {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2463,6 +2630,7 @@ impl ServerAlerts {
             fired_bar: None,
             indicator: spec,
             and,
+            drawing: drawn,
             expires_at,
         };
         // With setups: nobody else may take a pair between this check and the write.
@@ -2492,14 +2660,16 @@ impl ServerAlerts {
             .and_then(Value::as_str)
             .ok_or("alert_id is required")?;
         // First: a stranger's URL must not cost a lookup, or answer anything about it.
-        let (compare, at_close) = match self.lock().alerts.get(id).filter(|a| a.owner == owner) {
-            None => return Err("No such alert".into()),
-            Some(a) => (
-                a.indicator.as_ref().map(|s| s.compare),
-                a.condition == Condition::BarClose,
-            ),
-        };
-        for field in ["indicator", "params", "line", "compare", "and"] {
+        let (compare, at_close, drawn) =
+            match self.lock().alerts.get(id).filter(|a| a.owner == owner) {
+                None => return Err("No such alert".into()),
+                Some(a) => (
+                    a.indicator.as_ref().map(|s| s.compare),
+                    a.condition == Condition::BarClose,
+                    a.drawing.clone(),
+                ),
+            };
+        for field in ["indicator", "params", "line", "compare", "drawing", "and"] {
             if args.get(field).is_some_and(|v| !v.is_null()) {
                 return Err(format!(
                     "{field} cannot change: delete the alert and create another"
@@ -2513,8 +2683,14 @@ impl ServerAlerts {
                 "An alert cannot become a bar_close alert or stop being one: delete it and create another".into(),
             );
         }
+        if let (Some(d), Some(c)) = (&drawn, condition) {
+            d.check(c)?;
+        }
         let trigger: Option<Trigger> = enum_arg(args, "trigger")?;
         let level = match (at_close, compare) {
+            _ if drawn.is_some() && args.get("level").is_some_and(|v| !v.is_null()) => {
+                return Err("A drawing alert takes no level: the drawing is its level".into())
+            }
             (true, _) if args.get("level").is_some_and(|v| !v.is_null()) => {
                 return Err(NO_LEVEL.into())
             }
@@ -2649,6 +2825,14 @@ impl ServerAlerts {
             })?;
         if redefined || active.is_some() {
             st.baselines.remove(id);
+            // A futures read still out for a close before this belongs to the alert as
+            // it was: `futures_read` drops it.
+            let last = st.watches.get(&next.feed()).and_then(|w| w.last_closed);
+            if let (Some(t), Some(_)) =
+                (last, next.indicator.as_ref().filter(|s| s.reads_futures()))
+            {
+                st.futures_bars.insert(id.to_string(), t);
+            }
         }
         let mut payload = self.view(&st, &next);
         if let Some(secret) = new_secret_text {
@@ -2767,6 +2951,9 @@ impl ServerAlerts {
         if let Some(and) = and_view(a, st.and_values.get(&a.id)) {
             view["and"] = and;
         }
+        if let Some(d) = &a.drawing {
+            view["drawing"] = drawing::view(d, st.values.get(&a.id).copied());
+        }
         view
     }
 }
@@ -2846,6 +3033,9 @@ struct FiredAlert<'a> {
     /// Only on an alert with clauses: each with what it read at that close.
     #[serde(skip_serializing_if = "Option::is_none")]
     and: Option<&'a Value>,
+    /// Only on a drawing alert: `level` is then the drawing's price at that close.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drawing: Option<&'a Value>,
     price: &'a Value,
     trigger: &'a Value,
     bar_time: &'a Value,
@@ -2947,6 +3137,7 @@ fn wake_up_body(
                     level: &happened["level"],
                     indicator: happened.get("indicator"),
                     and: happened.get("and"),
+                    drawing: happened.get("drawing"),
                     price: &happened["price"],
                     trigger: &happened["trigger"],
                     bar_time: &happened["bar_time"],
@@ -3186,6 +3377,23 @@ fn and_view(a: &Record, values: Option<&Vec<Option<f64>>>) -> Option<Value> {
 }
 
 mod clauses;
+
+/// The futures read of `indicator::read_futures`. Unit tests put their own in its
+/// place: a test sends no request to Binance.
+#[cfg(not(test))]
+fn read_futures(
+    spec: &indicator::Spec,
+    bars: &[Bar],
+    symbol: &str,
+    interval: &str,
+) -> Result<indicator::Reading, String> {
+    indicator::read_futures(spec, bars, symbol, interval)
+}
+
+#[cfg(test)]
+use tests::read_futures;
+
+mod drawing;
 
 #[cfg(test)]
 mod tests;

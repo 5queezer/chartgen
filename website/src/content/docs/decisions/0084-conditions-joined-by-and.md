@@ -69,9 +69,14 @@ Chosen: **a** and **i**, in `src/server_alerts/clauses.rs` and `src/server_alert
 - **What it shows.** The alert lists `and` with each clause and what it read at the last close
   (`price`, or `indicator.value`); the webhook payload and the wake-up carry the same, at the
   close that fired. `and` cannot change.
-- **Not yet as a clause:** a drawing of a setup (ADR-0081) or a futures-data indicator such as
-  funding (ADR-0080), both in review beside this. Either can be the alert's own condition with
-  `and` clauses beside it once it is in; as clauses they follow after.
+- **Not as a clause:** a futures-data indicator such as funding
+  ([ADR-0080](/chartgen/decisions/0080-futures-data-on-server-alerts/)) is refused: it is read with
+  the symbol, off the alerts' lock, and a clause is read from the bars alone, so it would never
+  hold. Nor a drawing of a setup
+  ([ADR-0081](/chartgen/decisions/0081-alerts-on-a-setups-drawing/)). Either can be the alert's
+  own condition with `and` beside it. A price or drawing alert with `and` reads a close only once
+  the feed's bars hold it, so a close that comes while they are read again cannot move its
+  baseline first.
 
 ### Cost
 

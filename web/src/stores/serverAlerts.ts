@@ -36,12 +36,24 @@ export function serverAlertStatus(a: ServerAlert): ServerAlertStatus {
 }
 
 /** A price alert, which the dialog edits. An indicator alert's level is not a price,
- * and a bar_close alert has none: those change through the tools (ADR-0067, ADR-0069). */
+ * and a bar_close or drawing alert has none: those change through the tools (ADR-0067,
+ * ADR-0069, ADR-0081). */
 export function editsInDialog(
   a: ServerAlert,
-): a is ServerAlert & { condition: AlertCondition; indicator?: undefined } {
-  return !a.indicator && !a.and?.length && a.condition !== "bar_close";
+): a is ServerAlert & { condition: AlertCondition; indicator?: undefined; drawing?: undefined } {
+  return !a.indicator && !a.drawing && !a.and?.length && a.condition !== "bar_close";
 }
+
+/** The drawing tools a server alert can watch, as the toolbar names them. */
+const DRAWING_LABELS: Record<string, string> = {
+  segment: "trend line",
+  rayLine: "ray",
+  straightLine: "extended line",
+  horizontalStraightLine: "horizontal line",
+  horizontalRayLine: "horizontal ray",
+  simpleTag: "price label",
+  cgRect: "rectangle",
+};
 
 /** The label of a server alert's condition: a browser alert's, or "Bar close". */
 export function serverConditionLabel(condition: ServerAlert["condition"]): string {
@@ -49,10 +61,15 @@ export function serverConditionLabel(condition: ServerAlert["condition"]): strin
 }
 
 /** What the alert watches and when it fires: "crossing 100.00", "RSI less than 25",
- * "4h bar close". */
+ * "4h bar close", "close crossing up trend line (121.00)". */
 export function serverAlertCondition(a: ServerAlert): string {
   if (a.condition === "bar_close") return `${a.interval} bar close`;
   const cond = serverConditionLabel(a.condition).toLowerCase();
+  const drawing = a.drawing;
+  if (drawing) {
+    const at = drawing.level === null ? "" : ` (${formatPrice(drawing.level)})`;
+    return `close ${cond} ${DRAWING_LABELS[drawing.tool] ?? drawing.tool}${at}`;
+  }
   const ind = a.indicator;
   if (!ind) return `${cond} ${formatPrice(a.level ?? 0)}`;
   return ind.compare === "close" ? `close ${cond} ${ind.line}` : `${ind.line} ${cond} ${a.level}`;

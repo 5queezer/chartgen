@@ -117,6 +117,10 @@ the server kept it.
 There is no separate exit reason: `status` says it. `won` is the first target, `invalidated` the
 invalidation, `expired` the expiry and `cancelled` your cancel.
 
+**`won` is not the same as a gain.** The result is after costs, so a target nearer to the fill
+than the round-trip costs is `won` with a negative `result_r`. `net` says the sign after costs:
+`gain`, `loss` or `even` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)).
+
 ## Shadow results
 
 A setup is scored all out at its first target. To compare ways of managing the exit without
@@ -187,12 +191,16 @@ the server's own status moves included.
 
 ## What a setup was made with
 
-When you make a setup you can state three more things ([ADR-0064](/chartgen/decisions/0064-a-setups-record/)):
+When you make a setup you can state these too ([ADR-0064](/chartgen/decisions/0064-a-setups-record/), [ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)):
 
 - `features`: what you measured, as a flat object of at most 16 short entries, for example
   `{ "example_number": 1.5, "example_flag": true }`.
 - `probability`: your own estimate, from 0 to 1, that it reaches its first target.
-- `playbook_version`: a short label for the rules you followed.
+- `playbook_version`: a short label for the rules you followed. A setup without one is
+  counted as `unversioned`; once your newest setup states one, `create_setup` warns when a new
+  one does not.
+- `skip_reason`: on a skip only, why you did not take it, as a short label such as
+  `correlation-limit`, to count skips by.
 
 The server gives them no meaning. **They are fixed once the setup is made:** no tool changes
 them, because a record that could be rewritten after the outcome is no record. If one was
@@ -267,7 +275,10 @@ one is refused and nothing old is dropped. `list_setups` returns the limits.
 result in R, and your stated probability beside the share that won. You can filter by
 symbol, direction, decision, `playbook_version` and the time a setup was made, and group by
 one of `playbook_version`, one feature (the server's `ctx_` features included, such as
-`ctx_trend_4h`), the probability in tenths, symbol or direction. The
+`ctx_trend_4h`), the probability in tenths, symbol, direction, `skip_reason`, or tag prefixes
+such as `trigger:alert` and `trigger:scan`. A setup with tags under two of the prefixes is in
+both groups. `won` counts targets reached; `net_gain` and `net_loss` count results above and
+below 0 R after costs. The
 [reference](/chartgen/reference/mcp/#your-track-record) has the fields.
 
 **It counts and judges nothing.** Read it with care:
@@ -362,6 +373,11 @@ the setup as it stands, with its status and levels before its thesis. The alert 
 reports: it changes nothing on the setup, and the server alone moves a status. It needs
 server alerts on and a receiver the operator configured for you. A replay server has no
 alerts.
+
+An alert can also watch one of the setup's drawings: with `drawing: {setup_id, index}` it
+compares each close with that trend line, horizontal line or rectangle, e.g. a close below the
+trend line the thesis rests on. See [a close beyond a drawing of a
+setup](/chartgen/reference/mcp/#a-close-beyond-a-drawing-of-a-setup).
 
 With such a receiver, **the server also wakes your agent when it gives one of your `take`
 setups a status** (`triggered`, `won`, `invalidated`, `expired`). There is no flag for this

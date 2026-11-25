@@ -62,6 +62,14 @@ fn clause(v: &Value) -> Result<Clause, String> {
         return Err("bar_close is not a condition that holds or not".into());
     }
     let spec = indicator::parse(v)?;
+    // A futures-data indicator is read off the lock with the symbol (ADR-0080); a
+    // condition is read from the bars alone, so it would never hold.
+    if let Some(s) = spec.as_ref().filter(|s| s.reads_futures()) {
+        return Err(format!(
+            "{} cannot be an and condition; make it the alert's own indicator",
+            s.name
+        ));
+    }
     let level = match &spec {
         Some(_) => None,
         None => Some(
@@ -172,6 +180,13 @@ mod tests {
             { "condition": "less", "level": 1 }, { "condition": "less", "level": 1 },
         ] });
         assert!(parse(&four).err().unwrap().contains("at most 3"));
+        // Read off the lock with the symbol, so never from the bars alone.
+        for name in ["funding", "funding_rate"] {
+            assert_eq!(
+                err(json!({ "indicator": name, "condition": "greater", "level": 0.01 })),
+                "and[0]: funding cannot be an and condition; make it the alert's own indicator"
+            );
+        }
         let rsi =
             parse(&json!({ "and": [{ "condition": "less", "indicator": "rsi", "level": 30 }] }))
                 .unwrap();

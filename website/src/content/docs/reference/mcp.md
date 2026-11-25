@@ -11,6 +11,11 @@ The HTTP transport implements **MCP Streamable HTTP, spec
 See [ADR-0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) for
 the migration rationale.
 
+**Answers.** A tool that answers JSON writes it as compact JSON, without indentation, in a
+text content item; an error that carries JSON (`setup_errors`, `drawing_errors`, a script's
+`errors`) is compact JSON too. Parse it; do not match its layout
+([ADR-0078](/chartgen/decisions/0078-compact-tool-answers/)).
+
 **Time units.** `t` and fields ending in `_t` are unix seconds (chart coordinates).
 Fields ending in `_time` or `_at` are unix milliseconds. The one exception is server
 alerts' `bar_time`, which is in seconds and stays so for webhook compatibility.
@@ -855,6 +860,22 @@ parameters. Call before `generate_chart` to discover valid names. With
 scripting on, the caller's own scripts are included, tagged `"source": "user"`;
 a script replaces the entry of the built-in it shadows.
 
+Optional: `detail`, `full` (default) or `compact`. The full catalog is about 35 KB; `compact`
+gives each indicator's name and its parameters' defaults by name, about 5 KB
+([ADR-0078](/chartgen/decisions/0078-compact-tool-answers/)):
+
+```json
+{"total": 79, "indicators": [{"name": "ema_stack"}, {"name": "rsi", "params": {"length": 14}}, ...]}
+```
+
+A parameter without a default reads `null`, `params` is absent for an indicator without parameters, and a script of yours keeps
+`"source": "user"`. Ranges, enums and descriptions are only in the full entry.
+
+Which tool takes which entry: `generate_chart` takes every name, a script of yours included,
+with the parameters listed. `get_indicators` takes the names of built-ins only, and computes
+them at their defaults: it refuses a script's name, and a script that shadows a built-in's name
+reads as that built-in there.
+
 #### `get_indicators`
 
 Compute indicators and return raw numeric values as JSON. Fetches OHLCV (or
@@ -908,6 +929,36 @@ Each indicator is the one-interval object less the fields that only draw it:
 and histogram bucket (their order is kept). Values, signals, levels, patterns and
 divergences are all there. Three intervals of a typical set of nine indicators answer in
 about 4.5 KB, against about 12 KB for three one-interval calls.
+
+##### Change over N bars
+
+`change_bars` (1 to 199) adds to each line and histogram bucket how it changed over that
+many bars, ending at the bar its `last_value` is from, and echoes `change_bars` in the
+answer. Is open interest rising or falling over the last day on 4h:
+
+```json
+{ "symbol": "BTCUSDT", "interval": "4h", "source": "fetched", "bars": 200, "change_bars": 6,
+  "indicators": { "oi": { "label": "OI", "lines": [
+    { "index": 0, "label": "OI", "last_value": 5796404804.15,
+      "change": { "from": 5705821305.06, "abs": 90583499.10, "pct": 1.59 } } ] } } }
+```
+
+`abs` is `last_value - from`; `pct` is `abs` over `|from|` in percent, `null` when `from`
+is 0. `change` is `null` when either end has no value: nothing that far back, or a line
+without a value on its last bar (an inactive Supertrend line, whose `last_value` is `null`
+too). Open interest (`oi`)
+and the long/short ratios have none older than the 30 days Binance keeps: about 185 bars
+on 4h, 31 on 1d, and the 200 bars the tool reads cover only about 8 days on 1h. History
+beyond the 30 days would have to be recorded by chartgen itself
+([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/), proposed). Without
+`change_bars` the answer is as before.
+
+With `intervals`, `change_bars` applies to each interval, counted in its own bars,
+and each entry that answers carries `change_bars` and every line's `change`; an entry for an
+interval that failed has only `interval` and `error`.
+
+For every value of a series rather than one change, `generate_chart` with
+`format=series` and a small `bars` answers each bar's value.
 
 #### `get_quotes`
 
@@ -1296,15 +1347,16 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `and`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"`, `condition: "bar_close"` or `drawing`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `drawing`, `and`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
 | `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
 | `subscribe_push` | `endpoint`, `p256dh`, `auth` | `{devices}`: registers this browser's push subscription |
 | `unsubscribe_push` | `endpoint` | `{removed, devices}` |
 
-- `symbol`: a Binance symbol. A stock is refused. Drawing alerts cannot run here;
-  [indicator alerts](#indicator-alerts-on-the-server) can, at bar closes.
+- `symbol`: a Binance symbol. A stock is refused. The browser's drawing alerts cannot run here;
+  [indicator alerts](#indicator-alerts-on-the-server) and alerts on [a drawing of a
+  setup](#a-close-beyond-a-drawing-of-a-setup) can, at bar closes.
 - `condition`: `crossing`, `crossing_up`, `crossing_down`, `greater`, `less`. A crossing
   needs a previous reading, so the first price after creating, resuming, editing or a
   server restart never fires one. `greater` and `less` can fire on it. `bar_close` fires at
@@ -1362,7 +1414,8 @@ Times are unix milliseconds. `webhook` shows the host only, never the URL or the
 An alert that [wakes your agent](#waking-your-agent) also has `"notify_agent": true`, and
 `"setup_id"` if it is about a setup; other alerts have neither field.
 An [indicator alert](#indicator-alerts-on-the-server) also has `"indicator"`, and its `level` is
-`null` when it compares the close with the line. An alert with [conditions joined by
+`null` when it compares the close with the line. A [drawing alert](#a-close-beyond-a-drawing-of-a-setup)
+has `"drawing"` and a `null` `level`. An alert with [conditions joined by
 AND](#conditions-joined-by-and) has `"and"`. An alert with an end has `"expires_at"`.
 `feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
@@ -1396,9 +1449,9 @@ and compares:
 ```
 
 - `indicator`: one of `rsi`, `ma`, `macd`, `stoch`, `cci`, `mfi`, `williams_r`, `roc`, `atr`,
-  `adx`. An EMA or SMA of a length is `ma` with `type` and `length` (`ema` is the fixed
-  8/21/50/200 stack). Your own scripts and indicators that fetch other data (funding, open
-  interest) are refused.
+  `adx`, or `funding` (see [funding](#funding-on-the-server)). An EMA or SMA of a length is
+  `ma` with `type` and `length` (`ema` is the fixed 8/21/50/200 stack). Your own scripts and
+  the other indicators that fetch data besides the bars are refused.
 - `params`: as [`list_indicators`](#list_indicators) gives them. A name the indicator does not
   take is refused. The alert keeps every param it takes, with the defaults filled in, and shows
   and sends them so. The indicator must settle within the 999 closed bars the server reads: EMA
@@ -1425,6 +1478,80 @@ The [webhook payload](#webhook-payload) and the [wake-up](#waking-your-agent) ca
 alert compares with, or with `compare: "close"` the line's value that the close crossed. A
 price alert's payload has no `indicator` and is unchanged.
 
+##### Funding on the server
+
+`indicator: "funding"` (or `funding_rate`) watches a Binance perpetual's funding rate
+([ADR-0080](/chartgen/decisions/0080-futures-data-on-server-alerts/)): the series the chart's
+Funding panel and a wake-up's `context.funding_pct` show, read at the closes of the alert's
+interval like any indicator alert.
+
+```json
+{ "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+  "indicator": "funding", "condition": "crossing_up", "level": 0.05,
+  "trigger": "once", "notify_agent": true }
+```
+
+- `level` is in **percent**: `0.05` is 0.05%, a rate of 0.0005. The line is `Funding`.
+- The value at a close is the rate the chart shows on the bar that closed: the settlement
+  nearest its open. On 1h and 4h that is the latest settled rate, read at the first close after
+  it, so within an hour on 1h. On longer bars it is the one nearest the bar's open, a day old on
+  1d. Use 1h.
+- **A crossing compares with the rate this alert read at its previous close**, as a price alert
+  compares with its previous price: the series one bar back can already show the new
+  settlement. So the first close after creating the alert, after a restart, after a resume or
+  a new `condition`, `level` or `trigger`, or after a gap in the feed never fires a crossing;
+  `greater` and `less` can fire on it. A read still out when the alert is changed is dropped.
+- `compare: "close"` is refused: a close is not a rate.
+- A symbol with no futures market is refused when the alert is created, with the reason.
+- The rate is read off the alerts' lock, from Binance's funding history through the same cache
+  and budget as a chart: one short read per symbol and close, shared by every alert and chart
+  on it. If that read fails, the close is skipped and the alert keeps the value it read before,
+  so the next close still sees a crossing, a close late, if the rate is still across the level
+  then; a rate that crossed and came back between two reads is missed.
+
+#### A close beyond a drawing of a setup
+
+An alert can compare each close with a drawing of one of your [setups](/chartgen/guides/setups/)
+instead of a level ([ADR-0081](/chartgen/decisions/0081-alerts-on-a-setups-drawing/)): a trend
+line broken at a close, or a close out of a range.
+
+```json
+{ "symbol": "BTCUSDT", "interval": "4h", "evaluate_on": "close",
+  "drawing": { "setup_id": "0b6f6f0e-…", "index": 0 },
+  "condition": "crossing_down", "trigger": "once",
+  "notify_agent": true, "setup_id": "0b6f6f0e-…" }
+```
+
+- `drawing.setup_id` is one of your setups, open or closed, on the alert's symbol, and
+  `drawing.index` the drawing's place in its `drawings` as [`get_setup`](#setups-chartgen_setups1)
+  lists them, from 0. `setup_id` beside it is still the setup the wake-up carries, and needs
+  `notify_agent`; the two are set apart.
+- **The points are copied when the alert is made.** Revising the setup's drawings later, or
+  closing the setup, does not move or stop the alert; delete it and make another.
+- The close of a bar is compared with the drawing's price at that bar's **open time**, as the
+  chart draws the candle on the line:
+  - a trend line (`segment`) along its slope, **past its end too**, and not before its first
+    point; a ray (`rayLine`) from its origin; an extended line (`straightLine`) both ways;
+  - a horizontal line (`horizontalStraightLine`) or price label (`simpleTag`) at its price; a
+    horizontal ray (`horizontalRayLine`) from its point on;
+  - a rectangle (`cgRect`) from its left edge on: its **top** for `crossing_up` and `greater`,
+    its **bottom** for `crossing_down` and `less`. `crossing` is refused there: make one alert
+    for each side.
+  - Other tools, a line through two points of one bar, and a ray that runs left are refused.
+- `evaluate_on` must be `close`; any interval with a Binance kline stream. No `level`, and no
+  `indicator`.
+- **A crossing compares two closes**, each with the drawing's price at its own bar, so a rising
+  line can be crossed by a close that is higher than the last one was. As for a price alert, the
+  first close after creating the alert, or after a restart, never fires a crossing; `greater` and
+  `less` can.
+- The alert in a list, the [webhook payload](#webhook-payload) and the
+  [wake-up](#waking-your-agent) carry
+  `"drawing": {"setup_id", "index", "tool", "points": [{"timestamp", "price"}], "level"}`, where
+  `level` is the drawing's price at the last close read (`null` before the first), and in a
+  fire at the close that fired. The fire's `level` is that price too.
+- `update_server_alert` changes its `condition` and `trigger`; not `drawing`, and it takes no
+  `level`.
+
 #### Conditions joined by AND
 
 An alert can take up to 3 more conditions in `and`
@@ -1443,7 +1570,9 @@ its own condition fires **and** each of them holds.
 - Each condition has its own `condition` (`crossing`, `crossing_up`, `crossing_down`,
   `greater`, `less`) and either a price `level` (the close against it) or an
   [indicator](#indicator-alerts-on-the-server) with `params`, `line`, `compare` and `level`,
-  checked as an indicator alert's are. A drawing or `funding` cannot be one yet.
+  checked as an indicator alert's are. `funding` cannot be one: it is read with the symbol, off
+  the lock, so make it the alert's own `indicator`. Nor can a drawing; a [drawing
+  alert](#a-close-beyond-a-drawing-of-a-setup) takes `and` beside its own condition.
 - All are read at the same close, from the symbol and interval's closed bars: `greater` and `less`
   at that close, a crossing between the bar before and that close. So, unlike the alert's own
   price crossing, they read the same after a restart.
@@ -1756,12 +1885,12 @@ setups; `can_create` in the list says so.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags`, `features`, `probability`, `playbook_version` | The setup with its log |
+| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags`, `features`, `probability`, `playbook_version`, `skip_reason` | The setup with its log |
 | `revise_setup` | `id`, `reason`; any of `thesis`, `drawings`, `tags`, `entry`, `invalidation`, `targets`, `expires_at` | The setup with its log |
 | `get_setup` | `id` | The setup with its log |
 | `list_setups` | optional `status`, `symbol`, `tags` (only setups that have all of them), `limit` (default 50, at most 500), `fields` (only these fields of each setup) | `{enabled, can_create, replay, total, limits, open_risk, setups: [...]}`, newest first, without logs |
 | `cancel_setup` | `id`, `reason` | The setup with its log |
-| `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature` | `{replay, closed, open, truncated, group_by, feature, total, groups: [...], shadows}` |
+| `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature`, `tag_prefixes` | `{replay, closed, open, truncated, group_by, feature, tag_prefixes, total, groups: [...], shadows}` |
 
 - `symbol`: a Binance symbol, or a stock or ETF listed in the US (Nasdaq, NYSE, NYSE American,
   NYSE Arca or Cboe BZX) as Yahoo reports it, such as `NVDA` or `SPY`. An index (`^GSPC`), an
@@ -1794,6 +1923,16 @@ setups; `can_create` in the list says so.
   label of at most 32 characters. The server gives them no meaning. **They are fixed once the
   setup is made:** `revise_setup` and `cancel_setup` refuse them. A setup made without
   `probability` or `playbook_version` answers without them.
+- A setup without `playbook_version` is counted as `unversioned` in the track record
+  ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)). **Once your newest setup
+  states one, `create_setup` makes a setup without one all the same and answers with
+  `warnings`:** `["playbook_version missing; this setup is counted as unversioned"]`. If you
+  never state one, there is no warning. The key means "no usable version": a setup that
+  states `unversioned` is made, counted with them, and warned about.
+- `skip_reason` ([ADR-0079](/chartgen/decisions/0079-track-record-after-costs/)): with
+  `decision: skip` only, why you did not take it, as a label of 1 to 32 characters such as
+  `correlation-limit`, to group skips by. The why in words goes in the thesis. It is fixed as
+  the fields above are, does not count against your 16 features, and is refused on a take.
 - The server adds three features to every setup it makes
   ([ADR-0077](/chartgen/decisions/0077-a-setup-records-its-market-context/)): `ctx_trend_4h`
   and `ctx_trend_1d` (`up`, `down` or `mixed`) and `ctx_fear_greed` (`extreme fear`, `fear`,
@@ -1809,9 +1948,11 @@ setups; `can_create` in the list says so.
 
 A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `atr` or `floor`:
 which rule set its levels), `status` (`watching`, `triggered`, `won`,
-`invalidated`, `expired`, `cancelled`), `created_at`, `costs`, `fill` and `exit` (each
+`invalidated`, `expired`, `cancelled`; **`won` means the first target was reached**, and a
+target nearer than the costs leaves a loss all the same, which `net` says), `created_at`, `costs`, `fill` and `exit` (each
 `{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off
-the operator's list), `mae_r`, `mfe_r`, `mae_at`, `mfe_at`, `bars_to_fill`,
+the operator's list), `net` (`gain`, `loss` or `even`: the sign of `result_r` after costs, null
+while it is), `mae_r`, `mfe_r`, `mae_at`, `mfe_at`, `bars_to_fill`,
 `bars_to_exit`, `bars_to_mae`, `bars_to_mfe` and `closest_approach_r` (see
 [excursions](/chartgen/guides/setups/#excursions)), `shadow_results` (from the fill on, the
 setup scored with three fixed exit variants for comparison, `v1_half_t1_be`, `v2_be_at_1r` and
@@ -1852,33 +1993,40 @@ trades and are not in it. It reports; the server limits nothing by it.
 `get_track_record` counts your **closed** setups. Open ones are not counted; `open` says how
 many match the filters.
 
-- Filters: `symbol`, `direction`, `decision`, `playbook_version`, and `from` and `to` (unix
+- Filters: `symbol`, `direction`, `decision`, `playbook_version` (`unversioned` for setups
+  made without one), and `from` and `to` (unix
   seconds, unix ms or ISO 8601) on the time the setup was **made**.
 - `group_by`: `playbook_version`, `feature` (with `feature`, the name of one, the server's
   `ctx_trend_4h`, `ctx_trend_1d` and `ctx_fear_greed` included), `probability`
-  (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol` or `direction`. A setup
-  that stated none is in the group whose `key` is `null`. Groups come in the order of their
-  keys. More than 50 groups are refused: group by something that takes fewer values.
+  (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol`, `direction`,
+  `skip_reason`, or `tag` (with `tag_prefixes`, 1 to 10 starts of tags, such as
+  `["trigger:alert", "trigger:scan"]`, each a group whose `key` is the prefix; a prefix that
+  is a whole tag also takes longer tags that start with it). A setup that
+  stated no `playbook_version` is in the group `unversioned`; one that stated none of the
+  others, or has no tag with any of the prefixes, is in the group whose `key` is `null`.
+  **With `tag`, a setup is in the group of each prefix one of its tags starts with**, so the
+  groups can add up to more than `total`. Groups come in the order of their keys. More than 50
+  groups are refused: group by something that takes fewer values.
 
 ```json
 {
   "replay": false, "closed": 3, "open": 1, "truncated": false,
-  "group_by": "playbook_version", "feature": null,
+  "group_by": "playbook_version", "feature": null, "tag_prefixes": null,
   "total": {
     "count": 3, "won": 2, "invalidated": 1, "expired": 0, "cancelled": 0,
-    "with_result": 3, "total_r": 2.1, "mean_r": 0.7,
+    "with_result": 3, "total_r": 2.1, "mean_r": 0.7, "net_gain": 2, "net_loss": 1,
     "entered": 3, "mean_r_entered": 0.7, "gaps": 0,
     "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
                      "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 }
   },
   "groups": [
-    { "key": null, "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
-      "with_result": 1, "total_r": 1.6, "mean_r": 1.6,
+    { "key": "unversioned", "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
+      "with_result": 1, "total_r": 1.6, "mean_r": 1.6, "net_gain": 1, "net_loss": 0,
       "entered": 1, "mean_r_entered": 1.6, "gaps": 0,
       "probability": { "stated": 0, "mean": null, "won": 0, "observed": null,
                        "stated_entered": 0, "won_entered": 0, "observed_entered": null } },
     { "key": "v1", "count": 2, "won": 1, "invalidated": 1, "expired": 0, "cancelled": 0,
-      "with_result": 2, "total_r": 0.5, "mean_r": 0.25,
+      "with_result": 2, "total_r": 0.5, "mean_r": 0.25, "net_gain": 1, "net_loss": 1,
       "entered": 2, "mean_r_entered": 0.25, "gaps": 0,
       "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5,
                        "stated_entered": 2, "won_entered": 1, "observed_entered": 0.5 } }
@@ -1894,6 +2042,9 @@ many match the filters.
 }
 ```
 
+- `won` counts setups that reached their first target; `net_gain` and `net_loss` count
+  results above and below 0 R after costs. A `won` setup whose target was nearer than the
+  costs is in `net_loss`.
 - `with_result` is how many have a result in R; `mean_r` is over those and `null` when there
   are none. A setup that expired filled while nobody scored it has no result and is not
   given one. `gaps` counts results that do not cover bars the server missed.

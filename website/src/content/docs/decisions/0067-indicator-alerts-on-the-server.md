@@ -8,6 +8,8 @@ sidebar:
 **Status:** Accepted
 *Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-12
+**Amended by:** [ADR-0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) (funding)
+**Amended by:** [ADR-0081](/chartgen/decisions/0081-alerts-on-a-setups-drawing/) (a close beyond a setup's drawing)
 **Amended by:** [ADR-0084](/chartgen/decisions/0084-conditions-joined-by-and/) (an alert with `and` conditions keeps the window of bars too)
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (indicator alerts may now run
 on the server, at bar closes; a watched pair can hold a window of bars) and

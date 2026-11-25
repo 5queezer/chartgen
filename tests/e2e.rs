@@ -1049,7 +1049,9 @@ fn post_unread(port: u16, auth: &str, body: &str) -> std::net::TcpStream {
 }
 
 /// Five indicators: the largest chart at 5000 bars the budget can hold, 30,000 of 32,000.
-const FIVE: [&str; 5] = ["rsi", "macd", "ema", "bbands", "vwap"];
+/// Ones with several lines, so that its answer, about 2.7 MB of compact JSON (ADR-0078),
+/// holds more than the 2,000 units another such chart would need beside it.
+const FIVE: [&str; 5] = ["ema_stack", "bbands", "keltner", "donchian", "macd"];
 
 /// One answer nobody reads holds its share, not the server: what is no tool call goes on.
 #[test]
@@ -1086,7 +1088,7 @@ fn test_the_apps_charts_run_in_parallel() {
     let mut unread = post_unread(
         srv.port,
         &auth,
-        &chart_call(5000, &["rsi"], serde_json::json!({})),
+        &chart_call(5000, &FIVE, serde_json::json!({})),
     );
     assert!(unread_answer_size(&mut unread) > HELD);
 
@@ -1116,9 +1118,10 @@ fn test_the_apps_charts_run_in_parallel() {
 
 /// What makes that test mean something: charts answer in milliseconds here, so taking turns
 /// would look the same. These hold their share until read, and none is read. Each still gets
-/// its answer, only because a chart with `candles` is priced at what it shows, 16,500 of the
-/// 32,000 with cipher_b at 4, and keeps only its answer of about 1,900 once built
-/// (ADR-0052). Priced at the source window, the second would wait for the first to be read.
+/// its answer, only because a chart with `candles` is priced at what it shows, 15,500 of the
+/// 32,000, and keeps only its answer of about 1,350 once built (ADR-0052). Priced at the
+/// source window, the second would wait for the first to be read. Indicators of several
+/// lines each, so that the compact answer (ADR-0078) stays well over `HELD`.
 #[test]
 fn test_the_apps_charts_do_not_take_turns() {
     let srv = spawn_sample_server();
@@ -1127,7 +1130,7 @@ fn test_the_apps_charts_do_not_take_turns() {
     let auth = format!("Authorization: Bearer {token}");
     let call = chart_call(
         500,
-        &["macd", "bbands", "cipher_b", "ema", "vwap"].repeat(4),
+        &["donchian", "vwap_bands", "bbands", "ema_stack", "keltner"].repeat(6),
         serde_json::json!({ "chart_style": "candles" }),
     );
     let mut unread: Vec<_> = (0..3)
@@ -2010,6 +2013,34 @@ fn test_get_indicators_reads_several_intervals_in_one_call() {
         serde_json::json!({"symbol": "BTCUSDT", "interval": "4h", "intervals": ["1h"], "indicators": names}),
     );
     assert!(both.unwrap_err().contains("not both"));
+}
+
+/// `get_indicators` with `change_bars` answers open interest's change over that many
+/// bars, and none where it reaches past the 30 days Binance keeps.
+#[test]
+fn test_get_indicators_answers_open_interest_change() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let oi = |change_bars: u64| {
+        call_tool(
+            srv.port,
+            &token,
+            "get_indicators",
+            serde_json::json!({"symbol": "BTCUSDT", "interval": "4h", "indicators": ["oi"],
+                               "change_bars": change_bars}),
+        )
+        .unwrap()
+    };
+    let near = oi(6);
+    assert_eq!(near["change_bars"], 6);
+    let line = &near["indicators"]["oi"]["lines"][0];
+    let (to, change) = (line["last_value"].as_f64().unwrap(), &line["change"]);
+    let from = change["from"].as_f64().unwrap();
+    assert!((to - from - change["abs"].as_f64().unwrap()).abs() < 1.0);
+    assert!(change["pct"].is_number());
+    // 190 bars of 4h is more than 31 days: older than Binance keeps.
+    assert!(oi(190)["indicators"]["oi"]["lines"][0]["change"].is_null());
 }
 
 /// Off unless asked for: not listed, and only the list answers, saying so.

@@ -200,7 +200,7 @@ fn call_tool(
     }
     match tool_name {
         "generate_chart" => tool_generate_chart(id, &arguments, user),
-        "list_indicators" => tool_list_indicators(id, user),
+        "list_indicators" => tool_list_indicators(id, &arguments, user),
         "list_drawing_tools" => tool_ok(id, drawings::tools_json()),
         "inspect_chart" => inspect_chart(id, &arguments, fetch::DataSource::from_env()),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
@@ -886,21 +886,21 @@ pub(crate) fn generate_chart(
     if let Some(summary) = summary_value {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&summary).unwrap(),
+            "text": serde_json::to_string(&summary).unwrap(),
         }));
     }
 
     if let Some(series) = series_value {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&series).unwrap(),
+            "text": serde_json::to_string(&series).unwrap(),
         }));
     }
 
     if let Some(drawn) = &drawn {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&drawn_json(args, symbol, interval, drawn)).unwrap(),
+            "text": serde_json::to_string(&drawn_json(args, symbol, interval, drawn)).unwrap(),
         }));
     }
 
@@ -908,7 +908,7 @@ pub(crate) fn generate_chart(
     if let (Some(errors), "png") = (&errors_value, format.as_str()) {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&json!({ "indicator_errors": errors })).unwrap(),
+            "text": serde_json::to_string(&json!({ "indicator_errors": errors })).unwrap(),
         }));
     }
 
@@ -1510,8 +1510,17 @@ fn no_push_transport(id: Option<Value>) -> Value {
 }
 
 /// Built-ins plus the caller's scripts (tagged `source: "user"`); a script
-/// replaces the built-in entry it shadows.
-fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
+/// replaces the built-in entry it shadows. `detail: "compact"` keeps each one's name
+/// and its parameters' defaults (ADR-0078).
+fn tool_list_indicators(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let compact = match args.get("detail").filter(|v| !v.is_null()) {
+        None => false,
+        Some(v) => match v.as_str() {
+            Some("full") => false,
+            Some("compact") => true,
+            _ => return tool_err(id, "detail must be full or compact"),
+        },
+    };
     let reg = indicators::registry();
     #[cfg(feature = "scripting")]
     let mine: Vec<Value> = user
@@ -1545,20 +1554,32 @@ fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
         })
         .collect();
     indicator_list.extend(mine);
+    if compact {
+        indicator_list = indicator_list.iter().map(compact_indicator).collect();
+    }
+    tool_ok(
+        id,
+        json!({ "total": indicator_list.len(), "indicators": indicator_list }),
+    )
+}
 
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": {
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string_pretty(&json!({
-                    "total": indicator_list.len(),
-                    "indicators": indicator_list
-                })).unwrap()
-            }]
-        }
-    })
+/// An indicator's name, its parameters' defaults by name when it has any, and whether
+/// it is a script of the caller's.
+fn compact_indicator(entry: &Value) -> Value {
+    let mut compact = json!({ "name": entry["name"] });
+    let params: serde_json::Map<String, Value> = entry["configurable_params"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["name"].as_str()?.to_string(), p["default"].clone())))
+        .collect();
+    if !params.is_empty() {
+        compact["params"] = Value::Object(params);
+    }
+    if entry.get("source").is_some() {
+        compact["source"] = entry["source"].clone();
+    }
+    compact
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,7 +1662,7 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
         Ok(c) => c,
         Err(e) => {
             let payload = json!({ "ok": false, "errors": [e.to_json()] });
-            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+            return tool_err(id, &serde_json::to_string(&payload).unwrap());
         }
     };
     let info = &compiled.info;
@@ -1666,7 +1687,7 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
                 "message": format!("You already have an indicator named {name}. Open it, or pick another name."),
             });
             let payload = json!({ "ok": false, "errors": [error] });
-            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+            return tool_err(id, &serde_json::to_string(&payload).unwrap());
         }
         Err(e) => return tool_err(id, &format!("Could not store the indicator: {e}")),
     }
@@ -1751,7 +1772,7 @@ fn tool_get_my_indicator(id: Option<Value>, args: &Value, user: Option<&str>) ->
                 "error": "not_found",
                 "message": format!("You have no indicator named `{name}`."),
             });
-            tool_err(id, &serde_json::to_string_pretty(&payload).unwrap())
+            tool_err(id, &serde_json::to_string(&payload).unwrap())
         }
         Err(e) => tool_err(id, &format!("Could not read the indicator: {e}")),
     }
@@ -1791,7 +1812,7 @@ pub(crate) fn tool_ok(id: Option<Value>, payload: Value) -> Value {
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap() }]
+            "content": [{ "type": "text", "text": serde_json::to_string(&payload).unwrap() }]
         }
     })
 }
@@ -2595,6 +2616,45 @@ fn reading_of(mut v: Value) -> Value {
     v
 }
 
+/// Most bars `change_bars` reaches back: one less than the bars `get_indicators` reads.
+const MAX_CHANGE_BARS: u64 = 199;
+
+/// `{from, abs, pct}` of a series over `bars` bars up to its last value, or null.
+fn change_json(y: &[f64], breaks: bool, bars: usize) -> Value {
+    match chartgen::indicator::change_over(y, breaks, bars) {
+        Some((from, to)) => {
+            let abs = to - from;
+            let pct = if from == 0.0 {
+                Value::Null
+            } else {
+                json!(abs / from.abs() * 100.0)
+            };
+            json!({ "from": from, "abs": abs, "pct": pct })
+        }
+        None => Value::Null,
+    }
+}
+
+/// `panel_result_to_json`, and with `change_bars` each line's and histogram's
+/// `change` over that many bars.
+fn indicator_json(pr: &chartgen::indicator::PanelResult, change_bars: Option<usize>) -> Value {
+    let mut j = panel_result_to_json(pr);
+    let Some(n) = change_bars else {
+        return j;
+    };
+    if let Some(lines) = j.get_mut("lines").and_then(Value::as_array_mut) {
+        for (line, out) in pr.lines.iter().zip(lines) {
+            out["change"] = change_json(&line.y, line.breaks, n);
+        }
+    }
+    if let Some(hist) = j.get_mut("histogram").and_then(Value::as_array_mut) {
+        for (b, out) in pr.bars.iter().zip(hist) {
+            out["change"] = change_json(&b.y, false, n);
+        }
+    }
+    j
+}
+
 fn tool_get_indicators(
     id: Option<Value>,
     args: &Value,
@@ -2637,6 +2697,18 @@ fn tool_get_indicators(
             }
         }
     };
+    let change_bars = match args.get("change_bars") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64().filter(|n| (1..=MAX_CHANGE_BARS).contains(n)) {
+            Some(n) => Some(n as usize),
+            None => {
+                return tool_err(
+                    id,
+                    &format!("change_bars must be a whole number from 1 to {MAX_CHANGE_BARS}."),
+                )
+            }
+        },
+    };
 
     // Validate indicator names
     let mut unknown = Vec::new();
@@ -2663,7 +2735,7 @@ fn tool_get_indicators(
     }
 
     let Some(intervals) = many else {
-        return match indicators_at(symbol, &interval, &indicator_names, engine) {
+        return match indicators_at(symbol, &interval, &indicator_names, change_bars, engine) {
             Ok(output) => tool_ok(id, output),
             Err(e) => tool_err(id, &e),
         };
@@ -2673,7 +2745,7 @@ fn tool_get_indicators(
     let readings: Vec<Value> = intervals
         .iter()
         .map(
-            |iv| match indicators_at(symbol, iv, &indicator_names, engine) {
+            |iv| match indicators_at(symbol, iv, &indicator_names, change_bars, engine) {
                 Ok(mut v) => {
                     if let Some(o) = v.as_object_mut() {
                         o.remove("symbol");
@@ -2689,7 +2761,7 @@ fn tool_get_indicators(
             },
         )
         .collect();
-    tool_ok_compact(id, &json!({ "symbol": symbol, "intervals": readings }))
+    tool_ok(id, json!({ "symbol": symbol, "intervals": readings }))
 }
 
 /// `get_indicators` for one canonical interval: the engine's results when it
@@ -2698,6 +2770,7 @@ fn indicators_at(
     symbol: &str,
     interval: &str,
     indicator_names: &[&str],
+    change_bars: Option<usize>,
     engine: Option<&Arc<RwLock<Engine>>>,
 ) -> Result<Value, String> {
     // Try to get cached results from the engine first
@@ -2709,12 +2782,15 @@ fn indicators_at(
             let mut ind_results = json!({});
             for name in indicator_names {
                 if let Some(pr) = results.get(*name) {
-                    ind_results[name] = panel_result_to_json(pr);
+                    ind_results[name] = indicator_json(pr, change_bars);
                 } else {
                     ind_results[name] = json!({ "error": "not computed in engine" });
                 }
             }
             output["indicators"] = ind_results;
+            if let Some(n) = change_bars {
+                output["change_bars"] = json!(n);
+            }
             return Ok(output);
         }
     }
@@ -2732,10 +2808,13 @@ fn indicators_at(
     for name in indicator_names {
         if let Some(ind) = indicators::by_name(name) {
             let pr = ind.compute(&ohlcv);
-            ind_results[name] = panel_result_to_json(&pr);
+            ind_results[name] = indicator_json(&pr, change_bars);
         }
     }
     output["indicators"] = ind_results;
+    if let Some(n) = change_bars {
+        output["change_bars"] = json!(n);
+    }
     Ok(output)
 }
 
@@ -2774,15 +2853,6 @@ fn end_time_arg(args: &Value) -> Result<Option<i64>, String> {
     }
 }
 
-/// A payload as compact JSON: these run to thousands of numbers.
-fn tool_ok_compact(id: Option<Value>, payload: &Value) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": { "content": [{ "type": "text", "text": payload.to_string() }] }
-    })
-}
-
 /// Row size from `row_size` or `row_ticks`, or `auto`. Whether it was automatic.
 fn row_arg(args: &Value, tick: f64, auto: impl FnOnce() -> f64) -> Result<(f64, bool), String> {
     let size = number_arg(args, "row_size", 0.0, 0.0, f64::MAX)?;
@@ -2798,7 +2868,7 @@ fn row_arg(args: &Value, tick: f64, auto: impl FnOnce() -> f64) -> Result<(f64, 
 
 fn tool_get_footprint(id: Option<Value>, args: &Value) -> Value {
     match footprint_payload(args, fetch::DataSource::from_env()) {
-        Ok(payload) => tool_ok_compact(id, &payload),
+        Ok(payload) => tool_ok(id, payload),
         Err(e) => tool_err(id, &e),
     }
 }
@@ -2916,7 +2986,7 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
 
 fn tool_get_tpo(id: Option<Value>, args: &Value) -> Value {
     match tpo_payload(args, fetch::DataSource::from_env()) {
-        Ok(payload) => tool_ok_compact(id, &payload),
+        Ok(payload) => tool_ok(id, payload),
         Err(e) => tool_err(id, &e),
     }
 }
@@ -3642,6 +3712,71 @@ mod tests {
     use chartgen::engine::{Engine, EngineConfig};
     use std::path::PathBuf;
 
+    /// `detail: "compact"` keeps every indicator, in the same order, with its name and
+    /// its parameters' defaults; answers are compact JSON (ADR-0078).
+    #[test]
+    fn list_indicators_compact_keeps_names_and_defaults() {
+        let text_of = |args: Value| {
+            let resp = tool_list_indicators(Some(json!(1)), &args, None);
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let full_text = text_of(json!({}));
+        assert!(!full_text.contains('\n'), "compact JSON");
+        let full: Value = serde_json::from_str(&full_text).unwrap();
+        assert_eq!(
+            full,
+            serde_json::from_str::<Value>(&text_of(json!({ "detail": "full" }))).unwrap()
+        );
+        let compact: Value =
+            serde_json::from_str(&text_of(json!({ "detail": "compact" }))).unwrap();
+        assert_eq!(compact["total"], full["total"]);
+        let (full, compact) = (
+            full["indicators"].as_array().unwrap(),
+            compact["indicators"].as_array().unwrap(),
+        );
+        assert_eq!(full.len(), compact.len());
+        for (f, c) in full.iter().zip(compact) {
+            assert_eq!(c["name"], f["name"]);
+            let params = f["configurable_params"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(c.get("params").is_some(), !params.is_empty(), "{c}");
+            for p in &params {
+                assert_eq!(
+                    c["params"][p["name"].as_str().unwrap()],
+                    p["default"],
+                    "{c}"
+                );
+            }
+            assert!(c.get("description").is_none() && c.get("source").is_none());
+        }
+        let rsi = compact.iter().find(|c| c["name"] == "rsi").unwrap();
+        assert!(rsi["params"]["length"].is_number(), "{rsi}");
+        let refused = tool_list_indicators(Some(json!(1)), &json!({ "detail": "short" }), None);
+        assert_eq!(refused["result"]["isError"], true);
+    }
+
+    /// The compact catalog, pinned in a file the web app's types are tested against
+    /// (`web/src/types/responses.test.ts`). To write it again after a deliberate change:
+    /// `CHARTGEN_WRITE_FIXTURES=1 cargo test compact_list_indicators`.
+    #[test]
+    fn compact_list_indicators_matches_the_file_the_web_types_are_tested_against() {
+        let resp = tool_list_indicators(Some(json!(1)), &json!({ "detail": "compact" }), None);
+        let answer: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/list_indicators_compact.json");
+        let text = serde_json::to_string_pretty(&answer).unwrap() + "\n";
+        if std::env::var("CHARTGEN_WRITE_FIXTURES").is_ok() {
+            std::fs::write(&path, &text).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = crate::test_dir::new(format!("chartgen_mcp_test_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3781,6 +3916,129 @@ mod tests {
         // An engine's "not computed" entry passes as it is.
         let missing = json!({ "error": "not computed in engine" });
         assert_eq!(reading_of(missing.clone()), missing);
+    }
+
+    #[test]
+    fn get_indicators_change_bars_adds_each_lines_change() {
+        let dir = temp_dir("get_ind_change");
+        let engine = make_engine(dir.clone());
+        {
+            let mut e = engine.write().unwrap();
+            for i in 0..20 {
+                e.on_bar(make_bar(100.0 + i as f64));
+            }
+        }
+        let call = |args: Value| tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        let plain = call(json!({ "symbol": "BTCUSDT", "interval": "1h", "indicators": ["rsi"] }));
+        let plain: Value = serde_json::from_str(&response_text(&plain)).unwrap();
+        assert!(plain.get("change_bars").is_none());
+        assert!(plain["indicators"]["rsi"]["lines"][0]
+            .get("change")
+            .is_none());
+
+        let resp = call(json!({
+            "symbol": "BTCUSDT", "interval": "1h", "indicators": ["rsi"], "change_bars": 2
+        }));
+        assert!(!is_error(&resp));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert_eq!(parsed["change_bars"], 2);
+        let line = &parsed["indicators"]["rsi"]["lines"][0];
+        let (to, change) = (line["last_value"].as_f64().unwrap(), &line["change"]);
+        let (from, abs) = (
+            change["from"].as_f64().unwrap(),
+            change["abs"].as_f64().unwrap(),
+        );
+        assert!((to - from - abs).abs() < 1e-9);
+        let pct = change["pct"].as_f64().unwrap();
+        assert!((pct - abs / from.abs() * 100.0).abs() < 1e-9);
+        // Further back than the engine holds: no change, not a failure.
+        let resp = call(json!({
+            "symbol": "BTCUSDT", "interval": "1h", "indicators": ["rsi"], "change_bars": 50
+        }));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert!(parsed["indicators"]["rsi"]["lines"][0]["change"].is_null());
+        std::fs::remove_dir_all(&dir).ok();
+
+        for bad in [json!(0), json!(200), json!(1.5), json!("6")] {
+            let args = json!({ "symbol": "BTCUSDT", "indicators": ["rsi"], "change_bars": bad });
+            let resp = tool_get_indicators(Some(json!(1)), &args, None);
+            assert!(response_text(&resp).contains("1 to 199"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn get_indicators_change_bars_applies_to_each_interval() {
+        let dir = temp_dir("get_ind_change_intervals");
+        let engine = make_engine(dir.clone());
+        {
+            let mut e = engine.write().unwrap();
+            for i in 0..20 {
+                e.on_bar(make_bar(100.0 + i as f64));
+            }
+        }
+        let args = json!({
+            "symbol": "BTCUSDT", "intervals": ["1h"], "indicators": ["rsi"], "change_bars": 2
+        });
+        let resp = tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        assert!(!is_error(&resp));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let entry = &parsed["intervals"][0];
+        assert_eq!(entry["change_bars"], 2);
+        // The several-interval reading drops the index, not the change.
+        let line = &entry["indicators"]["rsi"]["lines"][0];
+        assert!(line.get("index").is_none());
+        let (to, change) = (line["last_value"].as_f64().unwrap(), &line["change"]);
+        let (from, abs) = (
+            change["from"].as_f64().unwrap(),
+            change["abs"].as_f64().unwrap(),
+        );
+        assert!((to - from - abs).abs() < 1e-9);
+
+        // Without change_bars an entry has neither.
+        let args = json!({ "symbol": "BTCUSDT", "intervals": ["1h"], "indicators": ["rsi"] });
+        let resp = tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let entry = &parsed["intervals"][0];
+        assert!(entry.get("change_bars").is_none());
+        assert!(entry["indicators"]["rsi"]["lines"][0]
+            .get("change")
+            .is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn indicator_json_changes_lines_and_histogram_and_pct_needs_a_base() {
+        use chartgen::indicator::{Bars, Line, PanelResult};
+        use plotters::style::RGBAColor;
+        let c = RGBAColor(0, 0, 0, 1.0);
+        let pr = PanelResult {
+            lines: vec![Line {
+                breaks: false,
+                y: vec![f64::NAN, 100.0, 110.0, 120.0, f64::NAN],
+                color: c,
+                width: 1,
+                label: Some("OI".into()),
+            }],
+            bars: vec![Bars {
+                y: vec![0.0, 1.0, -1.0],
+                colors: vec![c; 3],
+                bottom: 0.0,
+            }],
+            label: "OI".into(),
+            ..Default::default()
+        };
+        assert_eq!(indicator_json(&pr, None), panel_result_to_json(&pr));
+        let j = indicator_json(&pr, Some(2));
+        assert_eq!(j["lines"][0]["last_value"], 120.0);
+        assert_eq!(
+            j["lines"][0]["change"],
+            json!({ "from": 100.0, "abs": 20.0, "pct": 20.0 })
+        );
+        assert_eq!(
+            j["histogram"][0]["change"],
+            json!({ "from": 0.0, "abs": -1.0, "pct": null })
+        );
+        assert!(indicator_json(&pr, Some(3))["lines"][0]["change"].is_null());
     }
 
     // --- set_alert / list_alerts / cancel_alert roundtrip ---
@@ -5684,7 +5942,7 @@ mod tests {
 
     #[test]
     fn generate_chart_summary_byte_identity_golden() {
-        // sample_data is seeded (Rng::new(42)), so the pretty-printed summary
+        // sample_data is seeded (Rng::new(42)), so the summary, compact JSON (ADR-0078),
         // for a fixed input is stable. This test guards against accidental
         // changes to the summary serializer while the series format is added.
         let args = json!({
@@ -8312,7 +8570,7 @@ def compute(ohlcv, params, chart):
         let missing: Value = serde_json::from_str(text(&other, 0)).unwrap();
         assert_eq!(missing["error"], "not_found");
 
-        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&u)));
+        let all = payload(&tool_list_indicators(Some(json!(1)), &json!({}), Some(&u)));
         let entry = all["indicators"]
             .as_array()
             .unwrap()
@@ -8325,6 +8583,19 @@ def compute(ohlcv, params, chart):
             all["total"].as_u64().unwrap() as usize,
             indicators::registry().len() + 1
         );
+        let compact = payload(&tool_list_indicators(
+            Some(json!(1)),
+            &json!({ "detail": "compact" }),
+            Some(&u),
+        ));
+        let mine = compact["indicators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == "my_momentum")
+            .expect("listed for its owner");
+        assert_eq!(mine["source"], "user");
+        assert!(mine["params"]["length"].is_number(), "{mine}");
 
         // used like a built-in, with params, next to a built-in
         let resp = chart(
@@ -8410,7 +8681,7 @@ def compute(ohlcv, params, chart):
             payload(&call("list_my_indicators", json!({}), Some(&b)))["total"],
             0
         );
-        let all_b = payload(&tool_list_indicators(Some(json!(1)), Some(&b)));
+        let all_b = payload(&tool_list_indicators(Some(json!(1)), &json!({}), Some(&b)));
         assert!(!all_b.to_string().contains("secret_sauce"));
         let resp = chart(&b, json!(["secret_sauce"]), "series");
         assert_eq!(key_error_of(&resp, "secret_sauce")["step"], "unknown");
@@ -8459,7 +8730,7 @@ def compute(ohlcv, params, chart):
         };
         assert_eq!(label(&a), "My WaveTrend");
         assert_eq!(label(&b), "WaveTrend");
-        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&a)));
+        let all = payload(&tool_list_indicators(Some(json!(1)), &json!({}), Some(&a)));
         let wt: Vec<&Value> = all["indicators"]
             .as_array()
             .unwrap()
