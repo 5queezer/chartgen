@@ -1297,7 +1297,10 @@ async fn a_silent_receiver_cannot_fill_the_global_queue() {
         .as_ref()
         .and_then(|d| d.error.clone());
     assert_eq!(error, None, "the victim's webhook was refused");
-    assert_eq!(a.lock().queues["victim"].len(), 1);
+    // Its delivery is queued, or already on its way if the dispatcher took it: either
+    // way its row stays until the silent receiver gives up, long after this.
+    let rows = store.server_alert_events().unwrap();
+    assert_eq!(rows.iter().filter(|e| e.alert_id == victim).count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
