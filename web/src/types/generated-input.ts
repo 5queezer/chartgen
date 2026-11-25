@@ -720,9 +720,17 @@ export interface GetTrackRecordInput {
    */
   from?: number | string;
   /**
-   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated no playbook_version is in the group unversioned; one that stated none of the others, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
+   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). bracket_anchor counts skips by the rule that scored them, fill or signal_close; takes are in the group whose key is null. tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated no playbook_version is in the group unversioned; one that stated none of the others, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
    */
-  group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction" | "tag" | "skip_reason";
+  group_by?:
+    | "playbook_version"
+    | "feature"
+    | "probability"
+    | "symbol"
+    | "direction"
+    | "tag"
+    | "skip_reason"
+    | "bracket_anchor";
   /**
    * Only setups made with this playbook_version; unversioned for those made without one.
    */
@@ -830,6 +838,7 @@ export interface ListSetupsInput {
     | "thesis"
     | "drawings"
     | "bracket"
+    | "bracket_anchor"
     | "status"
     | "created_at"
     | "costs"

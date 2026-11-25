@@ -172,6 +172,7 @@
     "bars_to_mae": null,
     "bars_to_mfe": null,
     "bracket": "atr",
+    "bracket_anchor": "fill",
     "closest_approach_r": null,
     "costs": {
       "fee_bps_per_side": 5.0,
@@ -202,6 +203,9 @@
         "at": 1767261600000,
         "by": "agent",
         "changes": {
+          "bracket_anchor": {
+            "to": "fill"
+          },
           "features": {
             "to": {
               "ctx_fear_greed": "unknown",
@@ -424,6 +428,7 @@
         "bars_to_mae": 0.47,
         "bars_to_mfe": 2.47,
         "bracket": "atr",
+        "bracket_anchor": "fill",
         "closest_approach_r": 0.0,
         "costs": {
           "fee_bps_per_side": 5.0,
