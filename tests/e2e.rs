@@ -1118,9 +1118,10 @@ fn test_the_apps_charts_run_in_parallel() {
 
 /// What makes that test mean something: charts answer in milliseconds here, so taking turns
 /// would look the same. These hold their share until read, and none is read. Each still gets
-/// its answer, only because a chart with `candles` is priced at what it shows, 16,500 of the
-/// 32,000 with cipher_b at 4, and keeps only its answer of about 1,900 once built
-/// (ADR-0052). Priced at the source window, the second would wait for the first to be read.
+/// its answer, only because a chart with `candles` is priced at what it shows, 15,500 of the
+/// 32,000, and keeps only its answer of about 1,350 once built (ADR-0052). Priced at the
+/// source window, the second would wait for the first to be read. Indicators of several
+/// lines each, so that the compact answer (ADR-0078) stays well over `HELD`.
 #[test]
 fn test_the_apps_charts_do_not_take_turns() {
     let srv = spawn_sample_server();
@@ -1129,7 +1130,7 @@ fn test_the_apps_charts_do_not_take_turns() {
     let auth = format!("Authorization: Bearer {token}");
     let call = chart_call(
         500,
-        &["macd", "bbands", "cipher_b", "ema", "vwap"].repeat(4),
+        &["donchian", "vwap_bands", "bbands", "ema_stack", "keltner"].repeat(6),
         serde_json::json!({ "chart_style": "candles" }),
     );
     let mut unread: Vec<_> = (0..3)
