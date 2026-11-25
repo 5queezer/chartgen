@@ -50,6 +50,11 @@ beside a live track record without being mistaken for one.
   closed 1m bar, with the fill, stop, target, expiry and tie rules of ADR-0059, the costs
   (`Costs`, 5 bps fee and 2 bps slippage per side on Binance), `mae_r`/`mfe_r`, and the three
   shadow exit variants of ADR-0066. It does no I/O; the live feed and the replay both call it.
+  On a replay the catch-up wraps it in one more step (`stocks::score` in
+  `src/setup_service/stocks.rs`): a stock's splits and the fixture's dividends go through
+  `Record::adjust` at their time, and `Record::expire_by` ends a stock setup whose expiry has
+  passed with no bar after it (a weekend, the end of the data) at its last close. For a Binance
+  setup both are no-ops.
 - **A market entry already exists.** A skip fills at the open of the first 1m bar it sees
   (`Decision::Skip => bar.open`). A take fills when a 1m bar reaches its entry zone, at the
   bar's open clamped into the zone.
@@ -115,7 +120,9 @@ at each 4h close, the model reads RSI with `get_indicators` and decides. 540 ses
 for t in closes("4h", window):                       # time-major: the replay clock only moves forward
     for sym in symbols:
         s = generate_chart(sym, "4h", format="series", indicators=[{"name": "rsi", "length": 14}],
-                           bars=2, warmup=999, as_of=t)   # warmup: computed over 999 earlier bars, as an alert
+                           bars=2, warmup=997, as_of=t)   # 997 + 2 = the 999 closed bars an alert reads
+        if len(s.rsi) < 2 or None in s.rsi[-2:]:
+            continue                                  # first closes of the window: RSI not warmed up yet
         prev, now = s.rsi[-2], s.rsi[-1]
         if prev < 70 <= now and not open_setup(sym):
             bar = s.bars[-1]
@@ -127,7 +134,7 @@ for t in closes("4h", window):                       # time-major: the replay cl
 
 (`get_indicators` takes indicator names with default params and returns no bar fields, so the
 script reads a `series` chart; without `warmup` a two-bar series would compute RSI over two
-bars.) The entry has to be a zone; "at that close" becomes a narrow zone the next 1m bar usually
+bars, and at a window's first closes there is not even that much history.) The entry has to be a zone; "at that close" becomes a narrow zone the next 1m bar usually
 reaches. The target is fixed before the fill, so where the fill lands inside the zone the reward
 is not exactly 2R of the risk at the fill: one of the limits of this option.
 
@@ -196,8 +203,9 @@ in the library's terms, over bars the library loads.
   and checked as `create_setup` checks them: a fill at or beyond the stop (a gap through the
   signal bar's extreme), or one that leaves less risk than the floor, is not traded and counted
   as `refused_at_fill`.
-- **The end of the fixture.** A trade still open when the fixture's 1m bars run out has no
-  result. It is counted as `open_at_end` and listed, and is not in the closed figures, as an open
+- **The end of the fixture.** A stock trade whose expiry the fixture has passed is first ended
+  at its last close by `expire_by`, as the replay does. A trade still open after that, when the
+  fixture's 1m bars run out, has no result. It is counted as `open_at_end` and listed, and is not in the closed figures, as an open
   setup is not in a live track record. Shadow variants still open there are counted as open, as
   `shadow_record` does. A rule whose expiry is long beside the window loses trades this way, and
   the count says how many.
@@ -205,8 +213,9 @@ in the library's terms, over bars the library loads.
   open is counted as `skipped_open`. The live per-owner limits apply too (20 open setups, 5
   symbols with an open setup), so a run never holds a trade a live owner could not have opened;
   a signal they turn away is counted as `skipped_limit`.
-- Each signal becomes a `Record` scored by `apply_bar` over the fixture's 1m bars, with the live
-  `Costs`, so it has `result_r`, `mae_r`/`mfe_r` and the three shadow variants exactly as a live
+- Each signal becomes a `Record` scored over the fixture's 1m bars by the replay's own scoring
+  step (`apply_bar`, with a stock's dividends through `Record::adjust` and its expiry through
+  `expire_by`, as above), not by `apply_bar` alone, with the live `Costs`, so it has `result_r`, `mae_r`/`mfe_r` and the three shadow variants exactly as a live
   setup would. `ctx_` features are `unknown`, as on any replay (ADR-0077).
 
 ### How results are reported
@@ -303,7 +312,8 @@ leaves them out unless asked.
 front end:
 
 - **The core** takes a list of signals (time, symbol, direction, entry, stop, targets, expiry),
-  scores each as a `Record` over fixture 1m bars with `apply_bar`, and reports as above. It does
+  scores each as a `Record` over fixture 1m bars with the replay's scoring step (which moves out
+  of the binary into the library beside the scorer), and reports as above. It does
   not care where the signals came from.
 - **The front end** evaluates an entry rule whose `when` is the indicator condition of a server
   alert, with the alert's own parser and 999-bar reading over a lead of native bars before the
@@ -440,7 +450,8 @@ If option 3 is accepted, its PR shows:
 - A signal's fill is never inside the signal bar; a stop under the risk floor is refused and
   counted; overlap is counted.
 - Scored trades equal setups made with the same levels on a replay server, field for field
-  (`result_r`, `mae_r`, `mfe_r`, `shadow_results`).
+  (`result_r`, `mae_r`, `mfe_r`, `shadow_results`), a stock held across an ex-date and one whose
+  expiry falls after its last bar included.
 - The report's `total` and `shadows` equal `track_record` and `shadow_record` over the same
   records.
 - A trade still open when the fixture ends is counted as `open_at_end` and is in no closed figure.
