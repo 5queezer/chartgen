@@ -105,3 +105,4 @@ one and link both ways.
 | [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | get_quotes marks a quote that is not trading as stale | Accepted | 2026-11-15 |
 | [0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) | A setup records the market context it was made in | Accepted | 2026-11-15 |
 | [0078](/chartgen/decisions/0078-compact-tool-answers/) | Compact tool answers: fields for list_setups, its open risk, compact JSON and a compact list_indicators | Accepted | 2026-11-24 |
+| [0082](/chartgen/decisions/0082-recording-open-interest-history/) | Recording open interest beyond the 30 days Binance keeps | Proposed | 2026-11-24 |

@@ -909,6 +909,33 @@ and histogram bucket (their order is kept). Values, signals, levels, patterns an
 divergences are all there. Three intervals of a typical set of nine indicators answer in
 about 4.5 KB, against about 12 KB for three one-interval calls.
 
+##### Change over N bars
+
+`change_bars` (1 to 199) adds to each line and histogram bucket how it changed over that
+many bars, ending at the bar its `last_value` is from, and echoes `change_bars` in the
+answer. Is open interest rising or falling over the last day on 4h:
+
+```json
+{ "symbol": "BTCUSDT", "interval": "4h", "source": "fetched", "bars": 200, "change_bars": 6,
+  "indicators": { "oi": { "label": "OI", "lines": [
+    { "index": 0, "label": "OI", "last_value": 5796404804.15,
+      "change": { "from": 5705821305.06, "abs": 90583499.10, "pct": 1.59 } } ] } } }
+```
+
+`abs` is `last_value - from`; `pct` is `abs` over `|from|` in percent, `null` when `from`
+is 0. `change` is `null` when the series has no value that far back. Open interest (`oi`)
+and the long/short ratios have none older than the 30 days Binance keeps: about 185 bars
+on 4h, 31 on 1d, and the 200 bars the tool reads cover only about 8 days on 1h. History
+beyond the 30 days would have to be recorded by chartgen itself
+([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/), proposed). Without
+`change_bars` the answer is as before.
+
+With `intervals`, `change_bars` applies to each interval, counted in its own bars,
+and each entry carries `change_bars` and every line's `change`.
+
+For every value of a series rather than one change, `generate_chart` with
+`format=series` and a small `bars` answers each bar's value.
+
 #### `get_quotes`
 
 Last price and change for many symbols in one call. The web watchlist

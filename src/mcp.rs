@@ -2595,6 +2595,45 @@ fn reading_of(mut v: Value) -> Value {
     v
 }
 
+/// Most bars `change_bars` reaches back: one less than the bars `get_indicators` reads.
+const MAX_CHANGE_BARS: u64 = 199;
+
+/// `{from, abs, pct}` of a series over `bars` bars up to its last value, or null.
+fn change_json(y: &[f64], breaks: bool, bars: usize) -> Value {
+    match chartgen::indicator::change_over(y, breaks, bars) {
+        Some((from, to)) => {
+            let abs = to - from;
+            let pct = if from == 0.0 {
+                Value::Null
+            } else {
+                json!(abs / from.abs() * 100.0)
+            };
+            json!({ "from": from, "abs": abs, "pct": pct })
+        }
+        None => Value::Null,
+    }
+}
+
+/// `panel_result_to_json`, and with `change_bars` each line's and histogram's
+/// `change` over that many bars.
+fn indicator_json(pr: &chartgen::indicator::PanelResult, change_bars: Option<usize>) -> Value {
+    let mut j = panel_result_to_json(pr);
+    let Some(n) = change_bars else {
+        return j;
+    };
+    if let Some(lines) = j.get_mut("lines").and_then(Value::as_array_mut) {
+        for (line, out) in pr.lines.iter().zip(lines) {
+            out["change"] = change_json(&line.y, line.breaks, n);
+        }
+    }
+    if let Some(hist) = j.get_mut("histogram").and_then(Value::as_array_mut) {
+        for (b, out) in pr.bars.iter().zip(hist) {
+            out["change"] = change_json(&b.y, false, n);
+        }
+    }
+    j
+}
+
 fn tool_get_indicators(
     id: Option<Value>,
     args: &Value,
@@ -2637,6 +2676,18 @@ fn tool_get_indicators(
             }
         }
     };
+    let change_bars = match args.get("change_bars") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64().filter(|n| (1..=MAX_CHANGE_BARS).contains(n)) {
+            Some(n) => Some(n as usize),
+            None => {
+                return tool_err(
+                    id,
+                    &format!("change_bars must be a whole number from 1 to {MAX_CHANGE_BARS}."),
+                )
+            }
+        },
+    };
 
     // Validate indicator names
     let mut unknown = Vec::new();
@@ -2663,7 +2714,7 @@ fn tool_get_indicators(
     }
 
     let Some(intervals) = many else {
-        return match indicators_at(symbol, &interval, &indicator_names, engine) {
+        return match indicators_at(symbol, &interval, &indicator_names, change_bars, engine) {
             Ok(output) => tool_ok(id, output),
             Err(e) => tool_err(id, &e),
         };
@@ -2673,7 +2724,7 @@ fn tool_get_indicators(
     let readings: Vec<Value> = intervals
         .iter()
         .map(
-            |iv| match indicators_at(symbol, iv, &indicator_names, engine) {
+            |iv| match indicators_at(symbol, iv, &indicator_names, change_bars, engine) {
                 Ok(mut v) => {
                     if let Some(o) = v.as_object_mut() {
                         o.remove("symbol");
@@ -2698,6 +2749,7 @@ fn indicators_at(
     symbol: &str,
     interval: &str,
     indicator_names: &[&str],
+    change_bars: Option<usize>,
     engine: Option<&Arc<RwLock<Engine>>>,
 ) -> Result<Value, String> {
     // Try to get cached results from the engine first
@@ -2709,12 +2761,15 @@ fn indicators_at(
             let mut ind_results = json!({});
             for name in indicator_names {
                 if let Some(pr) = results.get(*name) {
-                    ind_results[name] = panel_result_to_json(pr);
+                    ind_results[name] = indicator_json(pr, change_bars);
                 } else {
                     ind_results[name] = json!({ "error": "not computed in engine" });
                 }
             }
             output["indicators"] = ind_results;
+            if let Some(n) = change_bars {
+                output["change_bars"] = json!(n);
+            }
             return Ok(output);
         }
     }
@@ -2732,10 +2787,13 @@ fn indicators_at(
     for name in indicator_names {
         if let Some(ind) = indicators::by_name(name) {
             let pr = ind.compute(&ohlcv);
-            ind_results[name] = panel_result_to_json(&pr);
+            ind_results[name] = indicator_json(&pr, change_bars);
         }
     }
     output["indicators"] = ind_results;
+    if let Some(n) = change_bars {
+        output["change_bars"] = json!(n);
+    }
     Ok(output)
 }
 
@@ -3781,6 +3839,129 @@ mod tests {
         // An engine's "not computed" entry passes as it is.
         let missing = json!({ "error": "not computed in engine" });
         assert_eq!(reading_of(missing.clone()), missing);
+    }
+
+    #[test]
+    fn get_indicators_change_bars_adds_each_lines_change() {
+        let dir = temp_dir("get_ind_change");
+        let engine = make_engine(dir.clone());
+        {
+            let mut e = engine.write().unwrap();
+            for i in 0..20 {
+                e.on_bar(make_bar(100.0 + i as f64));
+            }
+        }
+        let call = |args: Value| tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        let plain = call(json!({ "symbol": "BTCUSDT", "interval": "1h", "indicators": ["rsi"] }));
+        let plain: Value = serde_json::from_str(&response_text(&plain)).unwrap();
+        assert!(plain.get("change_bars").is_none());
+        assert!(plain["indicators"]["rsi"]["lines"][0]
+            .get("change")
+            .is_none());
+
+        let resp = call(json!({
+            "symbol": "BTCUSDT", "interval": "1h", "indicators": ["rsi"], "change_bars": 2
+        }));
+        assert!(!is_error(&resp));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert_eq!(parsed["change_bars"], 2);
+        let line = &parsed["indicators"]["rsi"]["lines"][0];
+        let (to, change) = (line["last_value"].as_f64().unwrap(), &line["change"]);
+        let (from, abs) = (
+            change["from"].as_f64().unwrap(),
+            change["abs"].as_f64().unwrap(),
+        );
+        assert!((to - from - abs).abs() < 1e-9);
+        let pct = change["pct"].as_f64().unwrap();
+        assert!((pct - abs / from.abs() * 100.0).abs() < 1e-9);
+        // Further back than the engine holds: no change, not a failure.
+        let resp = call(json!({
+            "symbol": "BTCUSDT", "interval": "1h", "indicators": ["rsi"], "change_bars": 50
+        }));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert!(parsed["indicators"]["rsi"]["lines"][0]["change"].is_null());
+        std::fs::remove_dir_all(&dir).ok();
+
+        for bad in [json!(0), json!(200), json!(1.5), json!("6")] {
+            let args = json!({ "symbol": "BTCUSDT", "indicators": ["rsi"], "change_bars": bad });
+            let resp = tool_get_indicators(Some(json!(1)), &args, None);
+            assert!(response_text(&resp).contains("1 to 199"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn get_indicators_change_bars_applies_to_each_interval() {
+        let dir = temp_dir("get_ind_change_intervals");
+        let engine = make_engine(dir.clone());
+        {
+            let mut e = engine.write().unwrap();
+            for i in 0..20 {
+                e.on_bar(make_bar(100.0 + i as f64));
+            }
+        }
+        let args = json!({
+            "symbol": "BTCUSDT", "intervals": ["1h"], "indicators": ["rsi"], "change_bars": 2
+        });
+        let resp = tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        assert!(!is_error(&resp));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let entry = &parsed["intervals"][0];
+        assert_eq!(entry["change_bars"], 2);
+        // The several-interval reading drops the index, not the change.
+        let line = &entry["indicators"]["rsi"]["lines"][0];
+        assert!(line.get("index").is_none());
+        let (to, change) = (line["last_value"].as_f64().unwrap(), &line["change"]);
+        let (from, abs) = (
+            change["from"].as_f64().unwrap(),
+            change["abs"].as_f64().unwrap(),
+        );
+        assert!((to - from - abs).abs() < 1e-9);
+
+        // Without change_bars an entry has neither.
+        let args = json!({ "symbol": "BTCUSDT", "intervals": ["1h"], "indicators": ["rsi"] });
+        let resp = tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let entry = &parsed["intervals"][0];
+        assert!(entry.get("change_bars").is_none());
+        assert!(entry["indicators"]["rsi"]["lines"][0]
+            .get("change")
+            .is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn indicator_json_changes_lines_and_histogram_and_pct_needs_a_base() {
+        use chartgen::indicator::{Bars, Line, PanelResult};
+        use plotters::style::RGBAColor;
+        let c = RGBAColor(0, 0, 0, 1.0);
+        let pr = PanelResult {
+            lines: vec![Line {
+                breaks: false,
+                y: vec![f64::NAN, 100.0, 110.0, 120.0, f64::NAN],
+                color: c,
+                width: 1,
+                label: Some("OI".into()),
+            }],
+            bars: vec![Bars {
+                y: vec![0.0, 1.0, -1.0],
+                colors: vec![c; 3],
+                bottom: 0.0,
+            }],
+            label: "OI".into(),
+            ..Default::default()
+        };
+        assert_eq!(indicator_json(&pr, None), panel_result_to_json(&pr));
+        let j = indicator_json(&pr, Some(2));
+        assert_eq!(j["lines"][0]["last_value"], 120.0);
+        assert_eq!(
+            j["lines"][0]["change"],
+            json!({ "from": 100.0, "abs": 20.0, "pct": 20.0 })
+        );
+        assert_eq!(
+            j["histogram"][0]["change"],
+            json!({ "from": 0.0, "abs": -1.0, "pct": null })
+        );
+        assert!(indicator_json(&pr, Some(3))["lines"][0]["change"].is_null());
     }
 
     // --- set_alert / list_alerts / cancel_alert roundtrip ---

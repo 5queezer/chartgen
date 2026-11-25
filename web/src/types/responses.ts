@@ -321,10 +321,17 @@ export const OhlcvSummarySchema = z.union([
   }),
 ]);
 
+// get_indicators with `change_bars`: the change over that many bars up to
+// `last_value` (`change_json`), null when there is no value that far back.
+export const ChangeSchema = z
+  .object({ from: z.number(), abs: z.number(), pct: z.number().nullable() })
+  .nullable();
+
 export const SummaryLineSchema = z.object({
   index: z.number().int(),
   label: z.string().nullable(),
   last_value: FiniteOrNull,
+  change: ChangeSchema.optional(),
 });
 
 export const SummarySignalSchema = z.object({
@@ -336,6 +343,7 @@ export const SummarySignalSchema = z.object({
 export const SummaryHistogramBucketSchema = z.object({
   index: z.number().int(),
   last_value: FiniteOrNull,
+  change: ChangeSchema.optional(),
 });
 
 export const HBarSchema = z.object({
@@ -508,6 +516,7 @@ export const GetIndicatorsPayloadSchema = z.object({
   interval: z.string(),
   source: z.enum(["engine_cache", "fetched"]),
   bars: z.number().int().optional(),
+  change_bars: z.number().int().optional(),
   indicators: z.record(
     z.string(),
     z.union([SummaryIndicatorSchema, z.object({ error: z.string() })]),
@@ -536,6 +545,7 @@ export const GetIndicatorsIntervalsPayloadSchema = z.object({
         interval: z.string(),
         source: z.enum(["engine_cache", "fetched"]),
         bars: z.number().int().optional(),
+        change_bars: z.number().int().optional(),
         indicators: z.record(
           z.string(),
           z.union([IndicatorReadingSchema, z.object({ error: z.string() })]),
