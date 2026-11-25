@@ -1408,6 +1408,7 @@ impl Setups {
                 (Some(Some("symbol")), None) => Some(setups::GroupBy::Symbol),
                 (Some(Some("direction")), None) => Some(setups::GroupBy::Direction),
                 (Some(Some("skip_reason")), None) => Some(setups::GroupBy::SkipReason),
+                (Some(Some("bracket_anchor")), None) => Some(setups::GroupBy::BracketAnchor),
                 (Some(Some("tag")), None) => match tag_prefixes {
                     Some(prefixes) => Some(setups::GroupBy::Tag(prefixes)),
                     None => {
@@ -1419,7 +1420,7 @@ impl Setups {
                 },
                 (Some(_), None) => return Err(read_problem(
                     "group_by",
-                    "group_by must be playbook_version, feature, probability, symbol, direction, tag or skip_reason",
+                    "group_by must be playbook_version, feature, probability, symbol, direction, tag, skip_reason or bracket_anchor",
                 )),
             };
 
@@ -1555,14 +1556,10 @@ fn missed_note(bars: usize, symbol: &str) -> String {
 /// Could this row have been written here? A row that could not is never scored.
 fn sound(record: &Record) -> bool {
     let levels = &record.levels;
-    let prices = [levels.entry.low, levels.entry.high, levels.invalidation];
     !record.id.is_empty()
         && !record.owner.is_empty()
         && record.revisions > 0
-        && prices
-            .iter()
-            .chain(&levels.targets)
-            .all(|p| p.is_finite() && *p > 0.0)
+        && levels.positive()
         && levels.entry.low <= levels.entry.high
         && !levels.targets.is_empty()
         && (record.fill.is_some() || record.exit.is_none())

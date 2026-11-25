@@ -53,13 +53,13 @@ Should chartgen record open interest itself, and if so, where and how much?
 
 ## Cost of recording (options 2 to 4)
 
-One row is a time and a value; in SQLite with its key about 40 to 60 bytes.
+One row is a time and a value; in SQLite with its key about 40 bytes (measured, see [Cost](#cost)).
 
 | Period recorded | Rows per symbol and year | Size per symbol and year | Requests to keep it current |
 |---|---|---|---|
-| 5m (the finest Binance has) | 105,120 | about 5 MB | 1 per symbol every 41 h (500 rows a request), plus a catch-up after a pause |
-| 1h | 8,760 | about 0.5 MB | 1 per symbol every 20 days |
-| 4h | 2,190 | about 0.1 MB | 1 per symbol well within 30 days: a page holds 83 days, but rows older than the retention are already gone |
+| 5m (the finest Binance has) | 105,120 | about 4.2 MB | 1 per symbol every 41 h (500 rows a request), plus a catch-up after a pause |
+| 1h | 8,760 | about 0.35 MB | 1 per symbol every 20 days |
+| 4h | 2,190 | about 0.09 MB | 1 per symbol well within 30 days: a page holds 83 days, but rows older than the retention are already gone |
 
 Whatever the page size, a series must be read again before its oldest unread row is 30 days
 old, with a margin; a pause longer than that leaves a gap that cannot be filled.
@@ -70,9 +70,9 @@ for `sumOpenInterest`, `sumOpenInterestValue` and each `longShortRatio`). For th
 series answers every interval from 5m up. The taker buy/sell ratio is not: a period's row
 aggregates the volume within it (its 1h `buyVol` and `sellVol` differ from the sum of the
 twelve 5m rows by up to 1.7 %, and its ratio from any single 5m row), so it would have to be
-recorded at each period it is read at. Twenty symbols of open interest at 5m are about 100 MB a
-year and about a dozen requests a day, far inside Binance's budget; each long/short ratio costs
-the same.
+recorded at each period it is read at. Twenty symbols of open interest at 5m are about 84 MB a
+year and, read every 6 hours as chosen below, 80 requests a day, far inside Binance's budget;
+each long/short ratio costs the same.
 
 ## Pros and Cons of the Options
 
@@ -120,7 +120,7 @@ store, whoever owns them, and those of `CHARTGEN_OI_RECORD_SYMBOLS`, for
 an agent asks about later, and need no list kept by hand; the list adds a symbol before anything
 watches it, since a history begins only when its recording does. A symbol stays recorded while
 a setup or alert names it, and its rows stay for the retention after that. One year is what a
-question about a quarter, or a backtest over the replay fixtures, needs, at about 4 MB a symbol.
+question about a quarter, or a backtest over the replay fixtures, needs, at about 4.2 MB a symbol.
 
 **How.** A thread, started with the server when it has a store (not on a replay server), runs
 every 6 hours. For each symbol it reads from after its newest recorded row (the first time, as
@@ -163,7 +163,7 @@ at its first round, then 4 a day, against the 1000 per 5 minutes Binance allows 
   it. Up to the last 6 hours 10 minutes may not have been read at a stop, so a stop of up to
   about 29 days loses nothing; a longer one leaves a gap that cannot be filled, and those bars
   have no value.
-- The store grows by about 4 MB a symbol and year, and is backed up with everything else in it.
+- The store grows by about 4.2 MB a symbol and year, and is backed up with everything else in it.
 - A build from before this ignores the table and records nothing; rolling forward again needs no
   step.
 
