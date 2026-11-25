@@ -230,6 +230,94 @@ export function positionLabels(
   };
 }
 
+/** Short forms of positionLabels for a narrow box: "112.44", "108.00", "R/R 2.00". */
+export function shortPositionLabels(
+  kind: PositionKind,
+  entry: number,
+  target: number,
+  stop: number,
+  precision: number,
+): PositionLabels {
+  const s = positionStats(kind, entry, target, stop);
+  return {
+    target: formatAmount(target, precision),
+    stop: formatAmount(stop, precision),
+    ratio: `R/R ${s.ratio === null ? "—" : s.ratio.toFixed(2)}`,
+  };
+}
+
+/** A label's box on screen, in px. */
+export interface LabelBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** Box of a label `w` x `h` centered on `x`, whose `baseline` sits on `y`. */
+export function labelBox(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  baseline: "top" | "bottom" | "middle",
+): LabelBox {
+  const top = baseline === "top" ? y : baseline === "bottom" ? y - h : y - h / 2;
+  return { left: x - w / 2, top, right: x + w / 2, bottom: top + h };
+}
+
+/** Whether two boxes share some area; touching edges do not. */
+export function boxesOverlap(a: LabelBox, b: LabelBox): boolean {
+  return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+}
+
+/** A position box on screen, in px. */
+export interface PositionBox {
+  /** Width of the part of the box inside the pane. */
+  width: number;
+  /** Heights of the reward (target) and the risk (stop) zone. */
+  reward: number;
+  risk: number;
+}
+
+/** The text each label of a position is drawn with, or null where it is left out. */
+export type FittedPositionLabels = { [K in keyof PositionLabels]: string | null };
+
+/**
+ * Which labels a position draws at its size on screen, so they never overlap
+ * each other or spread over the candles around a small box. TradingView's
+ * position tool (ADR-0006) offers compact stats and stats only while
+ * selected; here the box's size picks the form. The zones and the entry line
+ * are always drawn, so entry, stop, target and side stay visible.
+ * - A label is at most two label heights wider than the box: the full text,
+ *   else the short one, else none. Centered, that is one height a side; at a
+ *   pane edge labelX pushes it inward, so the inner side may take both.
+ * - Target and stop sit outside the box, one on each side; both go when the
+ *   whole box is lower than one label.
+ * - The ratio sits on the entry line inside the box; it goes when it would
+ *   cross the target or stop line, where it would meet their labels.
+ */
+export function fitPositionLabels(
+  full: PositionLabels,
+  short: PositionLabels,
+  box: PositionBox,
+  labelWidth: (text: string) => number,
+  labelHeight: number,
+): FittedPositionLabels {
+  const fit = (key: keyof PositionLabels, shown: boolean): string | null => {
+    if (!shown) return null;
+    const room = box.width + 2 * labelHeight;
+    if (labelWidth(full[key]) <= room) return full[key];
+    return labelWidth(short[key]) <= room ? short[key] : null;
+  };
+  const tall = box.reward + box.risk >= labelHeight;
+  return {
+    target: fit("target", tall),
+    stop: fit("stop", tall),
+    ratio: fit("ratio", Math.min(box.reward, box.risk) >= labelHeight / 2),
+  };
+}
+
 /** Default target/stop of a fresh position: +2% / -1% for a long, mirrored for a short. */
 export const DEFAULT_TARGET_PCT = 2;
 export const DEFAULT_STOP_PCT = 1;

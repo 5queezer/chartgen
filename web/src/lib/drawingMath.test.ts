@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   arrowHead,
   barsBetween,
+  boxesOverlap,
   clampPosition,
   dateRangeLabel,
   defaultPosition,
   extendRay,
   fibExtensionLevels,
+  fitPositionLabels,
   formatDuration,
+  labelBox,
   pitchforkLines,
   snapToAngle,
   sameLinePoint,
@@ -17,6 +20,7 @@ import {
   positionReward,
   positionStats,
   priceRangeLabel,
+  shortPositionLabels,
 } from "./drawingMath";
 
 describe("price range", () => {
@@ -163,6 +167,61 @@ describe("positions", () => {
       stop: "Stop: 99.00 (1.00%)",
       ratio: "Risk/Reward Ratio: 2.00",
     });
+  });
+  it("shortens the labels to the price and R/R", () => {
+    expect(shortPositionLabels("short", 100, 96, 102, 2)).toEqual({
+      target: "96.00",
+      stop: "102.00",
+      ratio: "R/R 2.00",
+    });
+  });
+});
+
+describe("label boxes", () => {
+  it("places a label by its baseline", () => {
+    expect(labelBox(100, 50, 40, 18, "bottom")).toEqual({ left: 80, top: 32, right: 120, bottom: 50 });
+    expect(labelBox(100, 50, 40, 18, "top")).toEqual({ left: 80, top: 50, right: 120, bottom: 68 });
+    expect(labelBox(100, 50, 40, 18, "middle")).toEqual({ left: 80, top: 41, right: 120, bottom: 59 });
+  });
+  it("overlaps only boxes that share area", () => {
+    const a = labelBox(100, 50, 40, 18, "top");
+    expect(boxesOverlap(a, labelBox(130, 60, 40, 18, "top"))).toBe(true);
+    // Touching: one ends where the other starts.
+    expect(boxesOverlap(a, labelBox(100, 50, 40, 18, "bottom"))).toBe(false);
+    expect(boxesOverlap(a, labelBox(140, 50, 40, 18, "top"))).toBe(false);
+  });
+});
+
+describe("fitPositionLabels", () => {
+  const full = positionLabels("short", 0.935, 0.913, 0.945, 4);
+  const short = shortPositionLabels("short", 0.935, 0.913, 0.945, 4);
+  // 7 px a character plus 12 px padding; labels 18 px high.
+  const width = (t: string) => t.length * 7 + 12;
+  const fit = (w: number, reward: number, risk: number) =>
+    fitPositionLabels(full, short, { width: w, reward, risk }, width, 18);
+
+  it("keeps every full label on a box large enough for them", () => {
+    expect(fit(200, 60, 30)).toEqual(full);
+  });
+  it("shortens, then drops, a label more than two label heights wider than the box", () => {
+    // Full target 166 px, stop 152 px, ratio 173 px; short prices 54 px, short ratio 68 px.
+    // A box of w px has room for w + 36.
+    expect(fit(137, 60, 30)).toEqual(full);
+    expect(fit(130, 60, 30)).toEqual({ target: full.target, stop: full.stop, ratio: short.ratio });
+    expect(fit(120, 60, 30)).toEqual({ target: short.target, stop: full.stop, ratio: short.ratio });
+    expect(fit(100, 60, 30)).toEqual(short);
+    expect(fit(20, 60, 30)).toEqual({ target: short.target, stop: short.stop, ratio: null });
+    expect(fit(10, 60, 30)).toEqual({ target: null, stop: null, ratio: null });
+  });
+  it("drops the ratio once it would cross the target or stop line", () => {
+    // The zoomed-out short: a 25 px box whose stop zone is 8 px high.
+    expect(fit(200, 17, 8)).toEqual({ target: full.target, stop: full.stop, ratio: null });
+    expect(fit(200, 9, 9)).toEqual(full);
+    expect(fit(200, 30, 8.9)).toEqual({ target: full.target, stop: full.stop, ratio: null });
+  });
+  it("drops target and stop once the whole box is lower than one label", () => {
+    expect(fit(200, 10, 7)).toEqual({ target: null, stop: null, ratio: null });
+    expect(fit(200, 12, 6)).toEqual({ target: full.target, stop: full.stop, ratio: null });
   });
   it("clamps dragged handles to their side of the entry", () => {
     expect(clampPosition("long", [100, 95, 99], 1)).toEqual([100, 100, 99]);
