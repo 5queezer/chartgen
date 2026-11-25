@@ -105,12 +105,14 @@ retracement from a swing high to a swing low. `initialize` announces the
 
 ## Tool catalog
 
-23 tools. The 12 trading tools require `--trade`; attempting to call them
+24 tools on every server. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
 lists the 5 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
-and with `CHARTGEN_SERVER_ALERTS=1` the 4
+and with `CHARTGEN_SERVER_ALERTS=1` the 6
 [server alert tools](#server-alerts-chartgen_server_alerts1). With `CHARTGEN_SETUPS=1`, or on
-a replay server, it lists the 5 [setup tools](#setups-chartgen_setups1).
+a replay server, it lists the 6 [setup tools](#setups-chartgen_setups1). With server alerts or
+setups on, and not on a replay server, it lists
+[`list_events`](#reading-back-what-happened) too: 42 tools at most.
 
 ### Charting (always available)
 
