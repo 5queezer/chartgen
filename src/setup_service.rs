@@ -213,7 +213,7 @@ fn field_problem(field: &str, message: impl Into<String>) -> String {
 /// speak of storing.
 fn read_problem(field: &str, message: impl Into<String>) -> String {
     let problem = Problem::new(field, message).to_json();
-    serde_json::to_string_pretty(&json!({
+    serde_json::to_string(&json!({
         "error": "1 problem with this call; nothing was read. Fix it and send the call again.",
         "setup_errors": [problem],
     }))
@@ -989,6 +989,17 @@ impl Setups {
         }
         let mut st = self.lock();
         self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
+        // An owner whose newest setup states a playbook version is told when this one
+        // states none (ADR-0079). The setup is made all the same: refusing it would lose
+        // it, and a default would be the server's guess.
+        let unversioned = draft.playbook_version.is_none()
+            && st
+                .setups
+                .values()
+                .map(|h| &h.record)
+                .filter(|r| r.owner == owner)
+                .max_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
+                .is_some_and(|r| r.playbook_version.is_some());
         let id = self.new_id(&mut st, owner);
         let (mut record, created) = Record::new(id, owner, symbol, draft, levels, placed, now);
         record.bracket = rule;
@@ -998,9 +1009,32 @@ impl Setups {
         }
         let log = vec![created];
         self.check_bytes(&st, &record, &log)?;
-        let view = self.view(&record, &log);
+        let mut view = self.view(&record, &log);
         self.write(&mut st, vec![(record, log)])?;
         self.sync_feeds(&mut st);
+        // The track record's word for "no version" is accepted as stated, and counted
+        // with the setups that have none (ADR-0079).
+        let reserved = view["playbook_version"] == setups::UNVERSIONED;
+        let warnings: Vec<String> = [
+            unversioned.then(|| {
+                format!(
+                    "playbook_version missing; this setup is counted as {}",
+                    setups::UNVERSIONED
+                )
+            }),
+            reserved.then(|| {
+                format!(
+                    "'{}' is reserved for setups without a version; this setup is counted with them",
+                    setups::UNVERSIONED
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !warnings.is_empty() {
+            view["warnings"] = json!(warnings);
+        }
         Ok(view)
     }
 
@@ -1253,7 +1287,7 @@ impl Setups {
     /// The caller's closed setups, counted: in all, and grouped by one thing they were
     /// made with (ADR-0064). It reports counts and sums and judges nothing.
     fn track_record(&self, args: &Value, owner: &str, now: i64) -> Result<Value, String> {
-        const FIELDS: [&str; 9] = [
+        const FIELDS: [&str; 10] = [
             "symbol",
             "direction",
             "decision",
@@ -1262,6 +1296,7 @@ impl Setups {
             "to",
             "group_by",
             "feature",
+            "tag_prefixes",
             "as_of",
         ];
         let given = |field: &str| args.get(field).filter(|v| !v.is_null());
@@ -1316,6 +1351,42 @@ impl Setups {
                 .transpose()
         };
         let (from, to) = (time("from")?, time("to")?);
+        let tag_prefixes = match given("tag_prefixes") {
+            None => None,
+            Some(v) => {
+                let problem = || {
+                    read_problem(
+                        "tag_prefixes",
+                        format!(
+                            "tag_prefixes must be a list of 1 to {} strings of 1 to {} characters",
+                            setups::MAX_TAGS,
+                            setups::MAX_TAG
+                        ),
+                    )
+                };
+                let list = v
+                    .as_array()
+                    .filter(|l| (1..=setups::MAX_TAGS).contains(&l.len()));
+                let mut prefixes: Vec<String> = Vec::new();
+                for item in list.ok_or_else(problem)? {
+                    match item.as_str() {
+                        Some(p) if (1..=setups::MAX_TAG).contains(&p.chars().count()) => {
+                            if !prefixes.iter().any(|q| q == p) {
+                                prefixes.push(p.to_string());
+                            }
+                        }
+                        _ => return Err(problem()),
+                    }
+                }
+                if given("group_by").and_then(Value::as_str) != Some("tag") {
+                    return Err(read_problem(
+                        "tag_prefixes",
+                        "tag_prefixes needs group_by: tag",
+                    ));
+                }
+                Some(prefixes)
+            }
+        };
         let group_by =
             match (given("group_by").map(Value::as_str), feature) {
                 (None, None) => None,
@@ -1336,9 +1407,19 @@ impl Setups {
                 (Some(Some("probability")), None) => Some(setups::GroupBy::Probability),
                 (Some(Some("symbol")), None) => Some(setups::GroupBy::Symbol),
                 (Some(Some("direction")), None) => Some(setups::GroupBy::Direction),
+                (Some(Some("skip_reason")), None) => Some(setups::GroupBy::SkipReason),
+                (Some(Some("tag")), None) => match tag_prefixes {
+                    Some(prefixes) => Some(setups::GroupBy::Tag(prefixes)),
+                    None => {
+                        return Err(read_problem(
+                            "tag_prefixes",
+                            "group_by: tag needs tag_prefixes, the starts of the tags to count by",
+                        ))
+                    }
+                },
                 (Some(_), None) => return Err(read_problem(
                     "group_by",
-                    "group_by must be playbook_version, feature, probability, symbol or direction",
+                    "group_by must be playbook_version, feature, probability, symbol, direction, tag or skip_reason",
                 )),
             };
 
@@ -1352,9 +1433,9 @@ impl Setups {
             .filter(|r| direction.is_none_or(|d| d == r.direction))
             .filter(|r| decision.is_none_or(|d| d == r.decision))
             .filter(|r| {
-                playbook_version
-                    .as_ref()
-                    .is_none_or(|v| r.playbook_version.as_ref() == Some(v))
+                playbook_version.as_ref().is_none_or(|v| {
+                    r.playbook_version.as_deref().unwrap_or(setups::UNVERSIONED) == v
+                })
             })
             .filter(|r| from.is_none_or(|t| r.created_at >= t))
             .filter(|r| to.is_none_or(|t| r.created_at < t))
@@ -1374,6 +1455,7 @@ impl Setups {
             "truncated": truncated,
             "group_by": given("group_by"),
             "feature": given("feature"),
+            "tag_prefixes": given("tag_prefixes"),
             "total": total,
             "groups": groups,
             "shadows": setups::shadow_record(&mine),
