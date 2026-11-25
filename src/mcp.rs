@@ -206,6 +206,7 @@ fn call_tool(
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
         "get_quotes" => tool_get_quotes(id, &arguments),
         "get_market_context" => crate::market_context::call_tool(id, &arguments),
+        #[cfg(feature = "news")]
         "get_news" => crate::news::call_tool(id, &arguments),
         "get_footprint" => tool_get_footprint(id, &arguments),
         "get_tpo" => tool_get_tpo(id, &arguments),

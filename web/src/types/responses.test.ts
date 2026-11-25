@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import compactIndicators from "../../../tests/fixtures/list_indicators_compact.json";
 import news from "../../../tests/fixtures/news_response.json";
+import newsRecorded from "../../../tests/fixtures/news_recorded_response.json";
 import answers from "../../../tests/fixtures/setup_responses.json";
 import stock from "../../../tests/fixtures/stock_setup_responses.json";
 import record from "../../../tests/fixtures/track_record_responses.json";
@@ -462,6 +463,12 @@ describe("get_news (ADR-0086)", () => {
     expect(p.items.length).toBe(2);
     expect(p.more).toBe(2);
     expect(p.sources_failed[0]?.source).toBe("Decrypt");
+  });
+
+  it("parses an answer from the record, whose failed feed says since when (ADR-0088)", () => {
+    const p = NewsPayloadSchema.parse(newsRecorded);
+    expect(p.items.length).toBe(3);
+    expect(p.sources_failed[0]?.since).toBe("2026-11-25T08:05:00Z");
   });
 });
 

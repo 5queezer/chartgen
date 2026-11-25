@@ -1,0 +1,38 @@
+{
+  "hours": 24,
+  "items": [
+    {
+      "source": "CoinDesk",
+      "time": "2026-11-25T06:33:10Z",
+      "title": "Solana developers propose a fix for slow block production",
+      "url": "https://www.coindesk.com/tech/2026/11/25/solana-fix-example"
+    },
+    {
+      "source": "Atom News",
+      "time": "2026-11-25T06:00:00Z",
+      "title": "Solana’s validators vote on fee changes",
+      "url": "https://news.example.com/solana-validators"
+    },
+    {
+      "source": "Atom News",
+      "time": "2026-11-25T02:00:00Z",
+      "title": "A story filed under a coin",
+      "url": "https://news.example.com/filed-under"
+    }
+  ],
+  "sources": [
+    "Atom News"
+  ],
+  "sources_failed": [
+    {
+      "error": "HTTP 503",
+      "since": "2026-11-25T08:05:00Z",
+      "source": "CoinDesk"
+    }
+  ],
+  "symbol": "SOLUSDT",
+  "terms": [
+    "SOL",
+    "Solana"
+  ]
+}

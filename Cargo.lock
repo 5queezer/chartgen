@@ -388,6 +388,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "chartgen-news",
  "chrono",
  "chrono-tz",
  "clap",
@@ -398,7 +399,6 @@ dependencies = [
  "libc",
  "openssl",
  "plotters",
- "quick-xml",
  "rand 0.9.2",
  "reqwest",
  "rusqlite",
@@ -413,6 +413,17 @@ dependencies = [
  "tower-http",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "chartgen-news"
+version = "0.8.0"
+dependencies = [
+ "chrono",
+ "quick-xml",
+ "reqwest",
+ "serde_json",
+ "url",
 ]
 
 [[package]]

@@ -4,15 +4,23 @@ use super::*;
 
 static DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
 
-fn fixture(name: &str) -> String {
-    let path = format!(
-        "{}/tests/fixtures/news/{name}.xml",
-        env!("CARGO_MANIFEST_DIR")
-    );
+pub(super) fn fixture(name: &str) -> String {
+    let path = format!("{}/tests/fixtures/{name}.xml", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(path).unwrap()
 }
 
-/// The default feeds, served from fixtures: no test reaches an outlet. Decrypt is down.
+/// The feeds a test reads: the five of ADR-0086, which `download` serves.
+pub(super) fn feeds() -> Vec<Feed> {
+    DEFAULT_FEEDS[..5]
+        .iter()
+        .map(|(name, url)| Feed {
+            name: name.to_string(),
+            url: url.to_string(),
+        })
+        .collect()
+}
+
+/// The test's feeds, served from fixtures: no test reaches an outlet. Decrypt is down.
 pub(super) fn download(url: &str) -> Result<String, String> {
     DOWNLOADS.fetch_add(1, Ordering::SeqCst);
     let name = match url {
@@ -39,7 +47,7 @@ fn titles(v: &Value) -> Vec<&str> {
 }
 
 /// 2026-11-25T08:00:00Z.
-const NOW: i64 = 1_795_593_600;
+pub(super) const NOW: i64 = 1_795_593_600;
 
 #[test]
 fn an_rss_item_is_its_own_title_link_time_and_categories() {
@@ -52,6 +60,7 @@ fn an_rss_item_is_its_own_title_link_time_and_categories() {
             title: "Solana developers propose a fix for slow block production".into(),
             url: "https://www.coindesk.com/tech/2026/11/25/solana-fix-example".into(),
             published: time_of("Wed, 25 Nov 2026 06:33:10 +0000").unwrap(),
+            from_updated: false,
             categories: vec!["Tech".into(), "News".into()],
         }
     );
@@ -85,8 +94,9 @@ fn an_atom_entry_takes_its_alternate_link_and_published_time() {
     assert_eq!(items[0].url, "https://news.example.com/solana-validators");
     assert_eq!(items[0].published, time_of("2026-11-25T06:00:00Z").unwrap());
     assert_eq!(items[0].categories, vec!["Markets".to_string()]);
-    // No published: its updated time.
+    // No published: its updated time, and that is said.
     assert_eq!(items[1].published, time_of("2026-11-25T02:00:00Z").unwrap());
+    assert!(items[1].from_updated && !items[0].from_updated);
     assert_eq!(items[1].categories, vec!["Solana".to_string()]);
     assert_eq!(items[2].url, "https://news.example.com/stories/relative");
 }
@@ -176,7 +186,7 @@ fn a_headline_dated_after_now_is_left_out_beyond_a_skew() {
         title: "Bitcoin headline".into(),
         url: url.into(),
         published,
-        categories: Vec::new(),
+        ..Item::default()
     };
     let items = vec![
         at(NOW - 60, "https://outlet.example/now"),
@@ -256,8 +266,8 @@ fn the_answer_is_the_newest_headlines_about_the_symbol_in_the_window() {
     // Pinned in a file the web app's types are tested against
     // (`web/src/types/responses.test.ts`). To write it again after a deliberate change:
     // `CHARTGEN_WRITE_FIXTURES=1 cargo test news::`.
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/news_response.json");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/news_response.json");
     let text = serde_json::to_string_pretty(&v).unwrap() + "\n";
     if std::env::var("CHARTGEN_WRITE_FIXTURES").is_ok() {
         std::fs::write(&path, &text).unwrap();
@@ -275,14 +285,7 @@ fn the_answer_is_the_newest_headlines_about_the_symbol_in_the_window() {
 
 #[test]
 fn feeds_are_read_once_in_ten_minutes_and_a_failed_one_is_named() {
-    let call = || {
-        let r = call_tool(
-            Some(json!(1)),
-            &json!({ "symbol": "solusdt", "hours": 168 }),
-        );
-        let text = r["result"]["content"][0]["text"].as_str().unwrap();
-        serde_json::from_str::<Value>(text).unwrap()
-    };
+    let call = || read(None, "SOLUSDT", 168, 10).unwrap();
     let v = call();
     let read = DOWNLOADS.load(Ordering::SeqCst);
     assert_eq!(v["symbol"], "SOLUSDT");
@@ -300,23 +303,6 @@ fn feeds_are_read_once_in_ten_minutes_and_a_failed_one_is_named() {
 }
 
 #[test]
-fn bad_arguments_are_refused() {
-    let err = |args: Value| {
-        let r = call_tool(None, &args);
-        assert_eq!(r["result"]["isError"], true, "{args}");
-        r["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
-    assert!(err(json!({})).contains("symbol is required"));
-    assert!(err(json!({ "symbol": "BTC USDT" })).contains("is not a symbol"));
-    assert!(err(json!({ "symbol": "BTCUSDT", "hours": 0 })).contains("hours"));
-    assert!(err(json!({ "symbol": "BTCUSDT", "hours": 169 })).contains("hours"));
-    assert!(err(json!({ "symbol": "BTCUSDT", "limit": 51 })).contains("limit"));
-}
-
-#[test]
 fn the_feeds_are_named_urls_separated_by_commas() {
     let feeds =
         feeds_from(" Outlet A=https://a.example/rss , https://b.example/feed?x=1,").unwrap();
@@ -325,14 +311,44 @@ fn the_feeds_are_named_urls_separated_by_commas() {
         [
             Feed {
                 name: "Outlet A".into(),
-                url: "https://a.example/rss".into()
+                url: "https://a.example/rss".into(),
             },
             Feed {
                 name: "b.example".into(),
-                url: "https://b.example/feed?x=1".into()
+                url: "https://b.example/feed?x=1".into(),
             },
         ]
     );
     assert_eq!(feeds_from("").unwrap(), []);
     assert!(feeds_from("Old=ftp://a.example/rss").is_err());
+}
+
+#[test]
+fn the_default_feeds_are_https_urls_with_names_of_their_own() {
+    let all = default_feeds();
+    let mut names: Vec<&str> = all.iter().map(|f| f.name.as_str()).collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), all.len());
+    for f in &all {
+        let url = url::Url::parse(&f.url).unwrap();
+        assert_eq!(url.scheme(), "https", "{}", f.name);
+    }
+    // The five of ADR-0086 first: what a test reads.
+    assert_eq!(all[..5], feeds()[..]);
+}
+
+#[test]
+fn a_headlines_coins_are_those_of_the_table_it_names_and_its_cashtags() {
+    let coins = |title: &str, categories: &[&str]| coins_of(&headline(title, categories));
+    assert_eq!(
+        coins("Bitcoin and Ether slide as $HYPE jumps", &[]),
+        ["BTC", "ETH", "HYPE"]
+    );
+    assert_eq!(coins("Solana validators vote", &["Ripple"]), ["SOL", "XRP"]);
+    // Once, whether by name or cashtag; a price or a cashtag in lower case is none.
+    assert_eq!(coins("$BTC: Bitcoin to $100K?", &[]), ["BTC"]);
+    assert!(coins("Fees fall to $5 as $pepe holders wait", &[]).is_empty());
+    assert!(coins("Crypto optimism returns", &[]).is_empty());
+    assert_eq!(coins("A$AI is not a cashtag; $AI is", &[]), ["AI"]);
 }

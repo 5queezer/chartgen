@@ -5,6 +5,7 @@ mod fetch;
 mod intrabars;
 mod market_context;
 mod mcp;
+#[cfg(feature = "news")]
 mod news;
 mod replay;
 mod replay_fixtures;

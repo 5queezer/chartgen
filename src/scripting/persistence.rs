@@ -181,6 +181,31 @@ pub(super) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (kind, symbol, period, ts)
     ) WITHOUT ROWID;
 ",
+    // Headlines of the news feeds, each once, and each feed's last read (ADR-0088).
+    "
+    CREATE TABLE news_items (
+        url           TEXT    PRIMARY KEY,
+        outlet        TEXT    NOT NULL,
+        title         TEXT    NOT NULL,
+        published     INTEGER NOT NULL,
+        from_updated  INTEGER NOT NULL,
+        first_seen    INTEGER NOT NULL,
+        categories    TEXT    NOT NULL,
+        coins         TEXT    NOT NULL
+    ) WITHOUT ROWID;
+    CREATE INDEX news_items_published ON news_items (published);
+    CREATE TABLE news_feeds (
+        url            TEXT    PRIMARY KEY,
+        name           TEXT    NOT NULL,
+        etag           TEXT,
+        last_modified  TEXT,
+        last_success   INTEGER,
+        last_error     TEXT,
+        failing_since  INTEGER,
+        failures       INTEGER NOT NULL DEFAULT 0,
+        next_attempt   INTEGER NOT NULL DEFAULT 0
+    );
+",
 ];
 
 /// Whether an owner is a signed-in account (ADR-0044).
@@ -1756,6 +1781,184 @@ pub fn db_path() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".chartgen").join("chartgen.db")
+}
+
+/// The record of the news (ADR-0088), in the store's `news_items` and `news_feeds`.
+#[cfg(feature = "news")]
+impl chartgen_news::Store for Store {
+    fn save_items(&self, items: &[chartgen_news::Recorded]) -> Result<usize, String> {
+        let mut conn = self.conn();
+        let saved = (|| {
+            let tx = conn.transaction()?;
+            let mut new = 0;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT OR IGNORE INTO news_items
+                         (url, outlet, title, published, from_updated, first_seen, categories, coins)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )?;
+                for i in items {
+                    new += stmt.execute(params![
+                        i.url,
+                        i.outlet,
+                        i.title,
+                        i.published,
+                        i.from_updated,
+                        i.first_seen,
+                        serde_json::to_string(&i.categories).unwrap_or_default(),
+                        serde_json::to_string(&i.coins).unwrap_or_default(),
+                    ])?;
+                }
+            }
+            tx.commit()?;
+            Ok::<_, rusqlite::Error>(new)
+        })();
+        saved.map_err(|e| e.to_string())
+    }
+
+    fn items(&self, from: i64, to: i64) -> Result<Vec<chartgen_news::Recorded>, String> {
+        let conn = self.conn();
+        let read = (|| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT url, outlet, title, published, from_updated, first_seen, categories, coins
+                 FROM news_items WHERE published BETWEEN ?1 AND ?2 ORDER BY published DESC",
+            )?;
+            let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
+            let rows = stmt.query_map(params![from, to], |r| {
+                Ok(chartgen_news::Recorded {
+                    url: r.get(0)?,
+                    outlet: r.get(1)?,
+                    title: r.get(2)?,
+                    published: r.get(3)?,
+                    from_updated: r.get(4)?,
+                    first_seen: r.get(5)?,
+                    categories: list(r.get(6)?),
+                    coins: list(r.get(7)?),
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })();
+        read.map_err(|e| e.to_string())
+    }
+
+    fn forget_items(&self, before: i64) -> Result<usize, String> {
+        self.conn()
+            .execute(
+                "DELETE FROM news_items WHERE published < ?1",
+                params![before],
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    fn feeds(&self) -> Result<Vec<chartgen_news::FeedState>, String> {
+        let conn = self.conn();
+        let read = (|| {
+            let mut stmt = conn.prepare(
+                "SELECT url, name, etag, last_modified, last_success, last_error,
+                        failing_since, failures, next_attempt
+                 FROM news_feeds ORDER BY url",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(chartgen_news::FeedState {
+                    url: r.get(0)?,
+                    name: r.get(1)?,
+                    etag: r.get(2)?,
+                    last_modified: r.get(3)?,
+                    last_success: r.get(4)?,
+                    last_error: r.get(5)?,
+                    failing_since: r.get(6)?,
+                    failures: r.get(7)?,
+                    next_attempt: r.get(8)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })();
+        read.map_err(|e| e.to_string())
+    }
+
+    fn save_feed(&self, f: &chartgen_news::FeedState) -> Result<(), String> {
+        self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO news_feeds
+                     (url, name, etag, last_modified, last_success, last_error,
+                      failing_since, failures, next_attempt)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    f.url,
+                    f.name,
+                    f.etag,
+                    f.last_modified,
+                    f.last_success,
+                    f.last_error,
+                    f.failing_since,
+                    f.failures,
+                    f.next_attempt
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(all(test, feature = "news"))]
+mod news_tests {
+    use super::*;
+    use chartgen_news::{FeedState, Recorded, Store as _};
+
+    fn headline(url: &str, published: i64) -> Recorded {
+        Recorded {
+            url: url.into(),
+            outlet: "Outlet".into(),
+            title: "Bitcoin and Ether slide".into(),
+            published,
+            from_updated: published % 2 == 1,
+            first_seen: published + 60,
+            categories: vec!["Markets".into()],
+            coins: vec!["BTC".into(), "ETH".into()],
+        }
+    }
+
+    #[test]
+    fn the_news_is_recorded_once_and_survives_a_restart() {
+        let dir = crate::test_dir::new("news_store");
+        let path = dir.join("chartgen.db");
+        let feed = FeedState {
+            url: "https://outlet.example/rss".into(),
+            name: "Outlet".into(),
+            etag: Some("\"v1\"".into()),
+            last_success: Some(1_000),
+            failures: 2,
+            failing_since: Some(900),
+            last_error: Some("HTTP 503".into()),
+            next_attempt: 1_600,
+            ..FeedState::default()
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            let items = [
+                headline("https://a.example/1", 100),
+                headline("https://a.example/2", 201),
+            ];
+            assert_eq!(store.save_items(&items).unwrap(), 2);
+            // A link recorded already is left as it was.
+            let mut again = headline("https://a.example/1", 300);
+            again.title = "Edited".into();
+            assert_eq!(store.save_items(&[again]).unwrap(), 0);
+            store.save_feed(&feed).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.items(0, 1_000).unwrap(),
+            [
+                headline("https://a.example/2", 201),
+                headline("https://a.example/1", 100)
+            ]
+        );
+        assert_eq!(store.items(150, 1_000).unwrap().len(), 1);
+        assert_eq!(store.feeds().unwrap(), [feed]);
+        assert_eq!(store.forget_items(150).unwrap(), 1);
+        assert_eq!(store.items(0, 1_000).unwrap().len(), 1);
+    }
 }
 
 static STORE: OnceLock<Option<Store>> = OnceLock::new();

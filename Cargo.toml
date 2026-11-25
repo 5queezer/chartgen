@@ -1,6 +1,15 @@
+# The news of get_news is a crate of its own (ADR-0088), so it can move out of chartgen.
+[workspace]
+members = ["crates/news"]
+# `cargo test` and `cargo clippy` at the root cover it too.
+default-members = [".", "crates/news"]
+
+[workspace.package]
+version = "0.8.0"
+
 [package]
 name = "chartgen"
-version = "0.8.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 
@@ -20,8 +29,8 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 url = "2"
-# RSS and Atom feeds of get_news (ADR-0086).
-quick-xml = "0.42"
+# get_news: its feeds read, recorded and answered (ADR-0086, ADR-0088).
+chartgen-news = { path = "crates/news", optional = true }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
@@ -44,11 +53,14 @@ anyhow = { version = "1", optional = true }
 starlark_syntax = { version = "0.14", optional = true }
 
 [features]
-default = ["scripting"]
+default = ["scripting", "news"]
 # User-authored Starlark indicators (ADR-0024, ADR-0025); runtime-gated by
 # CHARTGEN_SCRIPTING=1. `--no-default-features` builds without starlark
 # and rusqlite.
 scripting = ["dep:starlark", "dep:starlark_syntax", "dep:allocative", "dep:anyhow", "dep:rusqlite"]
+# get_news (ADR-0086), and with `scripting`, whose store keeps it, the news recorded
+# (ADR-0088). Without it the tool is not listed.
+news = ["dep:chartgen-news"]
 
 # Published macOS binaries must start without Homebrew's OpenSSL, and nothing else brings
 # OpenSSL in there: `native-tls` uses the system's TLS (ADR-0045).
