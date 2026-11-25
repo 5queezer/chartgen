@@ -1208,7 +1208,7 @@ Funding Rate — crypto perpetual futures funding (Binance futures)
 
 ### `oi`
 
-Open Interest — total outstanding futures contracts (Binance futures, last 30 days only)
+Open Interest — total outstanding futures contracts (Binance futures; past 30 days where this server records it)
 
 **Aliases:** `open_interest`
 

@@ -948,10 +948,11 @@ is 0. `change` is `null` when either end has no value: nothing that far back, or
 without a value on its last bar (an inactive Supertrend line, whose `last_value` is `null`
 too). Open interest (`oi`)
 and the long/short ratios have none older than the 30 days Binance keeps: about 185 bars
-on 4h, 31 on 1d, and the 200 bars the tool reads cover only about 8 days on 1h. History
-beyond the 30 days would have to be recorded by chartgen itself
-([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/), proposed). Without
-`change_bars` the answer is as before.
+on 4h, 31 on 1d, and the 200 bars the tool reads cover only about 8 days on 1h. Further
+back, open interest is what the server recorded
+([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/)): its 5 minute rows of
+the symbols it watches, from the day it started recording them, read at each bar's open. A
+bar it has no row for has no value, as before. Without `change_bars` the answer is as before.
 
 With `intervals`, `change_bars` applies to each interval, counted in its own bars,
 and each entry that answers carries `change_bars` and every line's `change`; an entry for an
@@ -1616,8 +1617,9 @@ the closes of the alert's interval.
   `get_indicators`' `change.pct` over the same bars, but the tool's ends at the bar still forming
   and the alert's at the bar that closed; a close whose bar has no open interest has no reading
   rather than an earlier bar's change. Binance keeps 30 days of open interest,
-  so on 4h `change_bars` reaches about 185 bars and on 1d about 31; an alert reaching further, or
-  on a symbol with no futures market, is refused when it is created, with the reason.
+  so on 4h `change_bars` reaches about 185 bars and on 1d about 31, further only where the server
+  has [recorded it](#change-over-n-bars); an alert reaching further than either, or on a symbol
+  with no futures market, is refused when it is created, with the reason.
 - It is read as [funding](#funding-on-the-server) is: off the alerts' lock, through the same cache
   and budget as a chart, and a crossing compares with the change this alert read at its previous
   close, so the first close after creating it, a restart, a resume or a new definition never

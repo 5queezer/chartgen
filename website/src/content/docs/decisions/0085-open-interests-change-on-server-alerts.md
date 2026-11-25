@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-25
+**Amended by:** [ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/) (`change_bars` reaches past the 30 days where the server recorded open interest)
 **Amends:** [ADR-0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) (a second
 futures-data indicator, compared by its change instead of its value)
 
