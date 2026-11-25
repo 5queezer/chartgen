@@ -2804,7 +2804,9 @@ async fn a_device_outlives_a_sign_in_but_not_the_idle_limit() {
     subscribe(&a, port, "phone", "stranger").await;
     a.sweep(&mut a.lock(), now_ms() + 1000);
     assert_eq!(a.lock().devices.len(), 1, "no token today is not idle");
-    a.sweep(&mut a.lock(), later);
+    // Idleness counts from this device's created_at, so the limit is passed from now,
+    // not from before it subscribed: a slow subscribe must not keep it young.
+    a.sweep(&mut a.lock(), now_ms() + IDLE_OWNER_TTL_MS + 1000);
     assert!(a.lock().devices.is_empty());
     assert!(store.push_devices().unwrap().is_empty());
 }
