@@ -630,7 +630,7 @@ export interface ListDrawingToolsInput {}
 
 export interface ListEventsInput {
   /**
-   * Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept.
+   * Return events with a number above this one: the cursor of your last answer. 0 or absent: from the oldest kept, and truncated once your oldest events aged out.
    */
   after?: number;
   /**
