@@ -8,6 +8,7 @@ sidebar:
 **Status:** Accepted
 *Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-12
+**Amended by:** [ADR-0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) (funding)
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (indicator alerts may now run
 on the server, at bar closes; a watched pair can hold a window of bars) and
 [ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) (a wake-up's `alert` carries the
