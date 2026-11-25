@@ -61,15 +61,15 @@ fn clause(v: &Value) -> Result<Clause, String> {
     if condition == Condition::BarClose {
         return Err("bar_close is not a condition that holds or not".into());
     }
-    let spec = indicator::parse(v)?;
     // A futures-data indicator is read off the lock with the symbol (ADR-0080); a
-    // condition is read from the bars alone, so it would never hold.
-    if let Some(s) = spec.as_ref().filter(|s| s.reads_futures()) {
+    // condition is read from the bars alone, so it would never hold. Said before what
+    // that indicator would ask for (oi's change_bars).
+    if let Some(name) = indicator::futures_named(v) {
         return Err(format!(
-            "{} cannot be an and condition; make it the alert's own indicator",
-            s.name
+            "{name} cannot be an and condition; make it the alert's own indicator"
         ));
     }
+    let spec = indicator::parse(v)?;
     let level = match &spec {
         Some(_) => None,
         None => Some(
@@ -185,6 +185,13 @@ mod tests {
             assert_eq!(
                 err(json!({ "indicator": name, "condition": "greater", "level": 0.01 })),
                 "and[0]: funding cannot be an and condition; make it the alert's own indicator"
+            );
+        }
+        // oi is refused as one too, before it would ask for change_bars.
+        for name in ["oi", "open_interest"] {
+            assert_eq!(
+                err(json!({ "indicator": name, "condition": "greater", "level": 5 })),
+                "and[0]: oi cannot be an and condition; make it the alert's own indicator"
             );
         }
         let rsi =

@@ -5027,10 +5027,15 @@ pub(super) fn read_futures(
             "{symbol} has no Funding at its last close: Funding (no futures market)"
         ));
     }
-    let tail = &bars[bars.len().saturating_sub(indicator::FUTURES_BARS)..];
-    let last = tail.last().map_or(f64::NAN, |b| b.close / 1000.0);
-    let y = vec![last; tail.len()];
-    indicator::reading(spec, tail, &y).ok_or_else(|| "no reading".to_string())
+    let tail = &bars[bars.len().saturating_sub(spec.bars_needed())..];
+    // Open interest is each bar's close, so its change follows the closes.
+    let y: Vec<f64> = if spec.name == "oi" {
+        tail.iter().map(|b| b.close).collect()
+    } else {
+        let last = tail.last().map_or(f64::NAN, |b| b.close / 1000.0);
+        vec![last; tail.len()]
+    };
+    indicator::futures_reading(spec, tail, &y).ok_or_else(|| "no reading".to_string())
 }
 
 fn on_funding(symbol: &str, condition: &str, level: f64) -> Value {
@@ -5784,4 +5789,106 @@ async fn a_funding_alerts_clauses_are_read_at_its_close_not_when_the_read_is_bac
     a.lock().watches.get_mut(&k).unwrap().bars.take();
     until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
     assert_eq!(get(&a, "me", &id).await["and"][0]["price"], 101.0);
+}
+
+// ---- Open interest's change (ADR-0085) ----
+
+/// An open-interest alert fires at the close its change over change_bars crosses the
+/// level, and its webhook carries the change in percent and change_bars.
+#[tokio::test(flavor = "multi_thread")]
+async fn oi_fires_at_the_close_its_change_crosses_the_level() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("oi-change");
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[100.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        local(port),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "oi", "change_bars": 3, "condition": "crossing_up", "level": 5,
+        "trigger": "once", "webhook_url": format!("http://127.0.0.1:{port}/hook"),
+    });
+    let created = call(&a, "create_server_alert", args, "me").await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["indicator"]["change_bars"], 3);
+    assert_eq!(created["indicator"]["line"], "OI");
+    let k = key("1h");
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    // Over 3 bars from 100: 2%, 4%, then 6%, which crosses 5%.
+    for (i, oi) in [(1, 102.0), (2, 104.0), (3, 106.0)] {
+        a.on_event(&k, FeedEvent::Bar(bar(t + i * HOUR, oi)));
+        until("the read", || {
+            a.lock().futures_bars.get(&id) == Some(&(t + i * HOUR))
+        })
+        .await;
+        let fired = a.lock().alerts[&id].fire_count;
+        assert_eq!(fired, u64::from(i == 3), "close {i}");
+    }
+    until("the delivery", || !seen.lock().unwrap().is_empty()).await;
+    let raw = seen.lock().unwrap()[0].clone();
+    let body = raw.split_once("\r\n\r\n").unwrap().1.to_string();
+    let sent: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sent["level"], 5.0);
+    assert_eq!(sent["indicator"]["change_bars"], 3);
+    assert!((sent["indicator"]["value"].as_f64().unwrap() - 6.0).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oi_alert_needs_change_bars_and_a_futures_market() {
+    let (store, _) = store_at("oi-bad");
+    let a = plain(store);
+    let base = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "oi", "condition": "crossing_up", "level": 5, "trigger": "once",
+    });
+    let err = call(&a, "create_server_alert", base.clone(), "me")
+        .await
+        .unwrap_err();
+    assert!(err.contains("send change_bars"), "{err}");
+    let mut args = base.clone();
+    args["change_bars"] = json!(3);
+    args["symbol"] = json!("NOFUTUSDT");
+    let err = call(&a, "create_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("Cannot watch oi on NOFUTUSDT"), "{err}");
+    let mut args = base;
+    args["change_bars"] = json!(3);
+    args["compare"] = json!("close");
+    args["level"] = Value::Null;
+    assert!(call(&a, "create_server_alert", args, "me").await.is_err());
+    assert!(a.lock().alerts.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oi_alerts_change_bars_cannot_change() {
+    let (store, _) = store_at("oi-update");
+    let a = plain(store);
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "oi", "change_bars": 3, "condition": "crossing_up", "level": 5,
+        "trigger": "once",
+    });
+    let id = create(&a, args, "me").await;
+    let args = json!({ "alert_id": id, "change_bars": 6 });
+    let err = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("change_bars cannot change"), "{err}");
+    assert_eq!(
+        a.lock().alerts[&id].indicator.as_ref().unwrap().change_bars,
+        Some(3)
+    );
 }

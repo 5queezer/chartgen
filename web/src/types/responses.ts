@@ -726,6 +726,9 @@ export const IndicatorViewSchema = z.object({
   line: z.string(),
   compare: z.enum(["level", "close"]),
   value: z.number().nullable(),
+  /** Only on an alert on a line's change over this many bars: `value` is then that change
+   * in percent (ADR-0085). */
+  change_bars: z.number().int().optional(),
 });
 
 /** One of an alert's `and` conditions (ADR-0084), with what it read at the last close:
