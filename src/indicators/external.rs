@@ -673,6 +673,8 @@ struct Hist {
     /// Offline samples (screenshots, tests) are `base + wave * amplitude`.
     base: f64,
     amplitude: f64,
+    /// Whether chartgen records it beyond what Binance keeps (ADR-0082).
+    recorded: bool,
 }
 
 const OI: Hist = Hist {
@@ -681,6 +683,7 @@ const OI: Hist = Hist {
     field: "sumOpenInterestValue",
     base: 2.0e9,
     amplitude: 5.0e8,
+    recorded: true,
 };
 
 /// Taker buy volume over taker sell volume: above 1 market buyers are the aggressors.
@@ -690,6 +693,7 @@ const TAKER: Hist = Hist {
     field: "buySellRatio",
     base: 1.0,
     amplitude: 0.3,
+    recorded: false,
 };
 
 fn hist_page(h: &Hist, symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64)>, String> {
@@ -803,6 +807,9 @@ fn history_window(data: &OhlcvData, now: i64) -> Result<(Window, &str), Missing>
     Ok((w, period))
 }
 
+#[cfg(feature = "scripting")]
+pub mod record;
+
 // ---- Funding Rate ----
 
 pub struct FundingRate;
@@ -894,13 +901,30 @@ fn hist_values(
 ) -> Result<Vec<f64>, Missing> {
     let sym = futures_symbol(data)?;
     let now = now_ms();
-    let (w, period) = history_window(data, now)?;
+    let interval = data.interval.as_deref().unwrap_or("4h");
+    let gap = interval_to_max_gap_ms(interval);
+    let recorded = |period: &str, from: i64, to: i64| match h.recorded {
+        true => recorded_rows(sym, period, from, to),
+        false => None,
+    };
+    let (w, period) = match history_window(data, now) {
+        // All of it is older than Binance keeps: what this server recorded, if anything.
+        Err(Missing::Retention) => {
+            let period = map_interval(interval);
+            let rows = Window::of(&data.bars, gap, now)
+                .and_then(|w| recorded(period, w.from, w.to))
+                .filter(|rows| !rows.is_empty())
+                .ok_or(Missing::Retention)?;
+            return Ok(align_to_bars(&rows, &data.bars, gap));
+        }
+        w => w?,
+    };
     let floor = now - RETENTION_MS + RETENTION_MARGIN_MS;
     let series = read(cache, h.what, sym, &w.key(period), |prev| {
         let mut page = |q: Query| hist_page(h, sym, period, &q);
         let deadline = Instant::now() + READ_DEADLINE;
         let step = period_ms(period);
-        collect(
+        let read = collect(
             prev,
             &w,
             now,
@@ -909,10 +933,62 @@ fn hist_values(
             HISTORY_MAX_PAGES,
             deadline,
             &mut page,
-        )
+        )?;
+        Ok(with_recorded(read, &w, floor, |from, to| {
+            recorded(period, from, to)
+        }))
     })?;
-    let gap = interval_to_max_gap_ms(data.interval.as_deref().unwrap_or("4h"));
     Ok(align_to_bars(&series, &data.bars, gap))
+}
+
+/// A read of `w` that Binance answered as far back as it keeps, with what this server
+/// recorded before its first row (ADR-0082). `recorded` answers the rows from one time
+/// to another, or `None` when the server records nothing, and the read is returned as
+/// it is.
+///
+/// The read is then complete from the window's start or Binance's `floor`, whichever is
+/// older, not from the beginning of time: a window reaching further back reads again,
+/// and so gets what was recorded for it too. A read that stopped early, or the rows
+/// kept from the last read, are returned as they are.
+fn with_recorded(
+    mut read: Read<(i64, f64)>,
+    w: &Window,
+    floor: i64,
+    recorded: impl FnOnce(i64, i64) -> Option<Vec<(i64, f64)>>,
+) -> Read<(i64, f64)> {
+    if read.from != i64::MIN {
+        return read;
+    }
+    let first = read.rows.first().map_or(w.to, |r| r.0 - 1);
+    let Some(mut rows) = recorded(w.from, first.min(w.to)) else {
+        return read;
+    };
+    rows.append(&mut read.rows);
+    read.rows = rows;
+    read.from = w.from.min(floor);
+    read
+}
+
+/// What this server recorded of open interest (ADR-0082) from `from` to `to`, on the
+/// grid of `period`: Binance's row of a period is the 5m row of the same time. `None`
+/// without a store, as in a build without one, and when the store fails, so the read
+/// is not taken as complete and the next one asks again.
+fn recorded_rows(symbol: &str, period: &str, from: i64, to: i64) -> Option<Vec<(i64, f64)>> {
+    #[cfg(feature = "scripting")]
+    {
+        let store = crate::scripting::persistence::global()?;
+        let symbol = symbol.to_uppercase();
+        let every = period_ms(period);
+        store
+            .futures_rows(record::KIND, &symbol, record::PERIOD, (from, to), every)
+            .inspect_err(|e| eprintln!("[futures] recorded open interest {symbol}: {e}"))
+            .ok()
+    }
+    #[cfg(not(feature = "scripting"))]
+    {
+        let _ = (symbol, period, from, to);
+        None
+    }
 }
 
 impl Indicator for OpenInterestHist {
@@ -925,7 +1001,7 @@ impl Indicator for OpenInterestHist {
     }
 
     fn description(&self) -> &str {
-        "Open Interest — total outstanding futures contracts (Binance futures, last 30 days only)"
+        "Open Interest — total outstanding futures contracts (Binance futures; past 30 days where this server records it)"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -1784,6 +1860,92 @@ mod interval_tests {
         // The newest rows are the ones kept, and the older bars are meant to stay empty.
         assert_eq!(got.rows.last().unwrap().0, NOW);
         assert_eq!(got.from, w.from);
+    }
+
+    // ---- What this server recorded (ADR-0082) ----
+
+    /// `collect` of 4h rows as `hist_values` reads them, Binance keeping 30 days, and
+    /// `with_recorded` with a store holding `stored` (none: no store).
+    fn read_4h(
+        prev: Option<(&[(i64, f64)], i64)>,
+        w: &Window,
+        stored: Option<&[(i64, f64)]>,
+        asked: &mut Vec<(i64, i64)>,
+    ) -> Read<(i64, f64)> {
+        const STEP: i64 = 4 * HOUR_MS;
+        let floor = NOW - RETENTION_MS + RETENTION_MARGIN_MS;
+        let mut fake = Fake {
+            rows: rows_every(STEP, floor + STEP, NOW),
+            asked: vec![],
+        };
+        let read = collect(prev, w, NOW, floor, STEP, 8, later(), &mut |q| fake.page(q)).unwrap();
+        with_recorded(read, w, floor, |from, to| {
+            asked.push((from, to));
+            stored.map(|s| {
+                s.iter()
+                    .filter(|r| r.0 >= from && r.0 <= to)
+                    .copied()
+                    .collect()
+            })
+        })
+    }
+
+    #[test]
+    fn a_window_past_30_days_gets_the_recorded_rows_before_binances() {
+        const STEP: i64 = 4 * HOUR_MS;
+        let stored: Vec<_> = (NOW / STEP - 400..=NOW / STEP)
+            .map(|i| (i * STEP, 2.0))
+            .collect();
+        let w = window(NOW - 60 * DAY_MS, NOW + STEP);
+        let mut asked = vec![];
+        let got = read_4h(None, &w, Some(&stored), &mut asked);
+        let binance_first = got.rows.iter().find(|r| r.1 == 1.0).unwrap().0;
+        assert_eq!(asked, [(w.from, binance_first - 1)]);
+        assert!(got.rows.first().unwrap().0 >= w.from && got.rows[0].0 < w.from + STEP);
+        assert!(
+            got.rows.windows(2).all(|p| p[1].0 - p[0].0 == STEP),
+            "no hole, no repeat"
+        );
+        assert!(got
+            .rows
+            .iter()
+            .all(|r| (r.0 < binance_first) == (r.1 == 2.0)));
+        assert_eq!(got.from, w.from);
+
+        // Kept from then on, with no second look at the store.
+        asked.clear();
+        let again = read_4h(Some((&got.rows, got.from)), &w, Some(&stored), &mut asked);
+        assert_eq!(
+            (again.rows, again.from, asked.len()),
+            (got.rows.clone(), w.from, 0)
+        );
+        // A window further back reads again, and so gets its recorded rows too.
+        let wider = window(NOW - 70 * DAY_MS, NOW + STEP);
+        let more = read_4h(
+            Some((&got.rows, got.from)),
+            &wider,
+            Some(&stored),
+            &mut asked,
+        );
+        assert!(more.rows[0].0 < w.from && more.rows[0].1 == 2.0);
+    }
+
+    #[test]
+    fn without_a_store_or_within_30_days_a_read_is_what_binance_answered() {
+        const STEP: i64 = 4 * HOUR_MS;
+        let floor = NOW - RETENTION_MS + RETENTION_MARGIN_MS;
+        let stored = [(NOW - 50 * DAY_MS, 2.0)];
+        let wide = window(NOW - 60 * DAY_MS, NOW + STEP);
+        let near = window(NOW - 10 * DAY_MS, NOW + STEP);
+        let mut asked = vec![];
+        let plain = read_4h(None, &wide, None, &mut asked);
+        assert!(plain.rows.iter().all(|r| r.1 == 1.0));
+        assert_eq!(plain.from, i64::MIN, "as before ADR-0082");
+        // Within the 30 days: the same read, with a store or without.
+        let a = read_4h(None, &near, None, &mut asked);
+        let b = read_4h(None, &near, Some(&stored), &mut asked);
+        assert_eq!((a.rows, a.from), (b.rows, b.from));
+        assert!(b.from >= floor);
     }
 
     #[test]

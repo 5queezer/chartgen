@@ -162,7 +162,7 @@ export interface CreateServerAlertInput {
    */
   expires_at?: number | string;
   /**
-   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the settlement nearest its open): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. oi (or open_interest) is open interest, watched by its change over change_bars bars in percent, as get_indicators' change_bars answers change.pct: level 5 with crossing_up is open interest rising by 5% or more over those bars; it needs change_bars, and Binance keeps 30 days of it (about 185 bars on 4h, 31 on 1d). Fixed after creation.
+   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the settlement nearest its open): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. oi (or open_interest) is open interest, watched by its change over change_bars bars in percent, as get_indicators' change_bars answers change.pct: level 5 with crossing_up is open interest rising by 5% or more over those bars; it needs change_bars, and Binance keeps 30 days of it (about 185 bars on 4h, 31 on 1d), further back only what the server has recorded. Fixed after creation.
    */
   indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx" | "funding" | "oi";
   /**
@@ -550,7 +550,7 @@ export interface GetIndicatorsInput {
    */
   as_of?: number | string;
   /**
-   * Also answer each line's and histogram's change over this many bars, ending at the bar its last_value is from: change {from, abs (last_value - from), pct (abs over |from|, in %, null when from is 0)}, or change null when either end has no value (nothing that far back, or a line with no value on its last bar, such as an inactive Supertrend line). Open interest (oi) and the long/short ratios have none older than the 30 days Binance keeps (about 185 bars on 4h, 31 on 1d). The answer then also carries change_bars.
+   * Also answer each line's and histogram's change over this many bars, ending at the bar its last_value is from: change {from, abs (last_value - from), pct (abs over |from|, in %, null when from is 0)}, or change null when either end has no value (nothing that far back, or a line with no value on its last bar, such as an inactive Supertrend line). Open interest (oi) and the long/short ratios have none older than the 30 days Binance keeps (about 185 bars on 4h, 31 on 1d), except open interest the server has recorded since it started recording it. The answer then also carries change_bars.
    */
   change_bars?: number;
   /**
@@ -705,9 +705,17 @@ export interface GetTrackRecordInput {
    */
   from?: number | string;
   /**
-   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated no playbook_version is in the group unversioned; one that stated none of the others, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
+   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). bracket_anchor counts skips by the rule that scored them, fill or signal_close; takes are in the group whose key is null. tag counts per prefix in tag_prefixes: a setup is in the group of each prefix one of its tags starts with, so groups can overlap and need not add up to total. A setup that stated no playbook_version is in the group unversioned; one that stated none of the others, or has no tag with any of the prefixes, is in the group whose key is null. More than 50 groups are refused.
    */
-  group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction" | "tag" | "skip_reason";
+  group_by?:
+    | "playbook_version"
+    | "feature"
+    | "probability"
+    | "symbol"
+    | "direction"
+    | "tag"
+    | "skip_reason"
+    | "bracket_anchor";
   /**
    * Only setups made with this playbook_version; unversioned for those made without one.
    */
@@ -815,6 +823,7 @@ export interface ListSetupsInput {
     | "thesis"
     | "drawings"
     | "bracket"
+    | "bracket_anchor"
     | "status"
     | "created_at"
     | "costs"

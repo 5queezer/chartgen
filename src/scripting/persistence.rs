@@ -170,6 +170,17 @@ pub(super) const MIGRATIONS: &[&str] = &[
         last_seq  INTEGER NOT NULL
     );
 ",
+    // Futures series kept beyond what Binance keeps (ADR-0082): open interest at 5m.
+    "
+    CREATE TABLE futures_series (
+        kind    TEXT    NOT NULL,
+        symbol  TEXT    NOT NULL,
+        period  TEXT    NOT NULL,
+        ts      INTEGER NOT NULL,
+        value   REAL    NOT NULL,
+        PRIMARY KEY (kind, symbol, period, ts)
+    ) WITHOUT ROWID;
+",
 ];
 
 /// Whether an owner is a signed-in account (ADR-0044).
@@ -1119,6 +1130,100 @@ impl Store {
             conn.prepare("SELECT body FROM setup_revisions WHERE setup_id = ?1 ORDER BY seq")?;
         let rows = stmt.query_map(params![id], |r| r.get(0))?;
         rows.collect()
+    }
+
+    /// The symbols named by a setup or a server alert, upper case, each once.
+    pub fn watched_symbols(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT UPPER(symbol) FROM (
+                 SELECT json_extract(record, '$.symbol') AS symbol FROM setups
+                 UNION SELECT json_extract(record_json, '$.symbol') FROM server_alerts)
+             WHERE symbol IS NOT NULL ORDER BY 1",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// Write rows of a futures series (ADR-0082); a row already there is replaced.
+    pub fn save_futures_rows(
+        &self,
+        kind: &str,
+        symbol: &str,
+        period: &str,
+        rows: &[(i64, f64)],
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO futures_series (kind, symbol, period, ts, value)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (ts, value) in rows {
+                stmt.execute(params![kind, symbol, period, ts, value])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// The rows of a futures series from `from` to `to`, both inclusive, oldest first,
+    /// on a grid of `every` ms: those whose time is a multiple of it.
+    pub fn futures_rows(
+        &self,
+        kind: &str,
+        symbol: &str,
+        period: &str,
+        (from, to): (i64, i64),
+        every: i64,
+    ) -> rusqlite::Result<Vec<(i64, f64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT ts, value FROM futures_series
+             WHERE kind = ?1 AND symbol = ?2 AND period = ?3 AND ts BETWEEN ?4 AND ?5
+               AND ts % ?6 = 0
+             ORDER BY ts",
+        )?;
+        let rows = stmt.query_map(params![kind, symbol, period, from, to, every], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// The time of the newest row of a futures series.
+    pub fn last_futures_row(
+        &self,
+        kind: &str,
+        symbol: &str,
+        period: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        self.conn().query_row(
+            "SELECT MAX(ts) FROM futures_series WHERE kind = ?1 AND symbol = ?2 AND period = ?3",
+            params![kind, symbol, period],
+            |r| r.get(0),
+        )
+    }
+
+    /// Delete the rows of a futures series older than `before`, for every symbol; how
+    /// many went. A symbol and period at a time, along the key: one delete over the
+    /// whole table would scan it under the store's lock.
+    pub fn forget_futures_rows(&self, kind: &str, before: i64) -> rusqlite::Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let series: Vec<(String, String)> = tx
+            .prepare("SELECT DISTINCT symbol, period FROM futures_series WHERE kind = ?1")?
+            .query_map(params![kind], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut gone = 0;
+        for (symbol, period) in series {
+            gone += tx.execute(
+                "DELETE FROM futures_series
+                 WHERE kind = ?1 AND symbol = ?2 AND period = ?3 AND ts < ?4",
+                params![kind, symbol, period, before],
+            )?;
+        }
+        tx.commit()?;
+        Ok(gone)
     }
 
     /// Deliveries not finished, oldest first.

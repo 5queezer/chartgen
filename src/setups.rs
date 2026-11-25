@@ -122,6 +122,18 @@ pub enum Bracket {
     Floor,
 }
 
+/// Where a skip's bracket is measured from (ADR-0087), so that a track record can tell
+/// the results of the two rules apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BracketAnchor {
+    /// From the close of the interval's last closed bar when the skip was made, while it
+    /// was filled at the next 1m bar's open: a skip made before ADR-0087.
+    SignalClose,
+    /// From its fill: the bracket moves with the price it is taken at.
+    Fill,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Zone {
     pub low: f64,
@@ -137,6 +149,17 @@ pub struct Levels {
     pub targets: Vec<f64>,
     /// ms since epoch.
     pub expires_at: i64,
+}
+
+impl Levels {
+    /// Whether every price is a finite number above 0: a stored setup with one that is
+    /// not cannot be read back.
+    pub fn positive(&self) -> bool {
+        [self.entry.low, self.entry.high, self.invalidation]
+            .iter()
+            .chain(&self.targets)
+            .all(|p| p.is_finite() && *p > 0.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -206,6 +229,10 @@ pub struct Record {
     pub levels: Levels,
     #[serde(default)]
     pub bracket: Bracket,
+    /// A skip's only (ADR-0087): where its bracket is measured from. Not written on a
+    /// take, nor on a skip stored before the field existed, which is `signal_close`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bracket_anchor: Option<BracketAnchor>,
     pub status: Status,
     pub created_at: i64,
     pub costs: Costs,
@@ -974,7 +1001,9 @@ fn check_parts(
 }
 
 /// The bracket a skip is scored with: in at the next bar's open, out one ATR against
-/// or two ATR with it, on `bars`, the closed bars of the setup's interval. It runs out
+/// or two ATR with it, on `bars`, the closed bars of the setup's interval. The levels
+/// are placed around the last close here and move to the fill when it fills (ADR-0087),
+/// so that a win is two ATR and a stop one from the price it was taken at. It runs out
 /// after 24 of those bars, or after the longest expiry any setup may have if that is
 /// sooner: a skip cannot be cancelled, so it must not stay open for years. Where one
 /// ATR is less than the least risk a setup may have, the stop is that far and the target
@@ -1030,22 +1059,21 @@ fn bracket(
         by_atr if by_atr >= floor => (by_atr, Bracket::Atr),
         _ => (floor, Bracket::Floor),
     };
-    let invalidation = last.close - sign * risk;
-    if invalidation <= 0.0 {
-        return Err(Problem::new(
-            "decision",
-            "the default bracket of this skip would have a price at or below 0",
-        ));
-    }
     let levels = Levels {
         entry: Zone {
             low: last.close,
             high: last.close,
         },
-        invalidation,
+        invalidation: last.close - sign * risk,
         targets: vec![last.close + sign * risk * SKIP_TARGET_ATR / SKIP_STOP_ATR],
         expires_at,
     };
+    if !levels.positive() {
+        return Err(Problem::new(
+            "decision",
+            "the default bracket of this skip would have a price at or below 0",
+        ));
+    }
     Ok((levels, rule))
 }
 
@@ -1278,6 +1306,7 @@ impl Record {
             drawings,
             levels,
             bracket: Bracket::Agent,
+            bracket_anchor: (draft.decision == Decision::Skip).then_some(BracketAnchor::Fill),
             status: Status::Watching,
             created_at: now_ms,
             costs: Costs::default(),
@@ -1313,6 +1342,10 @@ impl Record {
             ("probability", json!(record.probability)),
             ("playbook_version", json!(record.playbook_version)),
             ("skip_reason", json!(record.skip_reason)),
+            // Not stated by the agent, but kept with them for the same reason: a row
+            // rewritten by a build from before ADR-0087 loses it, and `restate` reads it
+            // back from here.
+            ("bracket_anchor", json!(record.bracket_anchor)),
         ] {
             if !value.is_null() {
                 stated.insert(field.to_string(), json!({ "to": value }));
@@ -1361,6 +1394,19 @@ impl Record {
         self.skip_reason = stated("skip_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // A build from before ADR-0087 rewrites the row without `bracket_anchor`, and
+        // scores a skip still waiting by the close's bracket (ADR-0087, rollback). The
+        // first entry says which rule the skip was made under; a fill under the fill
+        // rule puts the entry at the fill price, so a fill elsewhere was the old rule's.
+        if self.bracket_anchor.is_none() {
+            self.bracket_anchor =
+                stated("bracket_anchor").and_then(|v| serde_json::from_value(v.clone()).ok());
+        }
+        if self.bracket_anchor == Some(BracketAnchor::Fill)
+            && self.fill.is_some_and(|f| f.price != self.levels.entry.low)
+        {
+            self.bracket_anchor = Some(BracketAnchor::SignalClose);
+        }
     }
 
     /// The levels as they will be once every pending change has taken effect.
@@ -2032,6 +2078,45 @@ impl Record {
             return out;
         }
 
+        // A skip is taken at this bar's open, wherever price went since it was made: its
+        // bracket moves there, the same distances from the fill (ADR-0087). Measured from
+        // the close it was made at, a gap would leave a win short of its 2 R, or below 0.
+        let mut anchored = Map::new();
+        if self.status == Status::Watching && self.bracket_anchor == Some(BracketAnchor::Fill) {
+            let shift = bar.open - self.levels.entry.low;
+            let to = Levels {
+                entry: Zone {
+                    low: bar.open,
+                    high: bar.open,
+                },
+                invalidation: self.levels.invalidation + shift,
+                targets: self.levels.targets.iter().map(|t| t + shift).collect(),
+                expires_at: self.levels.expires_at,
+            };
+            if to.positive() {
+                level_changes(&mut anchored, &self.levels, &to);
+                self.levels = to;
+            } else {
+                // Within one ATR of 0 for a long, or two for a short, there is no such
+                // bracket: the skip keeps the one from the close, and says so.
+                let mut changes = Map::new();
+                changed(
+                    &mut changes,
+                    "bracket_anchor",
+                    json!(BracketAnchor::Fill),
+                    json!(BracketAnchor::SignalClose),
+                );
+                self.bracket_anchor = Some(BracketAnchor::SignalClose);
+                out.push(self.log(
+                    bar.time,
+                    By::Server,
+                    Kind::Voided,
+                    Some("the bracket moved to the fill would have a price at or below 0; it stays at the close it was made at".into()),
+                    changes,
+                ));
+            }
+        }
+
         let sign = self.direction.sign();
         let stop = self.levels.invalidation;
         // Beyond a level, on the losing side of it.
@@ -2083,6 +2168,7 @@ impl Record {
                 json!(Status::Triggered),
             );
             changes.insert("fill".into(), json!({ "from": null, "to": fill }));
+            changes.extend(anchored);
             out.push(self.log(bar.time, By::Server, Kind::Status, None, changes));
             // The bar that filled it can stop it out, and cannot win it: a bar does not
             // say in which order it traded. So it counts against the position only.
@@ -2304,6 +2390,9 @@ impl Record {
                 map.extend(durations);
             }
             map.insert("net".into(), json!(self.net()));
+            if self.decision == Decision::Skip && self.bracket_anchor.is_none() {
+                map.insert("bracket_anchor".into(), json!(BracketAnchor::SignalClose));
+            }
         }
         v
     }
@@ -2323,7 +2412,7 @@ impl Record {
 /// The keys of a setup as `Record::view` answers it, in that order; those a setup does
 /// not have (`features` and the other stated or stock-only fields) are left out of its
 /// view. `list_setups` returns only some of them when asked (ADR-0078).
-pub const VIEW_FIELDS: [&str; 43] = [
+pub const VIEW_FIELDS: [&str; 44] = [
     "id",
     "symbol",
     "interval",
@@ -2332,6 +2421,7 @@ pub const VIEW_FIELDS: [&str; 43] = [
     "thesis",
     "drawings",
     "bracket",
+    "bracket_anchor",
     "status",
     "created_at",
     "costs",
@@ -2383,6 +2473,8 @@ pub enum GroupBy {
     /// with it; a setup can be in several (ADR-0079).
     Tag(Vec<String>),
     SkipReason,
+    /// A skip's `bracket_anchor`, null for a take (ADR-0087).
+    BracketAnchor,
 }
 
 /// Groups one answer holds. More is not a grouping but a list, and is refused.
@@ -2406,6 +2498,10 @@ impl Record {
                 };
             }
             GroupBy::SkipReason => json!(self.skip_reason),
+            GroupBy::BracketAnchor => match self.decision {
+                Decision::Skip => json!(self.bracket_anchor.unwrap_or(BracketAnchor::SignalClose)),
+                Decision::Take => Value::Null,
+            },
             GroupBy::PlaybookVersion => {
                 json!(self.playbook_version.as_deref().unwrap_or(UNVERSIONED))
             }
