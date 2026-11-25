@@ -1446,9 +1446,9 @@ and compares:
 ```
 
 - `indicator`: one of `rsi`, `ma`, `macd`, `stoch`, `cci`, `mfi`, `williams_r`, `roc`, `atr`,
-  `adx`. An EMA or SMA of a length is `ma` with `type` and `length` (`ema` is the fixed
-  8/21/50/200 stack). Your own scripts and indicators that fetch other data (funding, open
-  interest) are refused.
+  `adx`, or `funding` (see [funding](#funding-on-the-server)). An EMA or SMA of a length is
+  `ma` with `type` and `length` (`ema` is the fixed 8/21/50/200 stack). Your own scripts and
+  the other indicators that fetch data besides the bars are refused.
 - `params`: as [`list_indicators`](#list_indicators) gives them. A name the indicator does not
   take is refused. The alert keeps every param it takes, with the defaults filled in, and shows
   and sends them so. The indicator must settle within the 999 closed bars the server reads: EMA
@@ -1474,6 +1474,37 @@ The [webhook payload](#webhook-payload) and the [wake-up](#waking-your-agent) ca
 `"indicator"` object, with `value` at the close that fired. `level` there is the level the
 alert compares with, or with `compare: "close"` the line's value that the close crossed. A
 price alert's payload has no `indicator` and is unchanged.
+
+##### Funding on the server
+
+`indicator: "funding"` (or `funding_rate`) watches a Binance perpetual's funding rate
+([ADR-0080](/chartgen/decisions/0080-futures-data-on-server-alerts/)): the series the chart's
+Funding panel and a wake-up's `context.funding_pct` show, read at the closes of the alert's
+interval like any indicator alert.
+
+```json
+{ "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+  "indicator": "funding", "condition": "crossing_up", "level": 0.05,
+  "trigger": "once", "notify_agent": true }
+```
+
+- `level` is in **percent**: `0.05` is 0.05%, a rate of 0.0005. The line is `Funding`.
+- The value at a close is the rate the chart shows on the bar that closed: the settlement
+  nearest its open. On 1h and 4h that is the latest settled rate, read at the first close after
+  it, so within an hour on 1h. On longer bars it is the one nearest the bar's open, a day old on
+  1d. Use 1h.
+- **A crossing compares with the rate this alert read at its previous close**, as a price alert
+  compares with its previous price: the series one bar back can already show the new
+  settlement. So the first close after creating the alert, after a restart, after a resume or
+  a new `condition`, `level` or `trigger`, or after a gap in the feed never fires a crossing;
+  `greater` and `less` can fire on it. A read still out when the alert is changed is dropped.
+- `compare: "close"` is refused: a close is not a rate.
+- A symbol with no futures market is refused when the alert is created, with the reason.
+- The rate is read off the alerts' lock, from Binance's funding history through the same cache
+  and budget as a chart: one short read per symbol and close, shared by every alert and chart
+  on it. If that read fails, the close is skipped and the alert keeps the value it read before,
+  so the next close still sees a crossing, a close late, if the rate is still across the level
+  then; a rate that crossed and came back between two reads is missed.
 
 #### An alert at a bar's close
 
