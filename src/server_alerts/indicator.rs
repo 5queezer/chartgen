@@ -5,8 +5,12 @@
 //! bars and compares the line with a level, or the bar's close with the line. The
 //! previous reading is the same comparison one bar earlier, from the same window,
 //! so a crossing is the change between two closes and needs nothing kept in memory.
+//!
+//! A futures-data indicator (`FUTURES`) reads Binance futures rows besides the bars,
+//! so it is read off the alerts' lock, on the last `FUTURES_BARS` bars (ADR-0080).
 
 use chartgen::data::{Bar, OhlcvData};
+use chartgen::indicator::PanelResult;
 use chartgen::indicators;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -38,6 +42,22 @@ pub(super) const ALLOWED: &[&str] = &[
     "atr",
     "adx",
 ];
+
+/// Futures-data indicators an alert may watch (ADR-0080): a series Binance keeps for a
+/// perpetual, read through the same cache and budget as a chart's panel.
+pub(super) const FUTURES: &[&str] = &["funding"];
+
+/// Other names an alert takes for a futures-data indicator, as `list_indicators` and
+/// `generate_chart` do.
+const FUTURES_ALIASES: &[(&str, &str)] = &[("funding_rate", "funding")];
+
+/// The bars a futures-data alert reads at a close: enough for this close and the one
+/// before, and short, so that each close reads only the newest rows.
+pub(super) const FUTURES_BARS: usize = 50;
+
+/// What a futures-data indicator draws as bars instead of a line, and the name an
+/// alert gives that series.
+const BAR_SERIES: &[(&str, &str)] = &[("funding", "Funding")];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,10 +101,15 @@ pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
         }
         Some(v) => v.as_str().ok_or("indicator must be a string")?.trim(),
     };
-    if !ALLOWED.contains(&name) {
+    let name = FUTURES_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map_or(name, |(_, canonical)| canonical);
+    if !ALLOWED.contains(&name) && !FUTURES.contains(&name) {
         return Err(format!(
-            "Server alerts cannot watch the indicator {name}; they watch {}",
-            ALLOWED.join(", ")
+            "Server alerts cannot watch the indicator {name}; they watch {}, {}",
+            ALLOWED.join(", "),
+            FUTURES.join(", ")
         ));
     }
     let given = match args.get("params") {
@@ -125,17 +150,18 @@ pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
         volume: 1.0,
         date: "0".into(),
     };
-    let labels: Vec<String> = ind
-        .compute(&OhlcvData {
+    let labels: Vec<String> = series(
+        name,
+        ind.compute(&OhlcvData {
             bars: vec![flat; 3],
             symbol: None,
             interval: None,
             session: None,
-        })
-        .lines
-        .into_iter()
-        .filter_map(|l| l.label)
-        .collect();
+        }),
+    )
+    .into_iter()
+    .map(|(label, _)| label)
+    .collect();
     let line = match args.get("line") {
         None | Some(Value::Null) => labels
             .first()
@@ -162,6 +188,11 @@ pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
                 .ok_or("level must be a number")?,
         ),
     };
+    if compare == Compare::Close && FUTURES.contains(&name) {
+        return Err(format!(
+            "compare: close compares the close with a price line; {name} is not one"
+        ));
+    }
     match (compare, level) {
         (Compare::Level, None) => return Err("level is required".into()),
         (Compare::Close, Some(_)) => {
@@ -214,6 +245,28 @@ fn full_params(name: &str, given: &Value) -> Result<Value, String> {
     Ok(Value::Object(full))
 }
 
+/// The labelled series of a panel: its lines, and a futures-data indicator's bars
+/// under the name `BAR_SERIES` gives them.
+fn series(name: &str, panel: PanelResult) -> Vec<(String, Vec<f64>)> {
+    let mut all: Vec<(String, Vec<f64>)> = panel
+        .lines
+        .into_iter()
+        .filter_map(|l| Some((l.label?, l.y)))
+        .collect();
+    if let Some((_, label)) = BAR_SERIES.iter().find(|(n, _)| *n == name) {
+        if let Some(b) = panel.bars.into_iter().next() {
+            all.push((label.to_string(), b.y));
+        }
+    }
+    all
+}
+
+impl Spec {
+    pub(super) fn reads_futures(&self) -> bool {
+        FUTURES.contains(&self.name.as_str())
+    }
+}
+
 /// `spec` at the close of the last bar of `bars`. `None` while the window holds
 /// too little history for a converged value, or the line has none there.
 pub(super) fn read(spec: &Spec, bars: &[Bar]) -> Option<Reading> {
@@ -227,12 +280,46 @@ pub(super) fn read(spec: &Spec, bars: &[Bar]) -> Option<Reading> {
         interval: None,
         session: None,
     };
-    let y = ind
-        .compute(&data)
-        .lines
+    let y = line_of(spec, ind.compute(&data))?;
+    reading(spec, bars, &y)
+}
+
+/// A futures-data `spec` on `symbol`'s bars of `interval`, at the close of the last
+/// one, with the reason when it has no value there. Reads Binance: never under a lock.
+pub(super) fn read_futures(
+    spec: &Spec,
+    bars: &[Bar],
+    symbol: &str,
+    interval: &str,
+) -> Result<Reading, String> {
+    let ind = indicators::by_name_configured(&spec.name, &spec.params)?
+        .ok_or_else(|| format!("unknown indicator {}", spec.name))?;
+    let tail = &bars[bars.len().saturating_sub(FUTURES_BARS)..];
+    let panel = ind.compute(&OhlcvData {
+        bars: tail.to_vec(),
+        symbol: Some(symbol.to_string()),
+        interval: Some(interval.to_string()),
+        session: None,
+    });
+    // The panel's label carries why it has no values, e.g. "Funding (no futures market)".
+    let why = panel.label.clone();
+    line_of(spec, panel)
+        .and_then(|y| reading(spec, tail, &y))
+        .ok_or_else(|| format!("{symbol} has no {} at its last close: {why}", spec.line))
+}
+
+fn line_of(spec: &Spec, panel: PanelResult) -> Option<Vec<f64>> {
+    series(&spec.name, panel)
         .into_iter()
-        .find(|l| l.label.as_deref() == Some(&spec.line))?
-        .y;
+        .find(|(label, _)| *label == spec.line)
+        .map(|(_, y)| y)
+}
+
+/// The comparison at the last bar of `bars` and the one before, with the line `y`.
+pub(super) fn reading(spec: &Spec, bars: &[Bar], y: &[f64]) -> Option<Reading> {
+    if bars.is_empty() {
+        return None;
+    }
     let at = |i: usize| -> Option<f64> {
         let v = *y.get(i)?;
         let d = match spec.compare {
@@ -300,7 +387,8 @@ mod tests {
             .find(|t| t["name"] == "create_server_alert")
             .unwrap();
         let offered = &create["inputSchema"]["properties"]["indicator"]["enum"];
-        assert_eq!(offered, &json!(ALLOWED));
+        let all: Vec<&str> = ALLOWED.iter().chain(FUTURES).copied().collect();
+        assert_eq!(offered, &json!(all));
     }
 
     /// 999 closed bars of a wobbling rise, with volume.
@@ -422,6 +510,22 @@ mod tests {
         assert_eq!(
             ema.params,
             json!({ "type": "ema", "length": 50, "source": "close", "offset": 0 })
+        );
+    }
+
+    /// A symbol with no futures says why, and sends no request: futures data is for
+    /// Binance perpetuals only.
+    #[test]
+    fn funding_on_a_stock_says_why_it_has_none() {
+        let spec = parse(&json!({ "indicator": "funding", "level": 0.01 }))
+            .unwrap()
+            .unwrap();
+        assert!(spec.reads_futures());
+        assert_eq!(spec.line, "Funding");
+        let err = read_futures(&spec, &window(), "AAPL", "1h").err().unwrap();
+        assert_eq!(
+            err,
+            "AAPL has no Funding at its last close: Funding (Binance futures only)"
         );
     }
 

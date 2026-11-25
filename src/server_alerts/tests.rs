@@ -4979,6 +4979,394 @@ async fn a_bar_close_wake_up_from_the_log_has_no_level() {
     assert!(what.get("indicator").is_none(), "{what}");
 }
 
+// ---- Futures-data alerts (ADR-0080) ----
+
+/// A FLAKY symbol's futures read fails while this is set.
+static FLAKY_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The futures read in tests, in place of Binance: funding in percent is the last
+/// close over 1000, on every bar, as a settlement shows on the bars nearest it; a
+/// NOFUT symbol has no futures market, a SLOW one takes 400 ms, and a FLAKY one
+/// fails while `FLAKY_FAILS` is set.
+pub(super) fn read_futures(
+    spec: &indicator::Spec,
+    bars: &[Bar],
+    symbol: &str,
+    _interval: &str,
+) -> Result<indicator::Reading, String> {
+    if symbol.starts_with("SLOW") {
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    if symbol.starts_with("FLAKY") && FLAKY_FAILS.load(Ordering::SeqCst) {
+        return Err("funding rate: Binance returned status 503".into());
+    }
+    if symbol.starts_with("NOFUT") {
+        return Err(format!(
+            "{symbol} has no Funding at its last close: Funding (no futures market)"
+        ));
+    }
+    let tail = &bars[bars.len().saturating_sub(indicator::FUTURES_BARS)..];
+    let last = tail.last().map_or(f64::NAN, |b| b.close / 1000.0);
+    let y = vec![last; tail.len()];
+    indicator::reading(spec, tail, &y).ok_or_else(|| "no reading".to_string())
+}
+
+fn on_funding(symbol: &str, condition: &str, level: f64) -> Value {
+    json!({
+        "symbol": symbol, "interval": "1h", "evaluate_on": "close",
+        "indicator": "funding_rate", "condition": condition, "trigger": "every", "level": level,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn funding_fires_at_the_close_it_crosses_its_level() {
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let (a, _, id) =
+        with_history("funding", bars, on_funding("BTCUSDT", "crossing_up", 0.06)).await;
+    let view = get(&a, "me", &id).await;
+    assert_eq!(
+        view["indicator"]["name"], "funding",
+        "the alias is stored by its name"
+    );
+    assert_eq!(view["indicator"]["line"], "Funding");
+    assert_eq!(view["level"], 0.06);
+    let k = key("1h");
+    // 0.055% is under the level; 0.07% crosses it, though the series one bar back
+    // already shows 0.07% too: the crossing is against the close read before.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 55.0)));
+    until("the first read", || a.lock().values.contains_key(&id)).await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+    let view = get(&a, "me", &id).await;
+    assert!((view["indicator"]["value"].as_f64().unwrap() - 0.07).abs() < 1e-12);
+    assert_eq!(view["feed"], "live");
+    // The same close sent again does not fire it twice, and a tick is not a close.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    a.on_event(&k, FeedEvent::Tick(bar(t + 3 * HOUR, 99.0)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_futures_read_holds_no_lock() {
+    let (store, _) = store_at("funding-slow");
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let id = create(&a, on_funding("SLOWUSDT", "greater", 0.06), "me").await;
+    let k = ("SLOWUSDT".to_string(), "1h".to_string());
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    let started = Instant::now();
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 70.0)));
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "the close does not wait"
+    );
+    // The alerts stay usable while it reads.
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_funding_alert_needs_a_futures_market_and_a_level() {
+    let (store, _) = store_at("funding-bad");
+    let a = plain(store);
+    let err = call(
+        &a,
+        "create_server_alert",
+        on_funding("NOFUTUSDT", "greater", 0.01),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err,
+        "Cannot watch funding on NOFUTUSDT: NOFUTUSDT has no Funding at its last close: Funding (no futures market)"
+    );
+    let mut args = on_funding("BTCUSDT", "crossing", 0.01);
+    args["compare"] = json!("close");
+    args["level"] = Value::Null;
+    let err = call(&a, "create_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.contains("funding is not one"), "{err}");
+    let mut args = on_funding("BTCUSDT", "crossing", 0.01);
+    args["evaluate_on"] = json!("live");
+    assert!(call(&a, "create_server_alert", args, "me").await.is_err());
+    assert!(a.lock().alerts.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_funding_read_keeps_the_value_before_it() {
+    let (store, _) = store_at("funding-flaky");
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let id = create(&a, on_funding("FLAKYUSDT", "crossing_up", 0.06), "me").await;
+    let k = ("FLAKYUSDT".to_string(), "1h".to_string());
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    // 0.055% read; the next close fails to read; the one after reads 0.07%.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 55.0)));
+    until("the first read", || a.lock().values.contains_key(&id)).await;
+    FLAKY_FAILS.store(true, Ordering::SeqCst);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    until("the failed read", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + 2 * HOUR))
+    })
+    .await;
+    FLAKY_FAILS.store(false, Ordering::SeqCst);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    // The crossing is against the last value read, a close late rather than never.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 70.0)));
+    until("the late fire", || a.lock().alerts[&id].fire_count == 1).await;
+}
+
+/// Server alerts on `symbol`'s 1h feed with 100 closes of 50, a funding alert on it,
+/// and the time of the last close.
+async fn funding_alert(
+    name: &str,
+    symbol: &str,
+    args: Value,
+) -> (Arc<ServerAlerts>, FeedKey, String, i64) {
+    let (store, _) = store_at(name);
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[50.0; 100]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let id = create(&a, args, "me").await;
+    let k = (symbol.to_string(), "1h".to_string());
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    (a, k, id, t)
+}
+
+/// A new definition starts a new baseline, as for a price alert: the value read before
+/// it is not compared with the first one after it. (A resume does too, by the same
+/// path; a pause also lets go of the feed, which this fake cannot read again.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redefined_funding_alert_starts_from_a_new_reading() {
+    let (a, k, id, t) = funding_alert(
+        "funding-redefine",
+        "BTCUSDT",
+        on_funding("BTCUSDT", "crossing_up", 0.06),
+    )
+    .await;
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 55.0)));
+    until("the first read", || a.lock().values.contains_key(&id)).await;
+    let args = json!({"alert_id": id, "level": 0.065});
+    call(&a, "update_server_alert", args, "me").await.unwrap();
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 70.0)));
+    until("the read after", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + 2 * HOUR))
+    })
+    .await;
+    assert_eq!(
+        a.lock().alerts[&id].fire_count,
+        0,
+        "a baseline, not a crossing"
+    );
+    // Each close's read runs off the lock: one sent before the last is back could be
+    // overtaken by the next and dropped.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 50.0)));
+    until("the read at 0.05", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + 3 * HOUR))
+    })
+    .await;
+    a.on_event(&k, FeedEvent::Bar(bar(t + 4 * HOUR, 70.0)));
+    until("a crossing after it", || {
+        a.lock().alerts[&id].fire_count == 1
+    })
+    .await;
+}
+
+/// A read still out when the alert is paused and resumed, or redefined, belongs to the
+/// alert as it was: it is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_from_before_an_update_is_dropped() {
+    let (a, k, id, t) = funding_alert(
+        "funding-stale",
+        "SLOWUSDT",
+        on_funding("SLOWUSDT", "greater", 0.06),
+    )
+    .await;
+    // A 400 ms read of 0.07% starts; the level moves to 0.08 before it is back.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 70.0)));
+    let args = json!({"alert_id": id, "level": 0.08});
+    call(&a, "update_server_alert", args, "me").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 0, "0.07 is not above 0.08");
+    assert!(
+        !a.lock().values.contains_key(&id),
+        "the old read was dropped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alert_stops_at_its_expiry_and_is_swept_like_a_spent_one() {
+    let (store, _) = store_at("expires");
+    store.save_oauth_client("me", &[]).unwrap();
+    store.mark_oauth_client_used("me").unwrap();
+    let a = plain(store);
+    let ahead = now_ms() + 3_600_000;
+    let mut args = spec("greater", "every", 100.0);
+    args["expires_at"] = json!(drawings::iso(ahead));
+    let id = create(&a, args, "me").await;
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["expires_at"], json!(ahead / 1000 * 1000));
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1, "fires before its end");
+
+    // Past its end: no fire, and the feed is let go before the sweep runs.
+    let past = now_ms() - 1;
+    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(past);
+    a.sync_feeds(&mut a.lock());
+    assert_eq!(a.lock().watches.len(), 0);
+    tick(&a, BASE + 60_000, 99.0);
+    tick(&a, BASE + 120_000, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1, "no fire after it");
+
+    a.sweep(&mut a.lock(), now_ms());
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["active"], false);
+    let stored: Vec<Value> = store
+        .server_alerts()
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_str(r).unwrap())
+        .collect();
+    assert_eq!(stored[0]["active"], false, "switched off in the store too");
+
+    // Resuming needs a later end, or none.
+    let args = json!({"alert_id": id, "active": true});
+    let err = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.contains("has expired"), "{err}");
+    // A new level or end on its own does not run it again.
+    let args = json!({"alert_id": id, "level": 120.0, "expires_at": ""});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(
+        (&view["active"], &view["level"]),
+        (&json!(false), &json!(120.0))
+    );
+    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(past);
+    let args = json!({"alert_id": id, "active": true, "expires_at": ""});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["active"], true);
+    assert!(view.get("expires_at").is_none());
+
+    // Kept as long as a spent alert, then deleted.
+    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(past);
+    a.sweep(&mut a.lock(), past + SPENT_TTL_MS - 60_000);
+    assert!(a.lock().alerts.contains_key(&id), "not yet");
+    a.sweep(&mut a.lock(), past + SPENT_TTL_MS + 60_000);
+    assert!(!a.lock().alerts.contains_key(&id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expiry_must_lie_ahead() {
+    let (store, _) = store_at("expires-bad");
+    let a = plain(store);
+    let mut args = spec("greater", "once", 100.0);
+    args["expires_at"] = json!("2020-01-01T00:00:00Z");
+    let err = call(&a, "create_server_alert", args.clone(), "me")
+        .await
+        .unwrap_err();
+    assert!(err.contains("has passed"), "{err}");
+    args["expires_at"] = json!("tomorrow");
+    let err = call(&a, "create_server_alert", args.clone(), "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("expires_at: "), "{err}");
+    assert!(a.lock().alerts.is_empty());
+    // An empty one is no end.
+    args["expires_at"] = json!("");
+    let id = create(&a, args, "me").await;
+    assert!(get(&a, "me", &id).await.get("expires_at").is_none());
+}
+
+/// Past its end but before the sweep, the alert is still marked active: taking its end
+/// off must not run it again without active: true.
+#[tokio::test(flavor = "multi_thread")]
+async fn clearing_the_end_of_an_expired_alert_does_not_resume_it() {
+    let (store, _) = store_at("expires-clear");
+    let a = plain(store);
+    let mut args = spec("greater", "every", 100.0);
+    args["expires_at"] = json!(now_ms() + 3_600_000);
+    let id = create(&a, args, "me").await;
+    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(now_ms() - 1);
+    assert!(a.lock().alerts[&id].active, "the sweep has not run");
+    let args = json!({"alert_id": id, "expires_at": ""});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["active"], false);
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+}
+
+/// An alert that last fired long ago is kept for the TTL after its expiry, not deleted
+/// by that old fire in the sweep that switches it off.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_fire_does_not_cut_the_time_kept_after_expiry() {
+    let (store, _) = store_at("expires-old-fire");
+    store.save_oauth_client("me", &[]).unwrap();
+    store.mark_oauth_client_used("me").unwrap();
+    let a = plain(store);
+    let mut args = spec("greater", "every", 100.0);
+    args["expires_at"] = json!(now_ms() + 3_600_000);
+    let id = create(&a, args, "me").await;
+    let now = now_ms();
+    {
+        let mut st = a.lock();
+        let r = st.alerts.get_mut(&id).unwrap();
+        r.last_triggered_at = Some(now - SPENT_TTL_MS - 86_400_000);
+        r.expires_at = Some(now - 1);
+    }
+    a.sweep(&mut a.lock(), now);
+    assert!(a.lock().alerts.contains_key(&id), "kept after its expiry");
+    assert!(!a.lock().alerts[&id].active);
+    a.sweep(&mut a.lock(), now + SPENT_TTL_MS + 60_000);
+    assert!(!a.lock().alerts.contains_key(&id));
+}
+
 // ---- Drawing alerts (ADR-0081) ----
 
 /// Alerts with setups beside them, and a long setup on BTCUSDT 1h whose drawings are a
@@ -5146,131 +5534,4 @@ async fn a_drawing_alert_refuses_what_does_not_fit() {
     .unwrap_err();
     assert_eq!(err, "No such setup");
     assert!(a.lock().alerts.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_alert_stops_at_its_expiry_and_is_swept_like_a_spent_one() {
-    let (store, _) = store_at("expires");
-    store.save_oauth_client("me", &[]).unwrap();
-    store.mark_oauth_client_used("me").unwrap();
-    let a = plain(store);
-    let ahead = now_ms() + 3_600_000;
-    let mut args = spec("greater", "every", 100.0);
-    args["expires_at"] = json!(drawings::iso(ahead));
-    let id = create(&a, args, "me").await;
-    let view = get(&a, "me", &id).await;
-    assert_eq!(view["expires_at"], json!(ahead / 1000 * 1000));
-    tick(&a, BASE, 101.0);
-    assert_eq!(a.lock().alerts[&id].fire_count, 1, "fires before its end");
-
-    // Past its end: no fire, and the feed is let go before the sweep runs.
-    let past = now_ms() - 1;
-    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(past);
-    a.sync_feeds(&mut a.lock());
-    assert_eq!(a.lock().watches.len(), 0);
-    tick(&a, BASE + 60_000, 99.0);
-    tick(&a, BASE + 120_000, 101.0);
-    assert_eq!(a.lock().alerts[&id].fire_count, 1, "no fire after it");
-
-    a.sweep(&mut a.lock(), now_ms());
-    let view = get(&a, "me", &id).await;
-    assert_eq!(view["active"], false);
-    let stored: Vec<Value> = store
-        .server_alerts()
-        .unwrap()
-        .iter()
-        .map(|r| serde_json::from_str(r).unwrap())
-        .collect();
-    assert_eq!(stored[0]["active"], false, "switched off in the store too");
-
-    // Resuming needs a later end, or none.
-    let args = json!({"alert_id": id, "active": true});
-    let err = call(&a, "update_server_alert", args, "me")
-        .await
-        .unwrap_err();
-    assert!(err.contains("has expired"), "{err}");
-    // A new level or end on its own does not run it again.
-    let args = json!({"alert_id": id, "level": 120.0, "expires_at": ""});
-    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
-    assert_eq!(
-        (&view["active"], &view["level"]),
-        (&json!(false), &json!(120.0))
-    );
-    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(past);
-    let args = json!({"alert_id": id, "active": true, "expires_at": ""});
-    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
-    assert_eq!(view["active"], true);
-    assert!(view.get("expires_at").is_none());
-
-    // Kept as long as a spent alert, then deleted.
-    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(past);
-    a.sweep(&mut a.lock(), past + SPENT_TTL_MS - 60_000);
-    assert!(a.lock().alerts.contains_key(&id), "not yet");
-    a.sweep(&mut a.lock(), past + SPENT_TTL_MS + 60_000);
-    assert!(!a.lock().alerts.contains_key(&id));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_expiry_must_lie_ahead() {
-    let (store, _) = store_at("expires-bad");
-    let a = plain(store);
-    let mut args = spec("greater", "once", 100.0);
-    args["expires_at"] = json!("2020-01-01T00:00:00Z");
-    let err = call(&a, "create_server_alert", args.clone(), "me")
-        .await
-        .unwrap_err();
-    assert!(err.contains("has passed"), "{err}");
-    args["expires_at"] = json!("tomorrow");
-    let err = call(&a, "create_server_alert", args.clone(), "me")
-        .await
-        .unwrap_err();
-    assert!(err.starts_with("expires_at: "), "{err}");
-    assert!(a.lock().alerts.is_empty());
-    // An empty one is no end.
-    args["expires_at"] = json!("");
-    let id = create(&a, args, "me").await;
-    assert!(get(&a, "me", &id).await.get("expires_at").is_none());
-}
-
-/// Past its end but before the sweep, the alert is still marked active: taking its end
-/// off must not run it again without active: true.
-#[tokio::test(flavor = "multi_thread")]
-async fn clearing_the_end_of_an_expired_alert_does_not_resume_it() {
-    let (store, _) = store_at("expires-clear");
-    let a = plain(store);
-    let mut args = spec("greater", "every", 100.0);
-    args["expires_at"] = json!(now_ms() + 3_600_000);
-    let id = create(&a, args, "me").await;
-    a.lock().alerts.get_mut(&id).unwrap().expires_at = Some(now_ms() - 1);
-    assert!(a.lock().alerts[&id].active, "the sweep has not run");
-    let args = json!({"alert_id": id, "expires_at": ""});
-    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
-    assert_eq!(view["active"], false);
-    tick(&a, BASE, 101.0);
-    assert_eq!(a.lock().alerts[&id].fire_count, 0);
-}
-
-/// An alert that last fired long ago is kept for the TTL after its expiry, not deleted
-/// by that old fire in the sweep that switches it off.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_old_fire_does_not_cut_the_time_kept_after_expiry() {
-    let (store, _) = store_at("expires-old-fire");
-    store.save_oauth_client("me", &[]).unwrap();
-    store.mark_oauth_client_used("me").unwrap();
-    let a = plain(store);
-    let mut args = spec("greater", "every", 100.0);
-    args["expires_at"] = json!(now_ms() + 3_600_000);
-    let id = create(&a, args, "me").await;
-    let now = now_ms();
-    {
-        let mut st = a.lock();
-        let r = st.alerts.get_mut(&id).unwrap();
-        r.last_triggered_at = Some(now - SPENT_TTL_MS - 86_400_000);
-        r.expires_at = Some(now - 1);
-    }
-    a.sweep(&mut a.lock(), now);
-    assert!(a.lock().alerts.contains_key(&id), "kept after its expiry");
-    assert!(!a.lock().alerts[&id].active);
-    a.sweep(&mut a.lock(), now + SPENT_TTL_MS + 60_000);
-    assert!(!a.lock().alerts.contains_key(&id));
 }

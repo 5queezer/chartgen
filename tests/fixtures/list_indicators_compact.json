@@ -1,0 +1,566 @@
+{
+  "indicators": [
+    {
+      "name": "ema_stack"
+    },
+    {
+      "name": "bbands",
+      "params": {
+        "period": 20,
+        "std_dev": 2.0
+      }
+    },
+    {
+      "name": "keltner",
+      "params": {
+        "atr_length": 10,
+        "multiplier": 2.0,
+        "period": 20
+      }
+    },
+    {
+      "name": "donchian",
+      "params": {
+        "period": 20
+      }
+    },
+    {
+      "name": "vwap",
+      "params": {
+        "anchor": "session"
+      }
+    },
+    {
+      "name": "vwap_bands",
+      "params": {
+        "anchor": "session",
+        "std_dev": 1.0
+      }
+    },
+    {
+      "name": "supertrend",
+      "params": {
+        "multiplier": 3.0,
+        "period": 10
+      }
+    },
+    {
+      "name": "sar",
+      "params": {
+        "af_max": 0.2,
+        "af_start": 0.02,
+        "af_step": 0.02
+      }
+    },
+    {
+      "name": "ichimoku",
+      "params": {
+        "displacement": 26,
+        "kijun": 26,
+        "senkou_b": 52,
+        "tenkan": 9
+      }
+    },
+    {
+      "name": "heikin_ashi"
+    },
+    {
+      "name": "pivot"
+    },
+    {
+      "name": "volume_profile",
+      "params": {
+        "bins": 24,
+        "color_down": "#ef5350",
+        "color_up": "#26a69a",
+        "opacity": 0.35,
+        "range_bars": null,
+        "side": "left",
+        "split_up_down": false
+      }
+    },
+    {
+      "name": "fixed_range_vp",
+      "params": {
+        "bins": 24,
+        "from": "",
+        "opacity": 0.35,
+        "side": "left",
+        "to": ""
+      }
+    },
+    {
+      "name": "anchored_vp",
+      "params": {
+        "anchor": "",
+        "bins": 24,
+        "opacity": 0.35,
+        "side": "left"
+      }
+    },
+    {
+      "name": "session_vp",
+      "params": {
+        "bars_per_session": null,
+        "bins": 24,
+        "session": "daily",
+        "show_value_area": true
+      }
+    },
+    {
+      "name": "hvn_lvn",
+      "params": {
+        "bins": 48,
+        "min_prominence": 0.1,
+        "neighborhood": 2,
+        "range_bars": null,
+        "show_hvn": true,
+        "show_lvn": true,
+        "top_n": null
+      }
+    },
+    {
+      "name": "naked_poc",
+      "params": {
+        "bars_per_session": null,
+        "bins": 24,
+        "include_current": true,
+        "max_sessions": 20,
+        "session": "daily"
+      }
+    },
+    {
+      "name": "tpo",
+      "params": {
+        "bins": 32,
+        "opacity": 0.35,
+        "range_bars": null,
+        "side": "right"
+      }
+    },
+    {
+      "name": "cipher_b",
+      "params": {
+        "dot_mode": "strict",
+        "show_divergences": true,
+        "wt_average_length": 12,
+        "wt_channel_length": 9,
+        "wt_overbought": 53,
+        "wt_oversold": -53
+      }
+    },
+    {
+      "name": "macd",
+      "params": {
+        "fast": 12,
+        "signal": 9,
+        "slow": 26
+      }
+    },
+    {
+      "name": "rsi",
+      "params": {
+        "length": 14
+      }
+    },
+    {
+      "name": "wavetrend",
+      "params": {
+        "avg_len": 12,
+        "ch_len": 9
+      }
+    },
+    {
+      "name": "stoch",
+      "params": {
+        "d_smooth": 3,
+        "k_smooth": 1,
+        "period": 14
+      }
+    },
+    {
+      "name": "atr",
+      "params": {
+        "period": 14
+      }
+    },
+    {
+      "name": "obv"
+    },
+    {
+      "name": "cci",
+      "params": {
+        "period": 20
+      }
+    },
+    {
+      "name": "roc",
+      "params": {
+        "period": 9
+      }
+    },
+    {
+      "name": "mfi",
+      "params": {
+        "period": 14
+      }
+    },
+    {
+      "name": "williams_r",
+      "params": {
+        "period": 14
+      }
+    },
+    {
+      "name": "cmf",
+      "params": {
+        "period": 20
+      }
+    },
+    {
+      "name": "adx",
+      "params": {
+        "period": 14
+      }
+    },
+    {
+      "name": "ad"
+    },
+    {
+      "name": "histvol",
+      "params": {
+        "period": 10
+      }
+    },
+    {
+      "name": "kalman_volume",
+      "params": {
+        "k": 0.06,
+        "sig_length": 10,
+        "vzo_length": 70
+      }
+    },
+    {
+      "name": "rsi_mfi_stoch",
+      "params": {
+        "mfi_length": 14,
+        "overbought": 70,
+        "oversold": 30,
+        "rsi_length": 14,
+        "show_entry_dots": true,
+        "show_trend_bars": true,
+        "stoch_d": 3,
+        "stoch_k": 14,
+        "stoch_smooth": 3
+      }
+    },
+    {
+      "name": "ma",
+      "params": {
+        "length": 9,
+        "offset": 0,
+        "source": "close",
+        "type": "sma"
+      }
+    },
+    {
+      "name": "vwma",
+      "params": {
+        "length": 9,
+        "offset": 0,
+        "source": "close"
+      }
+    },
+    {
+      "name": "hma",
+      "params": {
+        "length": 9,
+        "offset": 0,
+        "source": "close"
+      }
+    },
+    {
+      "name": "ma_ribbon",
+      "params": {
+        "length1": 20,
+        "length2": 50,
+        "length3": 100,
+        "length4": 200,
+        "source": "close",
+        "type": "sma"
+      }
+    },
+    {
+      "name": "envelopes",
+      "params": {
+        "length": 20,
+        "percent": 10.0,
+        "source": "close",
+        "type": "sma"
+      }
+    },
+    {
+      "name": "linreg_channel",
+      "params": {
+        "length": 100,
+        "lower_dev": 2.0,
+        "source": "close",
+        "upper_dev": 2.0
+      }
+    },
+    {
+      "name": "chande_kroll_stop",
+      "params": {
+        "atr_length": 10,
+        "atr_mult": 1.0,
+        "stop_length": 9
+      }
+    },
+    {
+      "name": "zigzag",
+      "params": {
+        "depth": 10,
+        "deviation": 5.0
+      }
+    },
+    {
+      "name": "candlestick_patterns",
+      "params": {
+        "pattern": "all",
+        "trend": "sma50"
+      }
+    },
+    {
+      "name": "chart_patterns",
+      "params": {
+        "depth": 5,
+        "deviation": 3.0,
+        "lookback": 600,
+        "pattern": "all",
+        "show_failed": true,
+        "tolerance": 15.0
+      }
+    },
+    {
+      "name": "auto_fib",
+      "params": {
+        "depth": 10,
+        "deviation": 3.0,
+        "level1": 0.0,
+        "level2": 0.236,
+        "level3": 0.382,
+        "level4": 0.5,
+        "level5": 0.618,
+        "level6": 0.786,
+        "level7": 1.0,
+        "level8": null,
+        "reverse": false
+      }
+    },
+    {
+      "name": "volume",
+      "params": {
+        "ma_length": 20
+      }
+    },
+    {
+      "name": "aroon",
+      "params": {
+        "length": 14
+      }
+    },
+    {
+      "name": "vortex",
+      "params": {
+        "length": 14
+      }
+    },
+    {
+      "name": "stoch_rsi",
+      "params": {
+        "rsi_length": 14,
+        "smooth_d": 3,
+        "smooth_k": 3,
+        "stoch_length": 14
+      }
+    },
+    {
+      "name": "awesome_oscillator",
+      "params": {
+        "fast": 5,
+        "slow": 34
+      }
+    },
+    {
+      "name": "momentum",
+      "params": {
+        "length": 10
+      }
+    },
+    {
+      "name": "trix",
+      "params": {
+        "length": 18
+      }
+    },
+    {
+      "name": "ultimate_oscillator",
+      "params": {
+        "fast": 7,
+        "middle": 14,
+        "slow": 28
+      }
+    },
+    {
+      "name": "ppo",
+      "params": {
+        "long": 21,
+        "short": 10,
+        "type": "ema"
+      }
+    },
+    {
+      "name": "cmo",
+      "params": {
+        "length": 9
+      }
+    },
+    {
+      "name": "dpo",
+      "params": {
+        "length": 21
+      }
+    },
+    {
+      "name": "elder_force_index",
+      "params": {
+        "length": 13
+      }
+    },
+    {
+      "name": "tsi",
+      "params": {
+        "long": 25,
+        "short": 13,
+        "signal": 13
+      }
+    },
+    {
+      "name": "kst",
+      "params": {
+        "roc1": 10,
+        "roc2": 15,
+        "roc3": 20,
+        "roc4": 30,
+        "signal": 9,
+        "sma1": 10,
+        "sma2": 10,
+        "sma3": 10,
+        "sma4": 15
+      }
+    },
+    {
+      "name": "coppock",
+      "params": {
+        "long_roc": 14,
+        "short_roc": 11,
+        "wma_length": 10
+      }
+    },
+    {
+      "name": "mass_index",
+      "params": {
+        "length": 10
+      }
+    },
+    {
+      "name": "bb_percent_b",
+      "params": {
+        "length": 20,
+        "mult": 2.0
+      }
+    },
+    {
+      "name": "bb_width",
+      "params": {
+        "highest_expansion": 125,
+        "length": 20,
+        "lowest_contraction": 125,
+        "mult": 2.0
+      }
+    },
+    {
+      "name": "choppiness",
+      "params": {
+        "length": 14
+      }
+    },
+    {
+      "name": "fisher_transform",
+      "params": {
+        "length": 9
+      }
+    },
+    {
+      "name": "ease_of_movement",
+      "params": {
+        "divisor": 10000,
+        "length": 14
+      }
+    },
+    {
+      "name": "volume_oscillator",
+      "params": {
+        "long": 10,
+        "short": 5
+      }
+    },
+    {
+      "name": "balance_of_power"
+    },
+    {
+      "name": "rvi",
+      "params": {
+        "length": 10
+      }
+    },
+    {
+      "name": "smi_ergodic",
+      "params": {
+        "long": 20,
+        "short": 5,
+        "signal": 5
+      }
+    },
+    {
+      "name": "connors_rsi",
+      "params": {
+        "roc_length": 100,
+        "rsi_length": 3,
+        "updown_length": 2
+      }
+    },
+    {
+      "name": "cvd"
+    },
+    {
+      "name": "funding"
+    },
+    {
+      "name": "oi"
+    },
+    {
+      "name": "long_short"
+    },
+    {
+      "name": "top_long_short"
+    },
+    {
+      "name": "taker_ratio"
+    },
+    {
+      "name": "fear_greed"
+    }
+  ],
+  "total": 79
+}
