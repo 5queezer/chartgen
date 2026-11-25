@@ -1556,14 +1556,10 @@ fn missed_note(bars: usize, symbol: &str) -> String {
 /// Could this row have been written here? A row that could not is never scored.
 fn sound(record: &Record) -> bool {
     let levels = &record.levels;
-    let prices = [levels.entry.low, levels.entry.high, levels.invalidation];
     !record.id.is_empty()
         && !record.owner.is_empty()
         && record.revisions > 0
-        && prices
-            .iter()
-            .chain(&levels.targets)
-            .all(|p| p.is_finite() && *p > 0.0)
+        && levels.positive()
         && levels.entry.low <= levels.entry.high
         && !levels.targets.is_empty()
         && (record.fill.is_some() || record.exit.is_none())

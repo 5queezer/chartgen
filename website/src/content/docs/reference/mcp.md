@@ -1982,8 +1982,10 @@ setups; `can_create` in the list says so.
 
 A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `atr` or `floor`:
 which rule set its levels), on a skip only `bracket_anchor` (`fill`: its levels moved to its fill
-when it filled, so a win is about 2 R before costs; `signal_close`: a skip made before that rule,
-whose levels stayed at the close it was made at), `status` (`watching`, `triggered`, `won`,
+when it filled, so a win is about 2 R before costs, more on a stock whose open is past the target,
+which exits at that open; `signal_close`: a skip made before that rule, or one filled so near 0 that
+the moved bracket would have a price at or below 0, whose levels stayed at the close it was made
+at), `status` (`watching`, `triggered`, `won`,
 `invalidated`, `expired`, `cancelled`; **`won` means the first target was reached**, and a
 target nearer than the costs leaves a loss all the same, which `net` says), `created_at`, `costs`, `fill` and `exit` (each
 `{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off

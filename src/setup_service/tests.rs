@@ -2957,6 +2957,62 @@ async fn the_record_groups_skips_by_where_their_bracket_was_measured_from() {
     assert_eq!(counts, [json!(1), json!(1), json!(1)]);
 }
 
+/// A skip whose bracket moved to its fill would cross 0 (a long's stop within one ATR of
+/// 0, a short's target within two) keeps the close's bracket, so its row is read back
+/// after a restart like any other (ADR-0087).
+#[tokio::test]
+async fn a_skip_filled_near_0_is_still_there_after_a_restart() {
+    let (store, dir) = store_at("skip-near-0");
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let skip = |symbol: &str, direction: &str| {
+        call(
+            &s,
+            "create_setup",
+            json!({ "symbol": symbol, "interval": "1h", "direction": direction,
+                "decision": "skip", "thesis": "example thesis" }),
+            "owner",
+        )
+        .unwrap()
+    };
+    let long = skip("BTCUSDT", "long");
+    let short = skip("ETHUSDT", "short");
+    let risk = |made: &Value| {
+        (made["invalidation"].as_f64().unwrap() - made["entry"]["low"].as_f64().unwrap()).abs()
+    };
+    // At half a risk a long's stop from the fill is below 0; at 1.5 risks a short's
+    // target is.
+    let open = risk(&long) * 0.5;
+    s.on_bar(&key(), bar(first_bar(&long), open, open, open, open));
+    let open = risk(&short) * 1.5;
+    let eth = ("ETHUSDT".to_string(), "1m".to_string());
+    s.on_bar(&eth, bar(first_bar(&short), open, open, open, open));
+    let before: Vec<Value> = [&long, &short]
+        .iter()
+        .map(|m| call(&s, "get_setup", json!({ "id": m["id"] }), "owner").unwrap())
+        .collect();
+    drop(s);
+
+    let s = live_on(
+        reopen(&dir.db()),
+        hub(),
+        Access::parse(None),
+        Limits::default(),
+        None,
+    );
+    for (made, before) in [&long, &short].iter().zip(&before) {
+        let after = call(&s, "get_setup", json!({ "id": made["id"] }), "owner")
+            .expect("read back after the restart");
+        assert_eq!(&after, before);
+        assert_eq!(after["bracket_anchor"], "signal_close");
+        assert!(after["log"].as_array().unwrap().iter().any(
+            |e| e["kind"] == "voided" && e["changes"]["bracket_anchor"]["to"] == "signal_close"
+        ));
+    }
+    // The long opened past the close's stop; the short is in at its open.
+    assert_eq!(before[0]["status"], "invalidated");
+    assert_eq!(before[1]["status"], "triggered");
+}
+
 fn skip_refused(s: &Setups, reason: &str) -> bool {
     let args = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
         "decision": "skip", "thesis": "example thesis", "skip_reason": reason });

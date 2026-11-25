@@ -151,6 +151,17 @@ pub struct Levels {
     pub expires_at: i64,
 }
 
+impl Levels {
+    /// Whether every price is a finite number above 0: a stored setup with one that is
+    /// not cannot be read back.
+    pub fn positive(&self) -> bool {
+        [self.entry.low, self.entry.high, self.invalidation]
+            .iter()
+            .chain(&self.targets)
+            .all(|p| p.is_finite() && *p > 0.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Costs {
     pub fee_bps_per_side: f64,
@@ -1048,22 +1059,21 @@ fn bracket(
         by_atr if by_atr >= floor => (by_atr, Bracket::Atr),
         _ => (floor, Bracket::Floor),
     };
-    let invalidation = last.close - sign * risk;
-    if invalidation <= 0.0 {
-        return Err(Problem::new(
-            "decision",
-            "the default bracket of this skip would have a price at or below 0",
-        ));
-    }
     let levels = Levels {
         entry: Zone {
             low: last.close,
             high: last.close,
         },
-        invalidation,
+        invalidation: last.close - sign * risk,
         targets: vec![last.close + sign * risk * SKIP_TARGET_ATR / SKIP_STOP_ATR],
         expires_at,
     };
+    if !levels.positive() {
+        return Err(Problem::new(
+            "decision",
+            "the default bracket of this skip would have a price at or below 0",
+        ));
+    }
     Ok((levels, rule))
 }
 
@@ -1332,6 +1342,10 @@ impl Record {
             ("probability", json!(record.probability)),
             ("playbook_version", json!(record.playbook_version)),
             ("skip_reason", json!(record.skip_reason)),
+            // Not stated by the agent, but kept with them for the same reason: a row
+            // rewritten by a build from before ADR-0087 loses it, and `restate` reads it
+            // back from here.
+            ("bracket_anchor", json!(record.bracket_anchor)),
         ] {
             if !value.is_null() {
                 stated.insert(field.to_string(), json!({ "to": value }));
@@ -1380,6 +1394,19 @@ impl Record {
         self.skip_reason = stated("skip_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // A build from before ADR-0087 rewrites the row without `bracket_anchor`, and
+        // scores a skip still waiting by the close's bracket (ADR-0087, rollback). The
+        // first entry says which rule the skip was made under; a fill under the fill
+        // rule puts the entry at the fill price, so a fill elsewhere was the old rule's.
+        if self.bracket_anchor.is_none() {
+            self.bracket_anchor =
+                stated("bracket_anchor").and_then(|v| serde_json::from_value(v.clone()).ok());
+        }
+        if self.bracket_anchor == Some(BracketAnchor::Fill)
+            && self.fill.is_some_and(|f| f.price != self.levels.entry.low)
+        {
+            self.bracket_anchor = Some(BracketAnchor::SignalClose);
+        }
     }
 
     /// The levels as they will be once every pending change has taken effect.
@@ -2066,8 +2093,28 @@ impl Record {
                 targets: self.levels.targets.iter().map(|t| t + shift).collect(),
                 expires_at: self.levels.expires_at,
             };
-            level_changes(&mut anchored, &self.levels, &to);
-            self.levels = to;
+            if to.positive() {
+                level_changes(&mut anchored, &self.levels, &to);
+                self.levels = to;
+            } else {
+                // Within one ATR of 0 for a long, or two for a short, there is no such
+                // bracket: the skip keeps the one from the close, and says so.
+                let mut changes = Map::new();
+                changed(
+                    &mut changes,
+                    "bracket_anchor",
+                    json!(BracketAnchor::Fill),
+                    json!(BracketAnchor::SignalClose),
+                );
+                self.bracket_anchor = Some(BracketAnchor::SignalClose);
+                out.push(self.log(
+                    bar.time,
+                    By::Server,
+                    Kind::Voided,
+                    Some("the bracket moved to the fill would have a price at or below 0; it stays at the close it was made at".into()),
+                    changes,
+                ));
+            }
         }
 
         let sign = self.direction.sign();

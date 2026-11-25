@@ -349,6 +349,11 @@ fn hourly(n: usize) -> Vec<Bar> {
 }
 
 fn skip(direction: &str) -> Record {
+    skip_made(direction).0
+}
+
+/// A skip and the first entry of its log.
+fn skip_made(direction: &str) -> (Record, Revision) {
     let args = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": direction,
         "decision": "skip", "thesis": "example reason" });
     let mut problems = Vec::new();
@@ -364,7 +369,6 @@ fn skip(direction: &str) -> Record {
         vec![],
         T0,
     )
-    .0
 }
 
 #[test]
@@ -487,6 +491,78 @@ fn a_skip_stored_before_the_fill_rule_keeps_its_bracket_at_the_close() {
         .unwrap()
         .get("bracket_anchor")
         .is_none());
+}
+
+/// A row a build from before ADR-0087 wrote again has no `bracket_anchor`. The log's
+/// first entry has it, and the fill says which rule scored the skip: a fill under the
+/// fill rule is at the entry it moved the levels to, one under the old rule is not.
+#[test]
+fn a_skip_rewritten_by_an_older_build_gets_its_anchor_back_from_its_log() {
+    let rewritten = |r: &Record| {
+        let mut row = serde_json::to_value(r).unwrap();
+        row.as_object_mut().unwrap().remove("bracket_anchor");
+        serde_json::from_value::<Record>(row).unwrap()
+    };
+
+    // Filled under the fill rule, then rewritten by the older build while open.
+    let (mut filled, created) = skip_made("long");
+    assert_eq!(created.changes["bracket_anchor"]["to"], "fill");
+    walk(&mut filled, &[bar(0, 103.9, 103.95, 103.85, 103.9)]);
+    let mut back = rewritten(&filled);
+    assert_eq!(
+        back.view()["bracket_anchor"],
+        "signal_close",
+        "before restate"
+    );
+    back.restate(&created);
+    assert_eq!(back.bracket_anchor, Some(BracketAnchor::Fill));
+
+    // Filled at the close it was made at: both rules give the same levels.
+    let (mut level, created) = skip_made("long");
+    walk(&mut level, &[bar(0, 100.0, 100.1, 99.9, 100.0)]);
+    let mut back = rewritten(&level);
+    back.restate(&created);
+    assert_eq!(back.bracket_anchor, Some(BracketAnchor::Fill));
+
+    // Still waiting when the older build rewrote it, which then filled it by the old
+    // rule: its levels stayed at the close.
+    let (waiting, created) = skip_made("long");
+    let mut old = rewritten(&waiting);
+    walk(&mut old, &[bar(0, 103.9, 103.95, 103.85, 103.9)]);
+    assert_eq!(old.levels.invalidation, 98.0);
+    old.restate(&created);
+    assert_eq!(old.bracket_anchor, Some(BracketAnchor::SignalClose));
+
+    // Still waiting at the re-upgrade: scored by the fill rule from here.
+    let (waiting, created) = skip_made("short");
+    let mut back = rewritten(&waiting);
+    back.restate(&created);
+    assert_eq!(back.bracket_anchor, Some(BracketAnchor::Fill));
+}
+
+/// A long filled within one ATR of 0, or a short within two, has no bracket from the
+/// fill with every price above 0. It keeps the close's, is marked signal_close, and the
+/// log says why. The scorer would never reach a target at or below 0, and a stored
+/// record with one could not be read back.
+#[test]
+fn a_skip_whose_bracket_from_the_fill_would_cross_0_keeps_the_closes() {
+    // Long: the stop from a fill at 1.5 would be -0.5. The open is past the close's
+    // stop, so it ends invalidated before a fill, as a skip did before ADR-0087.
+    let mut long = skip("long");
+    let revisions = long.apply_bar(&bar(0, 1.5, 1.6, 1.4, 1.5));
+    assert_eq!(long.bracket_anchor, Some(BracketAnchor::SignalClose));
+    assert_eq!(revisions[0].kind, Kind::Voided);
+    assert_eq!(revisions[0].changes["bracket_anchor"]["to"], "signal_close");
+    assert_eq!(long.status, Status::Invalidated);
+    assert!(long.levels.positive());
+
+    // Short: the target from a fill at 3 would be -1.
+    let mut short = skip("short");
+    walk(&mut short, &[bar(0, 3.0, 3.1, 2.9, 3.0)]);
+    assert_eq!(short.bracket_anchor, Some(BracketAnchor::SignalClose));
+    assert_eq!(short.status, Status::Triggered);
+    assert_eq!(short.levels.targets, [96.0]);
+    assert!(short.levels.positive());
 }
 
 #[test]

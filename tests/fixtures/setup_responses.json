@@ -203,6 +203,9 @@
         "at": 1767261600000,
         "by": "agent",
         "changes": {
+          "bracket_anchor": {
+            "to": "fill"
+          },
           "features": {
             "to": {
               "ctx_fear_greed": "unknown",

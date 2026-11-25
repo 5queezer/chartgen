@@ -1062,8 +1062,8 @@ export const SetupSchema = SetupLevelsSchema.extend({
   // ATR, or at the least risk a setup may have where the ATR was less.
   bracket: z.enum(["agent", "atr", "floor"]),
   // A skip only (ADR-0087): fill when its levels moved to its fill, signal_close on a
-  // skip made before that rule, whose levels stayed at the close it was made at.
-  // Absent on a take.
+  // skip made before that rule, or filled too near 0 for it, whose levels stayed at the
+  // close it was made at. Absent on a take.
   bracket_anchor: z.enum(["fill", "signal_close"]).optional(),
   status: SetupStatusSchema,
   created_at: z.number(),
