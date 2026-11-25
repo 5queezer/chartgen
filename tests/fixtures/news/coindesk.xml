@@ -38,6 +38,11 @@
       <pubDate>Mon, 23 Nov 2026 15:29:01 +0000</pubDate>
     </item>
     <item>
+      <title><![CDATA[An item whose link is not http(s) is left out: Bitcoin]]></title>
+      <link>javascript:alert(1)</link>
+      <pubDate>Mon, 23 Nov 2026 12:00:00 +0000</pubDate>
+    </item>
+    <item>
       <title><![CDATA[An item without a date is left out: Bitcoin]]></title>
       <link>https://www.coindesk.com/markets/2026/11/23/no-date-example</link>
     </item>

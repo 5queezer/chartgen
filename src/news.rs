@@ -1,9 +1,9 @@
 //! `get_news` (ADR-0086): recent headlines about one crypto symbol, from the public RSS feeds
 //! of a few crypto news outlets, so an agent client does not spend a web search on them.
 //!
-//! No key and no article text: a headline's title, outlet, time and link. Each feed is read
-//! at most once in ten minutes and held; a feed that cannot be read is named in the answer
-//! and never fails the call. A headline is about the symbol when its title or one of the
+//! No key and no article text: a headline's title, outlet, time and link. A feed's last read
+//! is held and read again when asked for after ten minutes; a feed that cannot be read is
+//! named in the answer and never fails the call. A headline is about the symbol when its title or one of the
 //! feed's categories for it names the coin's ticker or name, as whole words: a heuristic,
 //! which can miss a story or take one that only mentions the coin.
 
@@ -37,7 +37,8 @@ const MAX_HOURS: u64 = 168;
 const MAX_LIMIT: u64 = 50;
 /// The quote assets a symbol's coin is read off: BTCUSDT is BTC.
 const QUOTES: [&str; 6] = ["FDUSD", "USDT", "USDC", "BUSD", "-USD", "USD"];
-/// Names a headline may call a coin by, besides its ticker. Matched in any case.
+/// Names a headline may call a coin by, besides its ticker. Matched in any case, except
+/// those in `ORDINARY`.
 const NAMES: &[(&str, &[&str])] = &[
     ("BTC", &["Bitcoin"]),
     ("ETH", &["Ethereum", "Ether"]),
@@ -73,6 +74,18 @@ const NAMES: &[(&str, &[&str])] = &[
     ("WLD", &["Worldcoin"]),
     ("INJ", &["Injective"]),
     ("NEAR", &["NEAR Protocol"]),
+];
+
+/// Names that are also ordinary words ("crypto optimism", "a ripple effect"): matched only
+/// as written, capitalised.
+const ORDINARY: [&str; 7] = [
+    "Ripple",
+    "Avalanche",
+    "Optimism",
+    "Polygon",
+    "Cosmos",
+    "Stellar",
+    "Sui",
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -152,7 +165,7 @@ fn read(feed: &Feed) -> Fetched {
             return read.clone();
         }
     }
-    let read = download(&feed.url).and_then(|xml| parse(&xml).map(Arc::new));
+    let read = download(&feed.url).and_then(|xml| parse(&xml, &feed.url).map(Arc::new));
     *held = Some((Instant::now(), read.clone()));
     read
 }
@@ -208,9 +221,13 @@ enum Field {
     Category,
 }
 
-/// The items of an RSS 2.0 or Atom feed that have a title, a link and a time they were
-/// published. Only an item's own children are read, so `media:title` and the like are not.
-fn parse(xml: &str) -> Result<Vec<Item>, String> {
+/// The items of an RSS 2.0 or Atom feed that have a title, an http(s) link and a time they
+/// were published (an Atom entry without `published`: when it was updated). Only an item's
+/// own children are read, so `media:title` and the like are not. A relative link is read
+/// against the feed's URL (`xml:base` is not read). Atom's elements are read unprefixed, as
+/// feeds write them: an Atom feed whose elements carry a prefix (`atom:entry`) has no items.
+fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
+    let base = url::Url::parse(feed_url).map_err(|e| format!("bad feed URL: {e}"))?;
     let mut reader = Reader::from_str(xml);
     reader.config_mut().allow_dangling_amp = true;
     let mut items = Vec::new();
@@ -238,7 +255,7 @@ fn parse(xml: &str) -> Result<Vec<Item>, String> {
                             "category" => Some(Field::Category),
                             _ => None,
                         };
-                        atom_attributes(it, &e);
+                        atom_attributes(it, &e, &base);
                     }
                 } else if matches!(name.as_ref(), "item" | "entry") {
                     item = Some(Item::default());
@@ -248,7 +265,7 @@ fn parse(xml: &str) -> Result<Vec<Item>, String> {
             Event::Empty(e) => {
                 if let Some(it) = item.as_mut() {
                     if depth == 0 {
-                        atom_attributes(it, &e);
+                        atom_attributes(it, &e, &base);
                     }
                 }
             }
@@ -283,8 +300,8 @@ fn parse(xml: &str) -> Result<Vec<Item>, String> {
                     let value = text.split_whitespace().collect::<Vec<_>>().join(" ");
                     match field.take() {
                         Some(Field::Title) => it.title = value,
-                        Some(Field::Link) if it.url.is_empty() && !value.is_empty() => {
-                            it.url = clean_url(&value)
+                        Some(Field::Link) if it.url.is_empty() => {
+                            it.url = clean_url(&value, &base).unwrap_or_default()
                         }
                         Some(Field::Date) => {
                             if let Some(t) = time_of(&value) {
@@ -310,7 +327,7 @@ fn parse(xml: &str) -> Result<Vec<Item>, String> {
 }
 
 /// An Atom entry's link (`<link href>`, the alternate one) and category (`<category term>`).
-fn atom_attributes(item: &mut Item, e: &quick_xml::events::BytesStart) {
+fn atom_attributes(item: &mut Item, e: &quick_xml::events::BytesStart, base: &url::Url) {
     let attr = |key: &str| {
         e.try_get_attribute(key)
             .ok()
@@ -322,7 +339,7 @@ fn atom_attributes(item: &mut Item, e: &quick_xml::events::BytesStart) {
         "link" => {
             let alternate = attr("rel").is_none_or(|r| r == "alternate");
             if let Some(href) = attr("href").filter(|_| alternate && item.url.is_empty()) {
-                item.url = clean_url(&href);
+                item.url = clean_url(&href, base).unwrap_or_default();
             }
         }
         "category" => {
@@ -342,11 +359,13 @@ fn time_of(text: &str) -> Option<i64> {
         .map(|t| t.timestamp())
 }
 
-/// A link without its `utm_` tracking parameters.
-fn clean_url(link: &str) -> String {
-    let Ok(mut url) = url::Url::parse(link) else {
-        return link.to_string();
-    };
+/// A link, read against `base` if relative, without its `utm_` tracking parameters. None
+/// unless it is http(s).
+fn clean_url(link: &str, base: &url::Url) -> Option<String> {
+    let mut url = base
+        .join(link)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))?;
     let kept: Vec<(String, String)> = url
         .query_pairs()
         .filter(|(k, _)| !k.starts_with("utm_"))
@@ -357,11 +376,12 @@ fn clean_url(link: &str) -> String {
     } else {
         url.query_pairs_mut().clear().extend_pairs(kept);
     }
-    url.to_string()
+    Some(url.to_string())
 }
 
 /// The words a headline about `symbol` is found by: its coin's ticker and the names in
-/// `NAMES`. A ticker of under 3 letters that has a name (OP) is left to its name.
+/// `NAMES`. A ticker of under 3 letters that has a name (OP) is left to its name; one without
+/// (AI) is kept, and `about` matches it only as `$AI`.
 fn terms_of(symbol: &str) -> Vec<String> {
     let mut coin = symbol;
     for quote in QUOTES {
@@ -389,13 +409,13 @@ fn terms_of(symbol: &str) -> Vec<String> {
     terms
 }
 
-/// Whether `text` holds `word` as a whole word: no letter or digit on either side. A
-/// ticker (a word in capitals) in capitals only, so LINK is not "link"; a name in any case.
-fn has_word(text: &str, word: &str) -> bool {
-    let (text, word) = if word.chars().any(char::is_lowercase) {
-        (text.to_lowercase(), word.to_lowercase())
-    } else {
+/// Whether `text` holds `word` as a whole word: no letter or digit on either side. `exact`:
+/// in the same case, else in any case.
+fn has_word(text: &str, word: &str, exact: bool) -> bool {
+    let (text, word) = if exact {
         (text.to_string(), word.to_string())
+    } else {
+        (text.to_lowercase(), word.to_lowercase())
     };
     text.match_indices(&word).any(|(at, _)| {
         let before = text[..at].chars().next_back();
@@ -404,10 +424,21 @@ fn has_word(text: &str, word: &str) -> bool {
     })
 }
 
+/// Whether a headline is about the coin: its title or a category names a term. A ticker (a
+/// term in capitals) in capitals only, so LINK is not "link"; one of under 3 letters (AI, S)
+/// only as `$AI` in the title, since "AI" and "U.S." are everyday words, and outlets file
+/// stories about artificial intelligence under an "AI" category. A name in any case, except an ordinary word, which only as written.
 fn about(item: &Item, terms: &[String]) -> bool {
-    std::iter::once(&item.title)
-        .chain(&item.categories)
-        .any(|text| terms.iter().any(|t| has_word(text, t)))
+    terms.iter().any(|t| {
+        let ticker = !t.chars().any(char::is_lowercase);
+        if ticker && t.len() < 3 {
+            return has_word(&item.title, &format!("${t}"), true);
+        }
+        let exact = ticker || ORDINARY.contains(&t.as_str());
+        std::iter::once(&item.title)
+            .chain(&item.categories)
+            .any(|text| has_word(text, t, exact))
+    })
 }
 
 /// The answer from what each feed gave: the newest `limit` headlines about `symbol`
@@ -425,7 +456,7 @@ fn answer(symbol: &str, hours: u64, limit: usize, now: i64, reads: &[(&Feed, Fet
                 found.extend(
                     items
                         .iter()
-                        .filter(|i| i.published >= since && about(i, &terms))
+                        .filter(|i| (since..=now).contains(&i.published) && about(i, &terms))
                         .map(|i| (*feed, i)),
                 );
             }

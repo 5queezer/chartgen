@@ -22,4 +22,10 @@
     <updated>2026-11-25T02:00:00Z</updated>
     <category term="Solana"/>
   </entry>
+  <entry>
+    <title>A relative link is read against the feed's URL</title>
+    <id>https://news.example.com/relative</id>
+    <link href="/stories/relative?utm_source=rss"/>
+    <published>2026-11-25T01:00:00Z</published>
+  </entry>
 </feed>

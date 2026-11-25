@@ -26,7 +26,7 @@ pub(super) fn download(url: &str) -> Result<String, String> {
 }
 
 fn parsed(name: &str) -> Vec<Item> {
-    parse(&fixture(name)).unwrap()
+    parse(&fixture(name), "https://news.example.com/feed").unwrap()
 }
 
 fn titles(v: &Value) -> Vec<&str> {
@@ -44,7 +44,7 @@ const NOW: i64 = 1_795_593_600;
 #[test]
 fn an_rss_item_is_its_own_title_link_time_and_categories() {
     let items = parsed("coindesk");
-    // The item without a date is left out.
+    // The item without a date and the one whose link is not http(s) are left out.
     assert_eq!(items.len(), 4);
     assert_eq!(
         items[0],
@@ -77,7 +77,7 @@ fn entities_are_decoded_and_tracking_parameters_dropped() {
 #[test]
 fn an_atom_entry_takes_its_alternate_link_and_published_time() {
     let items = parsed("atom");
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 3);
     assert_eq!(
         items[0].title,
         "Solana\u{2019}s validators vote on fee changes"
@@ -88,12 +88,14 @@ fn an_atom_entry_takes_its_alternate_link_and_published_time() {
     // No published: its updated time.
     assert_eq!(items[1].published, time_of("2026-11-25T02:00:00Z").unwrap());
     assert_eq!(items[1].categories, vec!["Solana".to_string()]);
+    assert_eq!(items[2].url, "https://news.example.com/stories/relative");
 }
 
 #[test]
 fn a_page_that_is_no_feed_is_an_error() {
-    assert!(parse("<html><body><p>Just a moment...</body></html>").is_err());
-    assert!(parse("<html><body><p>Just a moment...</p></body></html>").is_err());
+    let feed = "https://news.example.com/feed";
+    assert!(parse("<html><body><p>Just a moment...</body></html>", feed).is_err());
+    assert!(parse("<html><body><p>Just a moment...</p></body></html>", feed).is_err());
 }
 
 #[test]
@@ -109,18 +111,80 @@ fn a_symbol_is_found_by_its_coins_ticker_and_names() {
     assert_eq!(terms("WIFUSDT"), ["WIF"]);
 }
 
+fn headline(title: &str, categories: &[&str]) -> Item {
+    Item {
+        title: title.into(),
+        categories: categories.iter().map(|c| c.to_string()).collect(),
+        ..Item::default()
+    }
+}
+
+fn is_about(symbol: &str, title: &str) -> bool {
+    about(&headline(title, &[]), &terms_of(symbol))
+}
+
 #[test]
 fn a_term_is_a_whole_word_and_a_ticker_in_capitals() {
-    assert!(has_word("Bitcoin\u{2019}s funding", "Bitcoin"));
-    assert!(has_word("BITCOIN holders", "Bitcoin"));
-    assert!(has_word("Ethereum-based lender", "Ethereum"));
-    assert!(has_word("Buy $BTC now", "BTC"));
-    assert!(has_word("ETH/BTC ratio", "ETH"));
-    assert!(!has_word("Etherscan adds a label", "Ether"));
-    assert!(!has_word("SOLID is not it", "SOL"));
-    assert!(!has_word("a new link to funds", "LINK"));
-    assert!(!has_word("Btc in lower case", "BTC"));
-    assert!(has_word("Chainlink oracles", "Chainlink"));
+    assert!(is_about("BTCUSDT", "Bitcoin\u{2019}s funding"));
+    assert!(is_about("BTCUSDT", "BITCOIN holders"));
+    assert!(is_about("ETHUSDT", "Ethereum-based lender"));
+    assert!(is_about("BTCUSDT", "Buy $BTC now"));
+    assert!(is_about("ETHUSDT", "ETH/BTC ratio"));
+    assert!(!is_about("ETHUSDT", "Etherscan adds a label"));
+    assert!(!is_about("SOLUSDT", "SOLID is not it"));
+    assert!(!is_about("LINKUSDT", "a new link to funds"));
+    assert!(!is_about("BTCUSDT", "Btc in lower case"));
+    assert!(is_about("LINKUSDT", "Chainlink oracles"));
+}
+
+#[test]
+fn a_short_ticker_without_a_name_is_only_a_cashtag() {
+    assert_eq!(terms_of("AIUSDT"), ["AI"]);
+    assert!(!is_about("AIUSDT", "AI agents fail 4 in 10 tasks"));
+    assert!(!is_about("AUSDT", "A year after buying bitcoin"));
+    assert!(!is_about("SUSDT", "U.S. lawmakers weigh a stablecoin bill"));
+    assert!(!about(
+        &headline("U.S. policy", &["U.S."]),
+        &terms_of("SUSDT")
+    ));
+    assert!(is_about("AIUSDT", "$AI jumps 20%"));
+    assert!(is_about("SUSDT", "$S rallies"));
+    // Outlets file stories about artificial intelligence under "AI".
+    assert!(!about(
+        &headline("Miner pivots to compute", &["AI"]),
+        &terms_of("AIUSDT")
+    ));
+}
+
+#[test]
+fn a_name_that_is_an_ordinary_word_is_matched_capitalised() {
+    assert!(!is_about("OPUSDT", "Crypto optimism returns to markets"));
+    assert!(is_about("OPUSDT", "Optimism upgrade goes live"));
+    assert!(!is_about("XRPUSDT", "A ripple effect across exchanges"));
+    assert!(is_about("XRPUSDT", "Ripple wins a licence"));
+    // Not an ordinary word: any case.
+    assert!(is_about("SOLUSDT", "solana validators vote"));
+}
+
+#[test]
+fn a_headline_dated_after_now_is_left_out() {
+    let feed = Feed {
+        name: "Outlet".into(),
+        url: "https://outlet.example/rss".into(),
+    };
+    let at = |published: i64, url: &str| Item {
+        title: "Bitcoin headline".into(),
+        url: url.into(),
+        published,
+        categories: Vec::new(),
+    };
+    let items = vec![
+        at(NOW - 60, "https://outlet.example/now"),
+        at(NOW + 3600, "https://outlet.example/future"),
+    ];
+    let v = answer("BTCUSDT", 24, 1, NOW, &[(&feed, Ok(Arc::new(items)))]);
+    assert_eq!(v["items"][0]["url"], "https://outlet.example/now");
+    assert!(v.get("more").is_none());
 }
 
 #[test]

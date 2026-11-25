@@ -50,7 +50,8 @@ Chosen: **b**, in `src/news.rs`, as the tool `get_news { symbol, hours = 24, lim
   entry was ten months old), U.Today (its `robots.txt` content signal says `ai-input=no`), and
   CryptoPanic (above). `CHARTGEN_NEWS_FEEDS` replaces the list: `Name=https://…` entries separated
   by commas, RSS 2.0 or Atom.
-- **Politely:** a feed is read at most once in ten minutes and held; a feed that failed is tried
+- **Politely:** a feed's last read is held in memory and read again only when a call comes more
+  than ten minutes after it (refreshed on demand, not evicted); a feed that failed is tried
   again after a minute. One request is 8 s at most and 4 MB at most. All feeds are read at once,
   so a call waits for the slowest. The client says what it is (`chartgen/<version>` and the
   project's URL). Callers at once share one read of a feed.
@@ -61,14 +62,26 @@ Chosen: **b**, in `src/news.rs`, as the tool `get_news { symbol, hours = 24, lim
   1000PEPEUSDT are BTC, BTC and PEPE). A headline is about it when its title or one of the
   outlet's categories for it holds the ticker, in capitals, or one of the coin's names in a table
   of about 30 large coins (Bitcoin; Ethereum and Ether; Solana; …), in any case, as a whole word:
-  `Etherscan` is not Ether and `link` is not LINK. A two-letter ticker that has a name (OP) is
-  found by its name only. The answer's `terms` lists the words used. Descriptions are not
+  `Etherscan` is not Ether and `link` is not LINK. A name that is also an ordinary word (Ripple,
+  Optimism, Cosmos, …) only capitalised. A two-letter ticker that has a name (OP) is found by its
+  name only; a ticker of under 3 letters without one (AI, S) only as a cashtag (`$AI`) in the
+  title. As a word it matched everyday headlines ("AI agents", "U.S."), and as a category it
+  matched outlets' `AI` section for stories about artificial intelligence. The answer's `terms` lists the words used. Descriptions are not
   matched: some feeds put the whole article there, and an article mentions many coins.
 - **Small answers:** time (UTC), outlet, title and link, `utm_` parameters dropped. No article
-  text. A link that two feeds carry is shown once.
+  text. A link that two feeds carry is shown once. A headline dated after now is left out.
+- **Links** are read against the feed's URL when relative (not against `xml:base`), and only
+  `http` and `https` links are kept, so a relative link cannot be mistaken for another
+  outlet's.
+- **Times:** an RSS item's `pubDate`; an Atom entry's `published`, or `updated` where it has
+  none, so an edited old entry can count as new.
+- **Titles are third-party text**, and the tool's description tells the client to treat them as
+  data, never as instructions.
 - **XML:** `quick-xml` reads the feeds. Nothing in chartgen parsed XML; it is a small crate with
-  one dependency (`memchr`) and handles CDATA, entities and namespaces, which a hand-written
-  scanner would get wrong on the first feed that differs.
+  one dependency (`memchr`) and handles CDATA and entities, which a hand-written scanner would
+  get wrong on the first feed that differs. Elements are matched by their written name, so an
+  Atom feed that prefixes its elements (`atom:entry`) is not read; none of the default feeds
+  does, and resolving namespaces is left until a configured feed needs it.
 
 ### Consequences
 
@@ -82,7 +95,7 @@ Chosen: **b**, in `src/news.rs`, as the tool `get_news { symbol, hours = 24, lim
 - **Feeds change.** An outlet can move, block or end its feed. That shows as `sources_failed`,
   not as a failed call, and `CHARTGEN_NEWS_FEEDS` replaces a feed without a release.
 - **Terms of use.** The feeds are published for readers and aggregators. chartgen shows the
-  headline, the outlet and a link to the article, and keeps no copy beyond ten minutes in
+  headline, the outlet and a link to the article, and keeps only each feed's last read in
   memory, as a feed reader does. An operator who republishes the answers is bound by each
   outlet's terms.
 - A replay server refuses the tool, as it does `get_market_context`: its fixtures hold no news.
