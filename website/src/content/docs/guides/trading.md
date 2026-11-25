@@ -5,8 +5,9 @@ description: Live WebSocket feed, order lifecycle, and price/indicator alerts.
 
 `--trade` starts a live engine: a Binance WebSocket kline feed, a rolling
 200-bar indicator state manager, an order tracker, and an alert engine — and
-serves them over the same HTTP + OAuth stack as `--serve`, exposing 12 extra
-MCP tools on top of the 7 charting tools.
+serves them over the same HTTP + OAuth stack as `--serve`. It answers the 12
+trading MCP tools, which every server lists but refuses without `--trade`, on top
+of the 12 charting tools.
 
 ```bash
 chartgen --trade --testnet \

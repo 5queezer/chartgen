@@ -507,6 +507,13 @@ cross, so alerts are not offered on it.
   and percent, and `Risk/Reward Ratio: 2.00` updates while you drag. The
   zones are green (reward) and red (risk); the labels stay centered on the
   part of the box that is on screen. The style bar's color is the entry line.
+  When the box is small on screen (zoomed out, or narrow in time) the labels
+  make room: a label is at most twice its own height wider than the box, else
+  it shows only the price (`R/R 2.00` for the ratio), else it is
+  left out. Target and stop go when the whole box is lower than one label, and
+  the ratio when it would cross the target or stop line. A label that would
+  cover one of another position is left out too. The zones and the entry line
+  always stay, so entry, stop, target and side remain visible.
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
 - **Right-click** a drawing for its [menu](#right-click-menus): Style, Clone,
@@ -1150,12 +1157,14 @@ On any touch screen:
 | Drag after a long press | Moves the crosshair instead of panning |
 | Tap elsewhere | Hides the crosshair |
 | Tap an indicator's legend row | Shows its alert, hide, settings and remove buttons |
+| One-finger drag on the price pane's axis | Scales it and turns `auto` off |
+| Double tap on the price pane's axis | Turns `auto` back on |
 
 The page itself does not scroll or pull to refresh, so gestures on the chart
 only reach the chart. A drawing dragged past its pane stops at the pane's edge, and
-lifting your finger on the separator there keeps the drag. Dragging an axis does nothing on touch, because klinecharts
-only scales axes for the mouse. Use a pinch for the time axis, and the `auto` and
-`log` buttons for the price axis.
+lifting your finger on the separator there keeps the drag. Dragging the time axis or an
+indicator pane's axis does nothing on touch, because klinecharts only scales those for
+the mouse. Use a pinch for the time axis.
 
 Touch has no right-click, and a long press belongs to the crosshair, so the
 [right-click menus](#right-click-menus) open only with a mouse. Their actions are
