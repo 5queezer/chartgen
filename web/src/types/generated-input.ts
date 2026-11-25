@@ -54,9 +54,9 @@ export interface CreateServerAlertInput {
    */
   expires_at?: number | string;
   /**
-   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. Fixed after creation.
+   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the settlement nearest its open): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. Fixed after creation.
    */
-  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx" | "funding";
   /**
    * Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert. Required with condition bar_close, 1h or longer.
    */
@@ -441,6 +441,10 @@ export interface GetIndicatorsInput {
    * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
+  /**
+   * Also answer each line's and histogram's change over this many bars, ending at the bar its last_value is from: change {from, abs (last_value - from), pct (abs over |from|, in %, null when from is 0)}, or change null when either end has no value (nothing that far back, or a line with no value on its last bar, such as an inactive Supertrend line). Open interest (oi) and the long/short ratios have none older than the 30 days Binance keeps (about 185 bars on 4h, 31 on 1d). The answer then also carries change_bars.
+   */
+  change_bars?: number;
   /**
    * List of indicator names to compute (e.g. ["rsi", "macd", "adx"])
    */

@@ -159,7 +159,7 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "get_indicators",
-                "description": "Compute technical indicators for a symbol and return raw numeric values as JSON. Fetches OHLCV data (or uses cached engine data if running in --trade mode) and computes the requested indicators, returning the last values of each line, dot presence, and horizontal reference levels. This is the key tool for automated technical analysis. To read several timeframes in one call, pass intervals (e.g. [\"1h\", \"4h\", \"1d\"]) instead of interval: the answer is then {symbol, intervals: [...]}, one entry per interval in request order, each {interval, source, bars, indicators} or {interval, error} when that interval fails (the others still answer). In that answer each indicator leaves out what only draws it (is_overlay, y_range, fills_count, decorative_dots and the index of each line and histogram, whose order is kept).",
+                "description": "Compute technical indicators for a symbol and return raw numeric values as JSON. Fetches OHLCV data (or uses cached engine data if running in --trade mode) and computes the requested indicators, returning the last values of each line, dot presence, and horizontal reference levels. This is the key tool for automated technical analysis. To read several timeframes in one call, pass intervals (e.g. [\"1h\", \"4h\", \"1d\"]) instead of interval: the answer is then {symbol, intervals: [...]}, one entry per interval in request order, each {interval, source, bars, indicators} or {interval, error} when that interval fails (the others still answer). In that answer each indicator leaves out what only draws it (is_overlay, y_range, fills_count, decorative_dots and the index of each line and histogram, whose order is kept). With change_bars, each line and histogram also says how it changed over that many bars: change {from, abs, pct} (e.g. is open interest rising or falling over the last 6 bars), or change null where either end has no value (nothing that far back, or no value on the last bar); with intervals, for each interval.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -178,6 +178,12 @@ pub fn tools_list_result() -> Value {
                             "minItems": 1,
                             "maxItems": 6,
                             "description": "Several candle intervals in one call, each as interval (e.g. [\"1h\", \"4h\", \"1d\"]); repeats count once. Instead of interval, not with it."
+                        },
+                        "change_bars": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 199,
+                            "description": "Also answer each line's and histogram's change over this many bars, ending at the bar its last_value is from: change {from, abs (last_value - from), pct (abs over |from|, in %, null when from is 0)}, or change null when either end has no value (nothing that far back, or a line with no value on its last bar, such as an inactive Supertrend line). Open interest (oi) and the long/short ratios have none older than the 30 days Binance keeps (about 185 bars on 4h, 31 on 1d). The answer then also carries change_bars."
                         },
                         "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." },
                         "indicators": {
@@ -678,7 +684,7 @@ pub fn server_alert_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "create_server_alert",
-            "description": "Create an alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It watches the price, or with indicator an indicator's line at the closes of bars of 1h or longer: the line against level (RSI under 25), or with compare: close the bar's close against the line (the close crossing EMA 50). It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing alerts cannot run here. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
+            "description": "Create an alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It watches the price, or with indicator an indicator's line at the closes of bars of 1h or longer: the line against level (RSI under 25, funding above 0.05%), or with compare: close the bar's close against the line (the close crossing EMA 50). It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing alerts cannot run here. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -688,7 +694,7 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "condition": condition.clone(),
                     "level": { "type": "number", "description": "The price level, greater than 0. With indicator, the level the line is compared with, any number; none with compare: close or condition: bar_close." },
                     "trigger": trigger.clone(),
-                    "indicator": { "type": "string", "enum": ["rsi", "ma", "macd", "stoch", "cci", "mfi", "williams_r", "roc", "atr", "adx"], "description": "Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: \"ema\", length: 50}. Fixed after creation." },
+                    "indicator": { "type": "string", "enum": ["rsi", "ma", "macd", "stoch", "cci", "mfi", "williams_r", "roc", "atr", "adx", "funding"], "description": "Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: \"ema\", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the settlement nearest its open): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. Fixed after creation." },
                     "params": { "type": "object", "additionalProperties": true, "description": "The indicator's params, as list_indicators lists them, e.g. {length: 14}. A name it does not take is refused; the alert keeps every param with its default filled in. Its history must fit in 999 bars (EMA 200 does); stoch, cci, mfi, williams_r and roc take at most 200 per param; offset is not taken." },
                     "line": { "type": "string", "description": "Which of the indicator's lines, by its legend label, e.g. Signal for macd or %D for stoch. Default: its first line." },
                     "compare": { "type": "string", "enum": ["level", "close"], "description": "level: the line against level. close: the bar's close against the line, with no level; a crossing is then the close and the line one bar before against both now.", "default": "level" },

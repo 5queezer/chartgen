@@ -2015,6 +2015,34 @@ fn test_get_indicators_reads_several_intervals_in_one_call() {
     assert!(both.unwrap_err().contains("not both"));
 }
 
+/// `get_indicators` with `change_bars` answers open interest's change over that many
+/// bars, and none where it reaches past the 30 days Binance keeps.
+#[test]
+fn test_get_indicators_answers_open_interest_change() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let oi = |change_bars: u64| {
+        call_tool(
+            srv.port,
+            &token,
+            "get_indicators",
+            serde_json::json!({"symbol": "BTCUSDT", "interval": "4h", "indicators": ["oi"],
+                               "change_bars": change_bars}),
+        )
+        .unwrap()
+    };
+    let near = oi(6);
+    assert_eq!(near["change_bars"], 6);
+    let line = &near["indicators"]["oi"]["lines"][0];
+    let (to, change) = (line["last_value"].as_f64().unwrap(), &line["change"]);
+    let from = change["from"].as_f64().unwrap();
+    assert!((to - from - change["abs"].as_f64().unwrap()).abs() < 1.0);
+    assert!(change["pct"].is_number());
+    // 190 bars of 4h is more than 31 days: older than Binance keeps.
+    assert!(oi(190)["indicators"]["oi"]["lines"][0]["change"].is_null());
+}
+
 /// Off unless asked for: not listed, and only the list answers, saying so.
 #[test]
 fn test_server_alerts_are_off_by_default() {
