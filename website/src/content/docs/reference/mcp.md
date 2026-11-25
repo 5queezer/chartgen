@@ -1131,7 +1131,8 @@ outlets, so an agent needs no web search for them
 
 - `items`: the newest first. `time` is when the outlet published it, ISO 8601 UTC; `source`
   the outlet; `url` the article, without `utm_` parameters. Headlines only, no article text. A
-  link that two feeds carry is shown once. A headline dated after now is left out.
+  link that two feeds carry is shown once. A headline dated more than 5 minutes after now is
+  left out (an outlet's clock may run a little ahead).
 - **An Atom entry without `published`** has its `updated` time as `time`. An old article that
   was edited then counts as new: it falls inside `hours` and sorts by the edit. RSS items, and
   the default feeds, give the time they were published.

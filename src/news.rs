@@ -33,6 +33,8 @@ const DEFAULT_FEEDS: [(&str, &str); 5] = [
 const FRESH: Duration = Duration::from_secs(600);
 /// How long a feed that could not be read waits before it is tried again.
 const RETRY: Duration = Duration::from_secs(60);
+/// How far ahead of now a headline's time may be, for an outlet whose clock runs ahead.
+const SKEW_S: i64 = 300;
 const MAX_HOURS: u64 = 168;
 const MAX_LIMIT: u64 = 50;
 /// The quote assets a symbol's coin is read off: BTCUSDT is BTC.
@@ -360,8 +362,11 @@ fn time_of(text: &str) -> Option<i64> {
 }
 
 /// A link, read against `base` if relative, without its `utm_` tracking parameters. None
-/// unless it is http(s).
+/// unless it is http(s), and for an empty link, which would read as the feed's own URL.
 fn clean_url(link: &str, base: &url::Url) -> Option<String> {
+    if link.trim().is_empty() {
+        return None;
+    }
     let mut url = base
         .join(link)
         .ok()
@@ -456,7 +461,9 @@ fn answer(symbol: &str, hours: u64, limit: usize, now: i64, reads: &[(&Feed, Fet
                 found.extend(
                     items
                         .iter()
-                        .filter(|i| (since..=now).contains(&i.published) && about(i, &terms))
+                        .filter(|i| {
+                            (since..=now + SKEW_S).contains(&i.published) && about(i, &terms)
+                        })
                         .map(|i| (*feed, i)),
                 );
             }

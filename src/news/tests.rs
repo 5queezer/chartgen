@@ -167,7 +167,7 @@ fn a_name_that_is_an_ordinary_word_is_matched_capitalised() {
 }
 
 #[test]
-fn a_headline_dated_after_now_is_left_out() {
+fn a_headline_dated_after_now_is_left_out_beyond_a_skew() {
     let feed = Feed {
         name: "Outlet".into(),
         url: "https://outlet.example/rss".into(),
@@ -185,6 +185,26 @@ fn a_headline_dated_after_now_is_left_out() {
     let v = answer("BTCUSDT", 24, 1, NOW, &[(&feed, Ok(Arc::new(items)))]);
     assert_eq!(v["items"][0]["url"], "https://outlet.example/now");
     assert!(v.get("more").is_none());
+    // Within five minutes ahead: an outlet's clock running ahead, kept.
+    let items = vec![at(NOW + 120, "https://outlet.example/ahead")];
+    let v = answer("BTCUSDT", 24, 1, NOW, &[(&feed, Ok(Arc::new(items)))]);
+    assert_eq!(v["items"][0]["url"], "https://outlet.example/ahead");
+}
+
+#[test]
+fn an_item_with_an_empty_link_is_left_out() {
+    let xml = r#"<rss><channel>
+        <item><title>Bitcoin one</title><link></link><pubDate>Wed, 25 Nov 2026 06:00:00 +0000</pubDate></item>
+        <item><title>Bitcoin two</title><link> </link><pubDate>Wed, 25 Nov 2026 05:00:00 +0000</pubDate></item>
+        <item><title>Bitcoin three</title><link>https://news.example.com/three</link><pubDate>Wed, 25 Nov 2026 04:00:00 +0000</pubDate></item>
+    </channel></rss>"#;
+    let items = parse(xml, "https://news.example.com/feed").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].url, "https://news.example.com/three");
+    // An Atom link with an empty href, the same.
+    let atom = r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Bitcoin</title>
+        <link href=""/><published>2026-11-25T06:00:00Z</published></entry></feed>"#;
+    assert!(parse(atom, "https://news.example.com/feed").is_err());
 }
 
 #[test]

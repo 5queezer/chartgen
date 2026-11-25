@@ -69,7 +69,8 @@ Chosen: **b**, in `src/news.rs`, as the tool `get_news { symbol, hours = 24, lim
   matched outlets' `AI` section for stories about artificial intelligence. The answer's `terms` lists the words used. Descriptions are not
   matched: some feeds put the whole article there, and an article mentions many coins.
 - **Small answers:** time (UTC), outlet, title and link, `utm_` parameters dropped. No article
-  text. A link that two feeds carry is shown once. A headline dated after now is left out.
+  text. A link that two feeds carry is shown once. A headline dated more than 5 minutes after
+  now (a clock running ahead) is left out, and so is an item with an empty link.
 - **Links** are read against the feed's URL when relative (not against `xml:base`), and only
   `http` and `https` links are kept, so a relative link cannot be mistaken for another
   outlet's.
