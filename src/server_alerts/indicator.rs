@@ -7,7 +7,8 @@
 //! so a crossing is the change between two closes and needs nothing kept in memory.
 //!
 //! A futures-data indicator (`FUTURES`) reads Binance futures rows besides the bars,
-//! so it is read off the alerts' lock, on the last `FUTURES_BARS` bars (ADR-0080).
+//! so it is read off the alerts' lock, on the last `FUTURES_BARS` bars (ADR-0080). Open
+//! interest is watched by its change over `change_bars` bars, in percent (ADR-0085).
 
 use chartgen::data::{Bar, OhlcvData};
 use chartgen::indicator::PanelResult;
@@ -45,11 +46,19 @@ pub(super) const ALLOWED: &[&str] = &[
 
 /// Futures-data indicators an alert may watch (ADR-0080): a series Binance keeps for a
 /// perpetual, read through the same cache and budget as a chart's panel.
-pub(super) const FUTURES: &[&str] = &["funding"];
+pub(super) const FUTURES: &[&str] = &["funding", "oi"];
+
+/// Futures-data indicators an alert watches by their change over `change_bars` bars, in
+/// percent, as `get_indicators`' `change_bars` answers it (ADR-0085): a count of open
+/// contracts means nothing across symbols, its change does.
+const BY_CHANGE: &[&str] = &["oi"];
+
+/// Most bars `change_bars` reaches back, as in `get_indicators`.
+pub(super) const MAX_CHANGE_BARS: usize = 199;
 
 /// Other names an alert takes for a futures-data indicator, as `list_indicators` and
 /// `generate_chart` do.
-const FUTURES_ALIASES: &[(&str, &str)] = &[("funding_rate", "funding")];
+const FUTURES_ALIASES: &[(&str, &str)] = &[("funding_rate", "funding"), ("open_interest", "oi")];
 
 /// The bars a futures-data alert reads at a close: enough for this close and the one
 /// before, and short, so that each close reads only the newest rows.
@@ -78,6 +87,10 @@ pub(super) struct Spec {
     /// With `Compare::Level` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<f64>,
+    /// The line's change over this many bars, in percent, is compared instead of its
+    /// value (ADR-0085). Written only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_bars: Option<usize>,
 }
 
 /// One close: the comparison now and one bar before, and the line's value now.
@@ -92,7 +105,7 @@ pub(super) struct Reading {
 pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
     let name = match args.get("indicator") {
         None | Some(Value::Null) => {
-            for field in ["params", "line", "compare"] {
+            for field in ["params", "line", "compare", "change_bars"] {
                 if args.get(field).is_some_and(|v| !v.is_null()) {
                     return Err(format!("{field} needs indicator"));
                 }
@@ -188,6 +201,27 @@ pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
                 .ok_or("level must be a number")?,
         ),
     };
+    let change_bars = match args.get("change_bars") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .filter(|n| (1..=MAX_CHANGE_BARS as u64).contains(n))
+                .ok_or_else(|| {
+                    format!("change_bars must be a whole number from 1 to {MAX_CHANGE_BARS}")
+                })? as usize,
+        ),
+    };
+    match (BY_CHANGE.contains(&name), change_bars) {
+        (true, None) => {
+            return Err(format!(
+                "{name} is watched by its change: send change_bars, the bars it changes over, and a level in percent"
+            ))
+        }
+        (false, Some(_)) => {
+            return Err(format!("change_bars is taken by {} only", BY_CHANGE.join(", ")))
+        }
+        _ => {}
+    }
     if compare == Compare::Close && FUTURES.contains(&name) {
         return Err(format!(
             "compare: close compares the close with a price line; {name} is not one"
@@ -206,6 +240,7 @@ pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
         line,
         compare,
         level,
+        change_bars,
     }))
 }
 
@@ -265,6 +300,13 @@ impl Spec {
     pub(super) fn reads_futures(&self) -> bool {
         FUTURES.contains(&self.name.as_str())
     }
+
+    /// The closed bars a futures read takes: enough for this close, the one before and
+    /// the change over `change_bars`.
+    pub(super) fn bars_needed(&self) -> usize {
+        self.change_bars
+            .map_or(FUTURES_BARS, |n| FUTURES_BARS.max(n + 2))
+    }
 }
 
 /// `spec` at the close of the last bar of `bars`. `None` while the window holds
@@ -294,7 +336,7 @@ pub(super) fn read_futures(
 ) -> Result<Reading, String> {
     let ind = indicators::by_name_configured(&spec.name, &spec.params)?
         .ok_or_else(|| format!("unknown indicator {}", spec.name))?;
-    let tail = &bars[bars.len().saturating_sub(FUTURES_BARS)..];
+    let tail = &bars[bars.len().saturating_sub(spec.bars_needed())..];
     let panel = ind.compute(&OhlcvData {
         bars: tail.to_vec(),
         symbol: Some(symbol.to_string()),
@@ -303,9 +345,37 @@ pub(super) fn read_futures(
     });
     // The panel's label carries why it has no values, e.g. "Funding (no futures market)".
     let why = panel.label.clone();
-    line_of(spec, panel)
-        .and_then(|y| reading(spec, tail, &y))
-        .ok_or_else(|| format!("{symbol} has no {} at its last close: {why}", spec.line))
+    let Some(y) = line_of(spec, panel) else {
+        return Err(format!(
+            "{symbol} has no {} at its last close: {why}",
+            spec.line
+        ));
+    };
+    futures_reading(spec, tail, &y).ok_or_else(|| match spec.change_bars {
+        Some(n) => format!(
+            "{symbol} has no {} change over {n} bars at its last close: {why}; Binance keeps 30 days of it, about 185 bars on 4h, 31 on 1d",
+            spec.line
+        ),
+        None => format!("{symbol} has no {} at its last close: {why}", spec.line),
+    })
+}
+
+/// A futures-data `spec`'s reading on `tail` with its line `y`: the line's value, or
+/// with `change_bars` its change over them in percent, by `change_over` and
+/// `change_pct` as a tool answer's `change.pct`. The reading before is the alert's
+/// own previous one (ADR-0080), so `prev` is not read here.
+pub(super) fn futures_reading(spec: &Spec, tail: &[Bar], y: &[f64]) -> Option<Reading> {
+    let Some(n) = spec.change_bars else {
+        return reading(spec, tail, y);
+    };
+    // Open interest's line does not break: its change ends at its last value.
+    let (from, to) = chartgen::indicator::change_over(y, false, n)?;
+    let pct = chartgen::indicator::change_pct(from, to)?;
+    Some(Reading {
+        d: pct - spec.level?,
+        prev: None,
+        value: pct,
+    })
 }
 
 fn line_of(spec: &Spec, panel: PanelResult) -> Option<Vec<f64>> {
@@ -339,13 +409,18 @@ pub(super) fn reading(spec: &Spec, bars: &[Bar], y: &[f64]) -> Option<Reading> {
 
 /// The alert's indicator as its owner and its deliveries show it.
 pub(super) fn view(spec: &Spec, value: Option<f64>) -> Value {
-    json!({
+    let mut v = json!({
         "name": spec.name,
         "params": spec.params,
         "line": spec.line,
         "compare": spec.compare,
         "value": value,
-    })
+    });
+    // Only when set: `value` is then the change in percent (ADR-0085).
+    if let Some(n) = spec.change_bars {
+        v["change_bars"] = json!(n);
+    }
+    v
 }
 
 /// `level` in an update of an indicator alert: any number, and none at all where
@@ -377,6 +452,70 @@ mod tests {
             let ind = indicators::by_name(name).unwrap();
             assert!(!ind.reads_beyond_bars(), "{name}");
         }
+    }
+
+    /// Open interest is watched by its change over change_bars, which nothing else takes.
+    #[test]
+    fn oi_takes_change_bars_and_nothing_else_does() {
+        let oi = parse(&json!({ "indicator": "open_interest", "change_bars": 6, "level": 5 }))
+            .unwrap()
+            .unwrap();
+        assert_eq!((oi.name.as_str(), oi.line.as_str()), ("oi", "OI"));
+        assert_eq!(oi.change_bars, Some(6));
+        assert!(oi.reads_futures());
+        assert_eq!(oi.bars_needed(), FUTURES_BARS);
+        let err = |v: Value| parse(&v).err().unwrap();
+        assert!(err(json!({ "indicator": "oi", "level": 5 })).contains("send change_bars"));
+        assert_eq!(
+            err(json!({ "indicator": "rsi", "change_bars": 6, "level": 30 })),
+            "change_bars is taken by oi only"
+        );
+        assert!(
+            err(json!({ "indicator": "funding", "change_bars": 6, "level": 0.01 }))
+                .contains("taken by oi only")
+        );
+        for bad in [json!(0), json!(200), json!(1.5), json!("6")] {
+            let e = err(json!({ "indicator": "oi", "change_bars": bad, "level": 5 }));
+            assert_eq!(e, "change_bars must be a whole number from 1 to 199");
+        }
+        assert_eq!(
+            err(json!({ "change_bars": 6 })),
+            "change_bars needs indicator"
+        );
+        let long = parse(&json!({ "indicator": "oi", "change_bars": 120, "level": 5 }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(long.bars_needed(), 122);
+    }
+
+    /// The change an alert reads is the tool answer's change.pct: change_over, then
+    /// change_pct, over the same bars.
+    #[test]
+    fn an_oi_reading_is_its_change_in_percent() {
+        let spec = parse(&json!({ "indicator": "oi", "change_bars": 3, "level": 5 }))
+            .unwrap()
+            .unwrap();
+        let bars = window();
+        let y: Vec<f64> = (0..bars.len()).map(|i| 1000.0 + i as f64).collect();
+        let r = futures_reading(&spec, &bars, &y).unwrap();
+        let (from, to) = chartgen::indicator::change_over(&y, false, 3).unwrap();
+        assert_eq!(r.value, chartgen::indicator::change_pct(from, to).unwrap());
+        assert!((r.value - 3.0 / (1000.0 + 995.0) * 100.0).abs() < 1e-12);
+        assert_eq!(r.d, r.value - 5.0);
+        // From 0, or nothing that far back: no reading.
+        let mut zero = y.clone();
+        let at = zero.len() - 4;
+        zero[at] = 0.0;
+        assert!(futures_reading(&spec, &bars, &zero).is_none());
+        assert!(futures_reading(&spec, &bars[..3], &y[..3]).is_none());
+        assert_eq!(view(&spec, Some(r.value))["change_bars"], 3);
+        let rsi = parse(&json!({ "indicator": "rsi", "level": 30 }))
+            .unwrap()
+            .unwrap();
+        assert!(
+            view(&rsi, None).get("change_bars").is_none(),
+            "only when set"
+        );
     }
 
     #[test]

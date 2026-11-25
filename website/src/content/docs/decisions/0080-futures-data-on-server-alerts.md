@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-24
+**Amended by:** [ADR-0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/) (open interest, by its change over N bars)
 **Amends:** [ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) (indicator alerts
 may watch an indicator that fetches futures data; its "What it does not do yet" named funding at
 settlement)

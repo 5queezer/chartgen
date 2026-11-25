@@ -129,6 +129,10 @@ export interface CreateServerAlertInput {
         }
       ];
   /**
+   * With indicator: oi only, and required there: compare the change of open interest over this many bars, in percent, instead of its value. Fixed after creation.
+   */
+  change_bars?: number;
+  /**
    * level: the line against level. close: the bar's close against the line, with no level; a crossing is then the close and the line one bar before against both now.
    */
   compare?: "level" | "close";
@@ -158,9 +162,9 @@ export interface CreateServerAlertInput {
    */
   expires_at?: number | string;
   /**
-   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the settlement nearest its open): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. Fixed after creation.
+   * Watch this indicator instead of the price, at bar closes: needs evaluate_on: close and an interval of 1h or longer. For an EMA or SMA of a length use ma with params {type: "ema", length: 50}. funding (or funding_rate) is a Binance perpetual's funding rate in percent, as the chart's Funding panel shows it on the bar that closed (the settlement nearest its open): level is in percent, so 0.05 is 0.05%, and compare: close is refused, as is a symbol with no futures market. oi (or open_interest) is open interest, watched by its change over change_bars bars in percent, as get_indicators' change_bars answers change.pct: level 5 with crossing_up is open interest rising by 5% or more over those bars; it needs change_bars, and Binance keeps 30 days of it (about 185 bars on 4h, 31 on 1d). Fixed after creation.
    */
-  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx" | "funding";
+  indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx" | "funding" | "oi";
   /**
    * Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert. Required with condition bar_close, 1h or longer.
    */

@@ -1449,7 +1449,8 @@ and compares:
 ```
 
 - `indicator`: one of `rsi`, `ma`, `macd`, `stoch`, `cci`, `mfi`, `williams_r`, `roc`, `atr`,
-  `adx`, or `funding` (see [funding](#funding-on-the-server)). An EMA or SMA of a length is
+  `adx`, `funding` (see [funding](#funding-on-the-server)) or `oi` (see [open
+  interest's change](#open-interests-change-on-the-server)). An EMA or SMA of a length is
   `ma` with `type` and `length` (`ema` is the fixed 8/21/50/200 stack). Your own scripts and
   the other indicators that fetch data besides the bars are refused.
 - `params`: as [`list_indicators`](#list_indicators) gives them. A name the indicator does not
@@ -1508,6 +1509,36 @@ interval like any indicator alert.
   on it. If that read fails, the close is skipped and the alert keeps the value it read before,
   so the next close still sees a crossing, a close late, if the rate is still across the level
   then; a rate that crossed and came back between two reads is missed.
+
+##### Open interest's change on the server
+
+`indicator: "oi"` (or `open_interest`) watches a Binance perpetual's open interest **by its
+change over `change_bars` bars, in percent**
+([ADR-0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/)): the number
+[`get_indicators`](#get_indicators) answers as `change.pct` with the same `change_bars`, read at
+the closes of the alert's interval.
+
+```json
+{ "symbol": "ETHUSDT", "interval": "1h", "evaluate_on": "close",
+  "indicator": "oi", "change_bars": 6, "condition": "crossing_up", "level": 5,
+  "trigger": "once", "notify_agent": true }
+```
+
+- `change_bars`: 1 to 199, required with `oi` and taken by nothing else. `level` is the change in
+  percent: `crossing_up` 5 is open interest rising by 5% or more over those bars, `less` -3 is
+  it having fallen by more than 3%.
+- The change runs from `change_bars` bars before the bar that closed to that bar, as
+  `get_indicators`' `change` does (from its last value). Binance keeps 30 days of open interest,
+  so on 4h `change_bars` reaches about 185 bars and on 1d about 31; an alert reaching further, or
+  on a symbol with no futures market, is refused when it is created, with the reason.
+- It is read as [funding](#funding-on-the-server) is: off the alerts' lock, through the same cache
+  and budget as a chart, and a crossing compares with the change this alert read at its previous
+  close, so the first close after creating it, a restart, a resume or a new definition never
+  fires a crossing; `greater` and `less` can. A failed read skips the close and keeps the
+  previous reading. `compare: "close"` is refused.
+- The alert, its webhook payload and its wake-up show `"indicator": {"name": "oi", "line": "OI",
+  "change_bars", "value"}`, where `value` is the change in percent at the last close read, or at
+  the close that fired.
 
 #### A close beyond a drawing of a setup
 

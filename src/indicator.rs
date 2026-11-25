@@ -30,6 +30,13 @@ pub fn change_over(y: &[f64], breaks: bool, bars: usize) -> Option<(f64, f64)> {
     (from.is_finite() && to.is_finite()).then_some((from, to))
 }
 
+/// The change from `from` to `to` in percent of `|from|`, as a tool answer's
+/// `change.pct` and a server alert on a change (ADR-0085) read it. `None` when `from`
+/// is 0.
+pub fn change_pct(from: f64, to: f64) -> Option<f64> {
+    (from != 0.0).then(|| (to - from) / from.abs() * 100.0)
+}
+
 /// A filled region between two series.
 #[derive(Clone)]
 pub struct Fill {

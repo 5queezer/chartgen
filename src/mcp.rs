@@ -2623,13 +2623,8 @@ const MAX_CHANGE_BARS: u64 = 199;
 fn change_json(y: &[f64], breaks: bool, bars: usize) -> Value {
     match chartgen::indicator::change_over(y, breaks, bars) {
         Some((from, to)) => {
-            let abs = to - from;
-            let pct = if from == 0.0 {
-                Value::Null
-            } else {
-                json!(abs / from.abs() * 100.0)
-            };
-            json!({ "from": from, "abs": abs, "pct": pct })
+            let pct = chartgen::indicator::change_pct(from, to);
+            json!({ "from": from, "abs": to - from, "pct": pct })
         }
         None => Value::Null,
     }

@@ -1282,11 +1282,11 @@ impl ServerAlerts {
         if end == 0 || bar_time_of(&bars[end - 1]) != Some(bar_time) {
             return;
         }
-        let tail = bars[end.saturating_sub(indicator::FUTURES_BARS)..end].to_vec();
         for id in ids {
             let Some(spec) = st.alerts.get(&id).and_then(|a| a.indicator.clone()) else {
                 continue;
             };
+            let tail = bars[end.saturating_sub(spec.bars_needed())..end].to_vec();
             // The clauses are read now, at this close, with the bars it closed on.
             let clauses = Self::clauses_read(st, key, &id, bar_time);
             let (me, key, tail) = (self.me.clone(), key.clone(), tail.clone());
@@ -2608,7 +2608,7 @@ impl ServerAlerts {
         if let Some(spec) = spec.as_ref().filter(|s| s.reads_futures()) {
             let bars = self
                 .hub
-                .seed_bars(&symbol, &feed.1, indicator::FUTURES_BARS)
+                .seed_bars(&symbol, &feed.1, spec.bars_needed())
                 .map_err(|e| format!("Cannot watch {symbol}: {e}"))?;
             read_futures(spec, &bars, &symbol, &feed.1)
                 .map_err(|e| format!("Cannot watch {} on {symbol}: {e}", spec.name))?;
