@@ -2231,6 +2231,12 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     crate::server_alerts::start(&state.charts);
     #[cfg(feature = "scripting")]
     crate::setup_service::start(&state.charts);
+    // Open interest beyond the 30 days Binance keeps (ADR-0082). Not on a replay server,
+    // whose store lives in memory and whose clock is not now.
+    #[cfg(feature = "scripting")]
+    if crate::replay::global().is_none() {
+        chartgen::indicators::external::record::start();
+    }
     refresh::sweep_now_and_then(state.clone());
 
     // Built web app (ADR-0027); unset keeps the server API-only.
