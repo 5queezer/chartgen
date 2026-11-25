@@ -5204,7 +5204,13 @@ async fn a_redefined_funding_alert_starts_from_a_new_reading() {
         0,
         "a baseline, not a crossing"
     );
+    // Each close's read runs off the lock: one sent before the last is back could be
+    // overtaken by the next and dropped.
     a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 50.0)));
+    until("the read at 0.05", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + 3 * HOUR))
+    })
+    .await;
     a.on_event(&k, FeedEvent::Bar(bar(t + 4 * HOUR, 70.0)));
     until("a crossing after it", || {
         a.lock().alerts[&id].fire_count == 1
