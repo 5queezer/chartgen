@@ -235,11 +235,29 @@ against your 16 features.
 
 A decision **not** to trade is worth recording too. `decision: "skip"` stores it with a
 direction and a thesis and no levels. The server scores it as if it had been taken, with the
-same bracket for every skip: in at the next bar's open, out one ATR(14) against it or two with
+same bracket for every skip: in at the next 1m bar's open, out one ATR(14) against it or two with
 it. On a quiet chart, where one ATR is less than the least risk a setup may have (42 bps), the
 stop is that far and the target twice that; `bracket` on the setup says which applied (`atr` or
 `floor`; `agent` for a setup with your own levels). A skip has an expiry after 24 bars of the setup's interval, at most 90 days. A skip cannot be
 cancelled.
+
+**The bracket is measured from the fill**
+([ADR-0087](/chartgen/decisions/0087-a-skips-bracket-from-its-fill/)). The ATR comes from the
+closed bars of the setup's interval, so the levels are placed around the last of those closes
+when the skip is made, and move by the same distance to the fill when it fills. The fill's log
+entry has them, from and to. A skip that won is therefore about 2 R before costs, and one that
+was invalidated about -1 R, however far price went between that close and the fill: on a `4h` or
+`1d` skip that can be hours of movement.
+
+```text
+made at a 1h close of 100, ATR 2:  entry 100,   invalidation 98,    target 104
+filled at the next 1m open 103.9:  entry 103.9, invalidation 101.9, target 107.9
+```
+
+Skips made before this rule kept the levels from the close, so a gap since then could leave one
+`won` with 0.1 of 5.9 of risk, below 0 R after costs. `bracket_anchor` on a skip says which rule
+scored it: `fill`, or `signal_close` on a skip made before. Their results are left as they were
+scored; `get_track_record` with `group_by: "bracket_anchor"` counts the two apart.
 
 ## Listing them
 
@@ -296,7 +314,9 @@ below 0 R after costs. The
   those whose variant is still open counted apart. **Compare each with its own canonical
   figures,** not with the total: v1's open positions are the runners after T1, so until they
   end its closed ones are mostly losers.
-- Skips are in it as well, scored with the server's bracket. Filter with `decision`.
+- Skips are in it as well, scored with the server's bracket. Filter with `decision`, and group
+  by `bracket_anchor` to count skips scored from their fill apart from older ones scored from
+  the close they were made at.
 
 ## Stock setups
 

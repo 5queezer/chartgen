@@ -1931,7 +1931,8 @@ setups; `can_create` in the list says so.
   hint. A stock setup has its own costs and session rules; see
   [stock setups](/chartgen/guides/setups/#stock-setups).
 - `direction`: `long` or `short`. `decision`: `take` (default), or `skip` for a decision not to
-  trade, which takes no levels and is scored with the server's bracket.
+  trade, which takes no levels and is scored with the server's bracket, measured from its fill
+  ([ADR-0087](/chartgen/decisions/0087-a-skips-bracket-from-its-fill/)).
 - `entry`: `{low, high}`. `invalidation`: below the entry zone of a long, above that of a
   short, and at least 42 bps of the price from it (24 bps on a stock). `targets`: 1 to 4 prices beyond the zone,
   nearest first; the first decides a win. `expires_at`: unix seconds, unix ms or ISO 8601,
@@ -1980,7 +1981,9 @@ setups; `can_create` in the list says so.
   `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
 
 A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `atr` or `floor`:
-which rule set its levels), `status` (`watching`, `triggered`, `won`,
+which rule set its levels), on a skip only `bracket_anchor` (`fill`: its levels moved to its fill
+when it filled, so a win is about 2 R before costs; `signal_close`: a skip made before that rule,
+whose levels stayed at the close it was made at), `status` (`watching`, `triggered`, `won`,
 `invalidated`, `expired`, `cancelled`; **`won` means the first target was reached**, and a
 target nearer than the costs leaves a loss all the same, which `net` says), `created_at`, `costs`, `fill` and `exit` (each
 `{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off
@@ -2032,7 +2035,8 @@ many match the filters.
 - `group_by`: `playbook_version`, `feature` (with `feature`, the name of one, the server's
   `ctx_trend_4h`, `ctx_trend_1d` and `ctx_fear_greed` included), `probability`
   (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol`, `direction`,
-  `skip_reason`, or `tag` (with `tag_prefixes`, 1 to 10 starts of tags, such as
+  `skip_reason`, `bracket_anchor` (skips by the rule that scored them, takes in the `null`
+  group), or `tag` (with `tag_prefixes`, 1 to 10 starts of tags, such as
   `["trigger:alert", "trigger:scan"]`, each a group whose `key` is the prefix; a prefix that
   is a whole tag also takes longer tags that start with it). A setup that
   stated no `playbook_version` is in the group `unversioned`; one that stated none of the

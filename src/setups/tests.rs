@@ -374,7 +374,8 @@ fn skip_is_scored_with_the_default_bracket() {
     assert_eq!(long.levels.invalidation, 98.0);
     assert_eq!(long.levels.targets, [104.0]);
     assert_eq!(long.levels.expires_at, T0 + 24 * 3_600_000);
-    // In at the next bar's open, wherever that is.
+    // In at the next bar's open, wherever that is, with the bracket moved there
+    // (ADR-0087): 104.1 was the target from the close, and is no longer.
     walk(
         &mut long,
         &[
@@ -383,12 +384,109 @@ fn skip_is_scored_with_the_default_bracket() {
         ],
     );
     assert_eq!(long.fill.unwrap().price, 100.4);
+    assert_eq!(long.status, Status::Triggered);
+    assert!((long.levels.invalidation - 98.4).abs() < 1e-9);
+    assert!((long.levels.targets[0] - 104.4).abs() < 1e-9);
+    walk(&mut long, &[bar(2, 104.0, 104.5, 103.9, 104.3)]);
     assert_eq!(long.status, Status::Won);
-    assert!(long.result_r.unwrap() > 1.0);
+    assert!(long.result_r.unwrap() > 1.8, "{:?}", long.result_r);
 
     let short = skip("short");
     assert_eq!(short.levels.invalidation, 102.0);
     assert_eq!(short.levels.targets, [96.0]);
+}
+
+/// The finding behind ADR-0087: a skip made at a close of 100 (stop 98, target 104)
+/// whose next 1m bar opens at 103.9, after a move since that close. From the close, the
+/// first touch of 104 won it with 0.1 of 5.9 of risk, below 0 R after costs. From the
+/// fill, its stop is 101.9 and its target 107.9: a win is 2 R, a loss 1 R.
+#[test]
+fn a_skip_that_fills_after_a_gap_is_bracketed_from_its_fill() {
+    let mut long = skip("long");
+    walk(
+        &mut long,
+        &[
+            bar(0, 103.9, 103.95, 103.85, 103.9),
+            bar(1, 103.9, 104.1, 103.8, 104.0),
+        ],
+    );
+    assert_eq!(long.fill.unwrap().price, 103.9);
+    assert_eq!(long.status, Status::Triggered, "not won from 0.1 of a move");
+    assert_eq!(
+        long.levels.entry,
+        Zone {
+            low: 103.9,
+            high: 103.9
+        }
+    );
+    assert!((long.levels.invalidation - 101.9).abs() < 1e-9);
+    assert!((long.levels.targets[0] - 107.9).abs() < 1e-9);
+    walk(&mut long, &[bar(2, 104.0, 108.0, 103.9, 107.95)]);
+    assert_eq!(long.status, Status::Won);
+    let r = long.result_r.unwrap();
+    assert!(r > 1.8 && r < 2.0, "{r}");
+    assert_eq!(long.net(), Some("gain"));
+
+    // The move is in the log, with the fill, as from and to.
+    let view = long.view();
+    assert_eq!(view["bracket_anchor"], "fill");
+    let short = {
+        let mut short = skip("short");
+        let revisions = short.apply_bar(&bar(0, 96.5, 96.6, 96.4, 96.5));
+        let changes = &revisions.last().unwrap().changes;
+        assert_eq!(changes["invalidation"]["from"], 102.0);
+        assert!((changes["invalidation"]["to"].as_f64().unwrap() - 98.5).abs() < 1e-9);
+        assert!((changes["targets"]["to"][0].as_f64().unwrap() - 92.5).abs() < 1e-9);
+        short
+    };
+    // A short gapped down past its target from the close is in at the open, not won.
+    assert_eq!(short.status, Status::Triggered);
+}
+
+/// From the close, a skip whose next bar opened past its stop ended invalidated with no
+/// fill and 0 R, though it was a decision about that price. From the fill it is taken.
+#[test]
+fn a_skip_that_gaps_past_its_stop_from_the_close_is_still_taken() {
+    let mut long = skip("long");
+    walk(&mut long, &[bar(0, 97.5, 97.6, 97.4, 97.5)]);
+    assert_eq!(long.status, Status::Triggered);
+    assert_eq!(long.fill.unwrap().price, 97.5);
+    assert!((long.levels.invalidation - 95.5).abs() < 1e-9);
+    walk(&mut long, &[bar(1, 97.5, 97.6, 95.0, 95.2)]);
+    assert_eq!(long.status, Status::Invalidated);
+    let r = long.result_r.unwrap();
+    assert!(r < -1.0 && r > -1.2, "{r}");
+}
+
+/// A skip stored before ADR-0087 has no bracket_anchor: it reads as signal_close and is
+/// scored as it was, so a stored result and one scored on after a restart agree.
+#[test]
+fn a_skip_stored_before_the_fill_rule_keeps_its_bracket_at_the_close() {
+    let mut stored = serde_json::to_value(skip("long")).unwrap();
+    assert_eq!(stored["bracket_anchor"], "fill");
+    stored.as_object_mut().unwrap().remove("bracket_anchor");
+    let mut old = serde_json::from_value::<Record>(stored).unwrap();
+    assert_eq!(old.bracket_anchor, None);
+    assert_eq!(old.view()["bracket_anchor"], "signal_close");
+    walk(
+        &mut old,
+        &[
+            bar(0, 103.9, 103.95, 103.85, 103.9),
+            bar(1, 103.9, 104.1, 103.8, 104.0),
+        ],
+    );
+    assert_eq!(old.levels.invalidation, 98.0);
+    assert_eq!(old.status, Status::Won);
+    assert_eq!(old.net(), Some("loss"));
+
+    // A take has none, and the field is not written for it.
+    let take = create(long_args());
+    assert_eq!(take.bracket_anchor, None);
+    assert!(take.view().get("bracket_anchor").is_none());
+    assert!(serde_json::to_value(&take)
+        .unwrap()
+        .get("bracket_anchor")
+        .is_none());
 }
 
 #[test]

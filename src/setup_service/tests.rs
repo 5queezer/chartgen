@@ -2918,6 +2918,45 @@ async fn skips_say_why_and_the_record_groups_by_it_and_by_tag_prefix() {
     assert_eq!(by_tag["total"]["count"], 3);
 }
 
+/// The track record counts skips by the rule that scored them (ADR-0087): from the fill,
+/// or from the close on a skip stored before that rule. Takes are in the null group.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_record_groups_skips_by_where_their_bracket_was_measured_from() {
+    let s = live();
+    let skip = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+        "decision": "skip", "thesis": "example thesis" });
+    let made = call(&s, "create_setup", skip.clone(), "owner").unwrap();
+    assert_eq!(made["bracket_anchor"], "fill");
+    call(&s, "create_setup", skip, "owner").unwrap();
+    let take = call(&s, "create_setup", long(), "owner").unwrap();
+    assert!(take.get("bracket_anchor").is_none(), "{take}");
+    for held in s.lock().setups.values_mut() {
+        held.record.status = Status::Expired;
+        held.record.result_r = Some(0.0);
+        if held.record.id == made["id"] {
+            held.record.bracket_anchor = None;
+        }
+    }
+    let by = call(
+        &s,
+        "get_track_record",
+        json!({ "group_by": "bracket_anchor" }),
+        "owner",
+    )
+    .unwrap();
+    assert_eq!(
+        keys(&by),
+        [json!(null), json!("fill"), json!("signal_close")]
+    );
+    let counts: Vec<Value> = by["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["count"].clone())
+        .collect();
+    assert_eq!(counts, [json!(1), json!(1), json!(1)]);
+}
+
 fn skip_refused(s: &Setups, reason: &str) -> bool {
     let args = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
         "decision": "skip", "thesis": "example thesis", "skip_reason": reason });

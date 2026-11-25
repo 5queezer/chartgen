@@ -172,6 +172,7 @@
     "bars_to_mae": null,
     "bars_to_mfe": null,
     "bracket": "atr",
+    "bracket_anchor": "fill",
     "closest_approach_r": null,
     "costs": {
       "fee_bps_per_side": 5.0,
@@ -424,6 +425,7 @@
         "bars_to_mae": 0.47,
         "bars_to_mfe": 2.47,
         "bracket": "atr",
+        "bracket_anchor": "fill",
         "closest_approach_r": 0.0,
         "costs": {
           "fee_bps_per_side": 5.0,

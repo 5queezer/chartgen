@@ -1061,6 +1061,10 @@ export const SetupSchema = SetupLevelsSchema.extend({
   // Which rule set the levels: the agent, or for a skip the server's bracket from the
   // ATR, or at the least risk a setup may have where the ATR was less.
   bracket: z.enum(["agent", "atr", "floor"]),
+  // A skip only (ADR-0087): fill when its levels moved to its fill, signal_close on a
+  // skip made before that rule, whose levels stayed at the close it was made at.
+  // Absent on a take.
+  bracket_anchor: z.enum(["fill", "signal_close"]).optional(),
   status: SetupStatusSchema,
   created_at: z.number(),
   // The assumption the result is scored with, in basis points per side.
@@ -1277,7 +1281,16 @@ export const TrackRecordPayloadSchema = z.object({
   /** True when older closed setups were left out. */
   truncated: z.boolean(),
   group_by: z
-    .enum(["playbook_version", "feature", "probability", "symbol", "direction", "tag", "skip_reason"])
+    .enum([
+      "playbook_version",
+      "feature",
+      "probability",
+      "symbol",
+      "direction",
+      "tag",
+      "skip_reason",
+      "bracket_anchor",
+    ])
     .nullable(),
   feature: z.string().nullable(),
   /** With group_by tag: the prefixes as sent. A setup is in each one's group that one of its tags starts with, so groups can overlap. */
