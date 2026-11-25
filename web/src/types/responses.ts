@@ -743,6 +743,8 @@ export const ServerAlertSchema = z.object({
   notify_agent: z.boolean().optional(),
   /** Present only on an alert that is about one of the owner's setups. */
   setup_id: z.string().optional(),
+  /** Present only on an alert with an end: unix ms after which it does not fire. */
+  expires_at: z.number().int().optional(),
   /**
    * Present only on an alert on an indicator's line at bar closes (ADR-0067). `value` is
    * the line at the last close it read, null until it has read one.

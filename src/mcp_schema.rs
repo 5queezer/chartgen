@@ -693,19 +693,20 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "sign": { "type": "boolean", "description": "Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.", "default": false },
                     "push": { "type": "boolean", "description": "Notify your devices (subscribe_push) when it fires. May go with a webhook.", "default": false },
                     "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires: a signed POST to the receiver this server's operator configured for you. Instead of webhook_url, not with it. Refused where no receiver is configured for you.", "default": false },
-                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, shadow results, thesis)." }
+                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, shadow results, thesis)." },
+                    "expires_at": { "type": ["integer", "string"], "description": "When the alert stops, as unix seconds, unix ms or an ISO 8601 time, in the future and at most a year ahead: no price or close after it fires it, and within a minute it is switched off (active: false) and deleted 7 days later. Default: no end." }
                 },
                 "required": ["symbol", "condition", "trigger"]
             }
         }),
         json!({
             "name": "list_server_alerts",
-            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, expires_at (unix ms, when set), feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "update_server_alert",
-            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on and an indicator alert's indicator, params, line and compare cannot change: delete and create instead.",
+            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. An alert past its expires_at runs again only with active: true and a later expires_at, or an empty one; without active: true it stays stopped. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on and an indicator alert's indicator, params, line and compare cannot change: delete and create instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -719,7 +720,8 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "sign": { "type": "boolean", "description": "true: sign with a new secret. false: stop signing." },
                     "push": { "type": "boolean", "description": "Notify your devices when it fires, or stop." },
                     "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires, or stop. Not together with a webhook_url." },
-                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about, or an empty string to take it off. Needs notify_agent." }
+                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about, or an empty string to take it off. Needs notify_agent." },
+                    "expires_at": { "type": ["integer", "string"], "description": "A new end, in the future, or an empty string for none. It does not switch on an alert that has expired, even one the sweep has not switched off yet: send active: true with it." }
                 },
                 "required": ["alert_id"]
             }
