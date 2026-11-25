@@ -502,7 +502,7 @@ impl Problem {
 /// The error text of a call that did not pass as a whole.
 pub fn problems_text(problems: &[Problem]) -> String {
     let all: Vec<Value> = problems.iter().map(Problem::to_json).collect();
-    serde_json::to_string_pretty(&json!({
+    serde_json::to_string(&json!({
         "error": format!(
             "{} problem(s) with this setup; nothing was stored. Fix them and send the call again.",
             problems.len()

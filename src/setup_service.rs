@@ -213,7 +213,7 @@ fn field_problem(field: &str, message: impl Into<String>) -> String {
 /// speak of storing.
 fn read_problem(field: &str, message: impl Into<String>) -> String {
     let problem = Problem::new(field, message).to_json();
-    serde_json::to_string_pretty(&json!({
+    serde_json::to_string(&json!({
         "error": "1 problem with this call; nothing was read. Fix it and send the call again.",
         "setup_errors": [problem],
     }))

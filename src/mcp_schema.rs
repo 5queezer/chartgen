@@ -149,10 +149,12 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "list_indicators",
-                "description": format!("List all available technical analysis indicators supported by the chart generation tool. Returns {n} indicators organized by category: momentum indicators (RSI, MACD, Stochastic, CCI, Williams %R, ROC), trend indicators (EMA stack, Supertrend, ADX, Ichimoku Cloud, Parabolic SAR), volatility indicators (Bollinger Bands, ATR, Keltner Channels, Donchian Channels, Historical Volatility), volume indicators (OBV, MFI, CMF, VWAP, CVD, A/D Line), and crypto-specific indicators (Funding Rate, Open Interest, Long/Short Ratio, Fear & Greed Index). Each indicator includes a description, configurable parameters with defaults, and whether it renders as an overlay on the price chart or as a separate panel. Call this before generate_chart to discover valid indicator names and their configuration options."),
+                "description": format!("List all available technical analysis indicators supported by the chart generation tool. Returns {n} indicators organized by category: momentum indicators (RSI, MACD, Stochastic, CCI, Williams %R, ROC), trend indicators (EMA stack, Supertrend, ADX, Ichimoku Cloud, Parabolic SAR), volatility indicators (Bollinger Bands, ATR, Keltner Channels, Donchian Channels, Historical Volatility), volume indicators (OBV, MFI, CMF, VWAP, CVD, A/D Line), and crypto-specific indicators (Funding Rate, Open Interest, Long/Short Ratio, Fear & Greed Index). Each indicator includes a description, configurable parameters with defaults, and whether it renders as an overlay on the price chart or as a separate panel. Call this before generate_chart to discover valid indicator names and their configuration options. The full list is about 35 KB; detail: compact returns each indicator's name and its parameters' defaults ({{\"name\": \"rsi\", \"params\": {{\"length\": 14}}}}), about 5 KB."),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "detail": { "type": "string", "enum": ["full", "compact"], "default": "full", "description": "full: each indicator with its description, category, aliases and every parameter's type, range and description. compact: only its name, params (each parameter's default, by name, null where it has none; params is absent when the indicator has no parameters) and, for a script of yours, source: \"user\" (generate_chart takes those; get_indicators computes built-ins only)." }
+                    }
                 }
             },
             {

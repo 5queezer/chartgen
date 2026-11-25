@@ -436,11 +436,32 @@ export const IndicatorInfoSchema = z.object({
   source: z.literal("user").optional(),
 });
 
+// `list_indicators` as the web app asks for it, with no `detail`: the full entries.
 export const ListIndicatorsPayloadSchema = z.object({
   total: z.number().int(),
   indicators: z.array(IndicatorInfoSchema),
 });
 export type ListIndicatorsPayload = z.infer<typeof ListIndicatorsPayloadSchema>;
+
+/**
+ * `list_indicators` with `detail: "compact"` (ADR-0078): each indicator's name, its
+ * parameters' defaults by name (null where one has none; absent without parameters), and
+ * `source: "user"` for the caller's scripts. The web app does not ask for it.
+ */
+export const CompactIndicatorInfoSchema = z
+  .object({
+    name: z.string(),
+    params: z.record(z.string(), z.unknown()).optional(),
+    source: z.literal("user").optional(),
+  })
+  .strict();
+export type CompactIndicatorInfo = z.infer<typeof CompactIndicatorInfoSchema>;
+
+export const CompactIndicatorsPayloadSchema = z.object({
+  total: z.number().int(),
+  indicators: z.array(CompactIndicatorInfoSchema),
+});
+export type CompactIndicatorsPayload = z.infer<typeof CompactIndicatorsPayloadSchema>;
 
 // ---------------------------------------------------------------------------
 // Scripted indicators (ADR-0025, ADR-0041): `tool_list_my_indicators`,
