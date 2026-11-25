@@ -48,7 +48,8 @@ shape the frontend consumes:
 - `SummaryPayloadSchema` — `generate_chart` with `format=summary` (also
   embedded in `format=both`).
 - `ListIndicatorsPayloadSchema` — `list_indicators`.
-- `GetIndicatorsPayloadSchema` — `get_indicators`.
+- `GetIndicatorsPayloadSchema` — `get_indicators`; `GetIndicatorsIntervalsPayloadSchema`
+  when it is called with `intervals`.
 - `QuotesPayloadSchema` — `get_quotes`.
 - `SearchSymbolsPayloadSchema` — `search_symbols`.
 

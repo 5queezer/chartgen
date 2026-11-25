@@ -861,7 +861,8 @@ Compute indicators and return raw numeric values as JSON. Fetches OHLCV (or
 uses cached engine data under `--trade`) and reports each indicator's last
 line values, dot presence (signals), and horizontal reference levels.
 
-Required: `symbol`, `indicators` (array of names). Optional: `interval` (default `4h`).
+Required: `symbol`, `indicators` (array of names). Optional: `interval` (default `4h`),
+or `intervals` for several at once (below).
 
 Response shape:
 
@@ -881,6 +882,32 @@ Response shape:
 `source` is `engine_cache` when hitting the running trading engine's rolling
 window, `fetched` when the tool fell back to fresh OHLCV. The per-indicator
 object is the same shape `generate_chart` returns under `format=summary`.
+
+##### Several intervals in one call
+
+Pass `intervals` (1 to 6, e.g. `["1h", "4h", "1d"]`) instead of `interval` to read
+several timeframes at once; giving both is an error, and two spellings of one interval
+(`60m`, `1h`) count once. The answer is compact JSON with one entry per interval, in
+request order. An interval that fails says so in its entry; the others still answer:
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "intervals": [
+    { "interval": "1h", "source": "fetched", "bars": 200,
+      "indicators": { "rsi": { "label": "RSI", "lines": [{ "label": "RSI", "last_value": 40.6 }],
+                               "hlines": [{ "y": 70.0 }, { "y": 30.0 }, { "y": 50.0 }] } } },
+    { "interval": "4h", "source": "fetched", "bars": 200, "indicators": { "rsi": { "...": "..." } } },
+    { "interval": "1d", "error": "Failed to fetch data: ..." }
+  ]
+}
+```
+
+Each indicator is the one-interval object less the fields that only draw it:
+`is_overlay`, `y_range`, `fills_count`, `decorative_dots`, and the `index` of each line
+and histogram bucket (their order is kept). Values, signals, levels, patterns and
+divergences are all there. Three intervals of a typical set of nine indicators answer in
+about 4.5 KB, against about 12 KB for three one-interval calls.
 
 #### `get_quotes`
 
