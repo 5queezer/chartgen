@@ -1217,13 +1217,11 @@ impl ServerAlerts {
         Some((r.prev, r.d, Some(r.value)))
     }
 
-    /// Whether every `and` clause of the alert holds at the close of the bar opening at
-    /// `bar_time`, read from the feed's bars; true for an alert without. What each read
-    /// is kept for its list and its fires.
-    fn clauses_hold(&self, st: &mut State, key: &FeedKey, id: &str, bar_time: i64) -> bool {
-        let Some(alert) = st.alerts.get(id).filter(|a| !a.and.is_empty()) else {
-            return true;
-        };
+    /// The alert's `and` clauses at the close of the bar opening at `bar_time`, read from
+    /// the feed's bars: whether every one holds, and what each read. `None` for an alert
+    /// without.
+    fn clauses_read(st: &State, key: &FeedKey, id: &str, bar_time: i64) -> Option<ClauseRead> {
+        let alert = st.alerts.get(id).filter(|a| !a.and.is_empty())?;
         let bars = st
             .watches
             .get(key)
@@ -1236,9 +1234,10 @@ impl ServerAlerts {
             _ => &[],
         };
         let read: Vec<(bool, Option<f64>)> = alert.and.iter().map(|c| c.holds(window)).collect();
-        st.and_values
-            .insert(id.to_string(), read.iter().map(|(_, v)| *v).collect());
-        read.iter().all(|(h, _)| *h)
+        Some((
+            read.iter().all(|(h, _)| *h),
+            read.iter().map(|(_, v)| *v).collect(),
+        ))
     }
 
     /// `ids` at `price` on the bar opening at `bar_time`: futures-data alerts once
@@ -1259,7 +1258,7 @@ impl ServerAlerts {
                 .is_some_and(indicator::Spec::reads_futures)
         });
         for id in now_read {
-            self.evaluate(st, key, &id, price, bar_time, now, None);
+            self.evaluate(st, key, &id, price, bar_time, now, None, None);
         }
         if !futures.is_empty() {
             self.read_futures_later(st, key, futures, price, bar_time);
@@ -1288,6 +1287,8 @@ impl ServerAlerts {
             let Some(spec) = st.alerts.get(&id).and_then(|a| a.indicator.clone()) else {
                 continue;
             };
+            // The clauses are read now, at this close, with the bars it closed on.
+            let clauses = Self::clauses_read(st, key, &id, bar_time);
             let (me, key, tail) = (self.me.clone(), key.clone(), tail.clone());
             self.runtime.spawn(async move {
                 let read = {
@@ -1297,7 +1298,7 @@ impl ServerAlerts {
                         .unwrap_or_else(|e| Err(e.to_string()))
                 };
                 if let Some(this) = me.upgrade() {
-                    this.futures_read(&key, &id, price, bar_time, read);
+                    this.futures_read(&key, &id, price, bar_time, read, clauses);
                 }
             });
         }
@@ -1310,6 +1311,7 @@ impl ServerAlerts {
         price: f64,
         bar_time: i64,
         read: Result<indicator::Reading, String>,
+        clauses: Option<ClauseRead>,
     ) {
         let mut guard = self.lock();
         let st = &mut *guard;
@@ -1325,7 +1327,10 @@ impl ServerAlerts {
         }
         st.futures_bars.insert(id.to_string(), bar_time);
         match read {
-            Ok(r) => self.evaluate(st, key, id, price, bar_time, Instant::now(), Some(r)),
+            Ok(r) => {
+                let now = Instant::now();
+                self.evaluate(st, key, id, price, bar_time, now, Some(r), clauses)
+            }
             // The value read before stays: funding moves at a settlement only, so its
             // crossing shows at one close, and the next read can still find it.
             Err(e) => eprintln!("[alerts] {} {}: {e}", key.0, key.1),
@@ -1342,6 +1347,7 @@ impl ServerAlerts {
         bar_time: i64,
         now: Instant,
         given: Option<indicator::Reading>,
+        clauses: Option<ClauseRead>,
     ) {
         let Some((prev, d, value)) = self.reading(st, key, id, price, bar_time, given) else {
             return;
@@ -1355,7 +1361,15 @@ impl ServerAlerts {
         };
         // Both readings are already relative to the level.
         let (condition, trigger) = (alert.condition, alert.trigger);
-        let holds = self.clauses_hold(st, key, id, bar_time);
+        // A futures-data alert brings the clauses read at its close: the bars can have
+        // gone while its read was out.
+        let holds = match clauses.or_else(|| Self::clauses_read(st, key, id, bar_time)) {
+            None => true,
+            Some((holds, values)) => {
+                st.and_values.insert(id.to_string(), values);
+                holds
+            }
+        };
         let (next, fired) = step(condition, trigger, 0.0, armed, prev, d, holds);
         let (next, fired) = if fired
             && trigger == Trigger::Every
@@ -3361,6 +3375,10 @@ async fn run_upkeep(alerts: Weak<ServerAlerts>) {
 }
 
 mod indicator;
+
+/// What an alert's `and` clauses read at a close: whether all of them hold, and what
+/// each read.
+type ClauseRead = (bool, Vec<Option<f64>>);
 
 /// An alert's clauses as it shows them, with what each read at its last close; `None`
 /// for an alert without.

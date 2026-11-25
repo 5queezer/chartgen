@@ -91,4 +91,4 @@ of ADR-0042 bound it.
   the Alerts tab names it "… and 2 more".
 - **After a rollback**, a build from before this ignores `and`: such an alert fires on its own
   condition alone, as a plain alert. When that build stores it again, the clauses are gone. The
-  deploy guide's rollback notes say to pause such alerts first.
+  deploy guide's rollback notes say to save their definitions and pause them first.

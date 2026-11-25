@@ -5742,3 +5742,24 @@ async fn a_drawing_alert_with_clauses_waits_for_the_bars_before_reading_a_close(
     assert_eq!(a.lock().alerts[&id].fire_count, 1);
     std::mem::forget(setups);
 }
+
+/// A funding alert's clauses are read with the close its funding read started for: the
+/// bars can be gone by the time the read is back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_funding_alerts_clauses_are_read_at_its_close_not_when_the_read_is_back() {
+    let mut args = on_funding("SLOWUSDT", "greater", 0.05);
+    args["and"] = json!([{ "condition": "crossing_up", "level": 100 }]);
+    let (a, k, id, t) = funding_alert("and-funding-slow", "SLOWUSDT", args).await;
+    // Funding is over 0.05% at both closes; the price crosses 100 at the second.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 99.0)));
+    until("the first read", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + HOUR))
+    })
+    .await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 0, "99 did not cross 100");
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 101.0)));
+    // The bars go while the 400 ms read is out, as after a lag.
+    a.lock().watches.get_mut(&k).unwrap().bars.take();
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+    assert_eq!(get(&a, "me", &id).await["and"][0]["price"], 101.0);
+}
