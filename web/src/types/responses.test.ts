@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import compactIndicators from "../../../tests/fixtures/list_indicators_compact.json";
+import news from "../../../tests/fixtures/news_response.json";
 import answers from "../../../tests/fixtures/setup_responses.json";
 import stock from "../../../tests/fixtures/stock_setup_responses.json";
 import record from "../../../tests/fixtures/track_record_responses.json";
@@ -8,6 +9,7 @@ import {
   CompactIndicatorsPayloadSchema,
   EventsPayloadSchema,
   ListIndicatorsPayloadSchema,
+  NewsPayloadSchema,
   QuotesPayloadSchema,
   SeriesPayloadSchema,
   SetupPayloadSchema,
@@ -451,6 +453,15 @@ describe("what a setup was made with, and the track record (ADR-0064)", () => {
     const bad = structuredClone(record.get_track_record_grouped) as { groups: { key: unknown }[] };
     bad.groups[0]!.key = { nested: 1 };
     expect(() => TrackRecordPayloadSchema.parse(bad)).toThrow();
+  });
+});
+
+describe("get_news (ADR-0086)", () => {
+  it("parses the answer the server gives, with a failed feed and more headlines", () => {
+    const p = NewsPayloadSchema.parse(news);
+    expect(p.items.length).toBe(2);
+    expect(p.more).toBe(2);
+    expect(p.sources_failed[0]?.source).toBe("Decrypt");
   });
 });
 

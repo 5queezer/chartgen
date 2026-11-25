@@ -649,6 +649,35 @@ export const MarketContextPayloadSchema = z.object({
 export type MarketContextPayload = z.infer<typeof MarketContextPayloadSchema>;
 
 // ---------------------------------------------------------------------------
+// get_news (ADR-0086)
+//   Produced by `answer` in `src/news.rs`. Headlines only, newest first. A feed that
+//   could not be read is in `sources_failed`; `more` is present only when more
+//   headlines matched than `limit`.
+// ---------------------------------------------------------------------------
+
+export const NewsItemSchema = z.object({
+  /** When the outlet published it, ISO 8601 UTC. */
+  time: z.string(),
+  /** The outlet's name, as the feed list names it. */
+  source: z.string(),
+  title: z.string(),
+  url: z.string(),
+});
+export type NewsItem = z.infer<typeof NewsItemSchema>;
+
+export const NewsPayloadSchema = z.object({
+  symbol: z.string(),
+  /** The ticker and names a headline was matched by. */
+  terms: z.array(z.string()),
+  hours: z.number().int(),
+  items: z.array(NewsItemSchema),
+  more: z.number().int().optional(),
+  sources: z.array(z.string()),
+  sources_failed: z.array(z.object({ source: z.string(), error: z.string() })),
+});
+export type NewsPayload = z.infer<typeof NewsPayloadSchema>;
+
+// ---------------------------------------------------------------------------
 // search_symbols — `search_symbols` in `src/mcp.rs` / `src/search.rs`.
 //   Ranked results (exact symbol, prefix, contains, name match). `warnings`
 //   is present only when one source failed and its results are missing.

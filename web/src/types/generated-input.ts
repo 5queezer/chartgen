@@ -600,6 +600,21 @@ export interface GetMarketContextInput {
     | [string, string, string, string, string, string, string, string, string, string];
 }
 
+export interface GetNewsInput {
+  /**
+   * How far back, in hours.
+   */
+  hours?: number;
+  /**
+   * Most headlines returned.
+   */
+  limit?: number;
+  /**
+   * Ticker symbol, e.g. "BTCUSDT": its coin (BTC) is read off the quote (USDT, USDC, FDUSD, BUSD, USD).
+   */
+  symbol: string;
+}
+
 export interface GetNotificationsInput {}
 
 export interface GetOrdersInput {

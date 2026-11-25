@@ -164,7 +164,7 @@ Status legend:
 | Pine-like series operators and `ta.*` functions in scripts | ✅ | ✅ | Element-wise operators, `close[1]`, comparisons, `ta.sma/ema/rsi/atr/macd/crossover` and more, with the Pine v5 code the built-ins use. Pivot tie rule is unverified against TradingView. [Series](/chartgen/guides/scripted-indicators/#series), [`ta.*`](/chartgen/guides/scripted-indicators/#ta-functions) |
 | Fork a built-in as a script | ✅ (open source scripts) | ◐ | `fork_indicator` works for `wavetrend` only. [Forking](/chartgen/guides/scripted-indicators/#forking-a-built-in) |
 | Script editor in the web app | ✅ | ◐ | Create, edit, save, delete and add to the chart, with errors at their line. Only on servers with `CHARTGEN_SCRIPTING=1`. No autocomplete, no renaming and no fork button yet. [Script editor](/chartgen/guides/web/#script-editor), [ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) |
-| Programmatic access (API, agents) | partial | ✅ | The MCP server lists 24 tools on every server, including chart generation, indicators, quotes, market context, symbol search, order flow and the 12 `--trade` tools. Where the features are on it adds 5 scripting tools, 6 server-alert tools, 6 setup tools and `list_events`: 42 at most. [MCP reference](/chartgen/reference/mcp/#tool-catalog) |
+| Programmatic access (API, agents) | partial | ✅ | The MCP server lists 25 tools on every server, including chart generation, indicators, quotes, market context, news per symbol, symbol search, order flow and the 12 `--trade` tools. Where the features are on it adds 5 scripting tools, 6 server-alert tools, 6 setup tools and `list_events`: 43 at most. [MCP reference](/chartgen/reference/mcp/#tool-catalog) |
 
 ## Data sources
 

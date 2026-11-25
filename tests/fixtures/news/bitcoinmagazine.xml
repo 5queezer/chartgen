@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The structure of Bitcoin Magazine's feed as read on 2026-11-25; the headlines are made up. -->
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Bitcoin Magazine</title>
+    <link>https://bitcoinmagazine.com</link>
+    <description>Example feed</description>
+    <item>
+      <title>Long-Term Holders Return to Accumulation</title>
+      <link>https://bitcoinmagazine.com/markets/long-term-holders-example</link>
+      <dc:creator><![CDATA[Example Author]]></dc:creator>
+      <pubDate>Tue, 24 Nov 2026 22:30:03 +0000</pubDate>
+      <category><![CDATA[Markets]]></category>
+      <category><![CDATA[Bitcoin]]></category>
+      <guid isPermaLink="false">https://bitcoinmagazine.com/markets/long-term-holders-example</guid>
+      <description><![CDATA[<div><p>Made-up body that would be long.</p></div>]]></description>
+    </item>
+    <item>
+      <title>The Same Link Twice Is Shown Once</title>
+      <link>https://www.coindesk.com/markets/2026/11/25/btc-slips-example</link>
+      <pubDate>Wed, 25 Nov 2026 05:15:08 +0000</pubDate>
+      <category><![CDATA[Bitcoin]]></category>
+    </item>
+  </channel>
+</rss>
