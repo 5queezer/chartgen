@@ -1527,8 +1527,10 @@ the closes of the alert's interval.
 - `change_bars`: 1 to 199, required with `oi` and taken by nothing else. `level` is the change in
   percent: `crossing_up` 5 is open interest rising by 5% or more over those bars, `less` -3 is
   it having fallen by more than 3%.
-- The change runs from `change_bars` bars before the bar that closed to that bar, as
-  `get_indicators`' `change` does (from its last value). Binance keeps 30 days of open interest,
+- The change runs from `change_bars` bars before the bar that closed to that bar. It is
+  `get_indicators`' `change.pct` over the same bars, but the tool's ends at the bar still forming
+  and the alert's at the bar that closed; a close whose bar has no open interest has no reading
+  rather than an earlier bar's change. Binance keeps 30 days of open interest,
   so on 4h `change_bars` reaches about 185 bars and on 1d about 31; an alert reaching further, or
   on a symbol with no futures market, is refused when it is created, with the reason.
 - It is read as [funding](#funding-on-the-server) is: off the alerts' lock, through the same cache

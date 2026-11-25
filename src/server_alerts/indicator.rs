@@ -102,6 +102,16 @@ pub(super) struct Reading {
 }
 
 /// The indicator alert `args` ask for, or `None` for a price alert.
+/// The futures-data indicator `args` names, by its own name, if it names one.
+pub(super) fn futures_named(args: &Value) -> Option<&'static str> {
+    let given = args.get("indicator")?.as_str()?.trim();
+    let name = FUTURES_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == given)
+        .map_or(given, |(_, canonical)| canonical);
+    FUTURES.iter().copied().find(|f| *f == name)
+}
+
 pub(super) fn parse(args: &Value) -> Result<Option<Spec>, String> {
     let name = match args.get("indicator") {
         None | Some(Value::Null) => {
@@ -374,7 +384,13 @@ pub(super) fn futures_reading(spec: &Spec, tail: &[Bar], y: &[f64]) -> Option<Re
     let Some(n) = spec.change_bars else {
         return reading(spec, tail, y);
     };
-    // Open interest's line does not break: its change ends at its last value.
+    // The bar that closed must have a value: `change_over` ends at the last finite one,
+    // as a tool answer does, and would otherwise give an earlier bar's change as this
+    // close's (ADR-0085).
+    if !y.last().is_some_and(|v| v.is_finite()) {
+        return None;
+    }
+    // Open interest's line does not break: its change ends at that value.
     let (from, to) = chartgen::indicator::change_over(y, false, n)?;
     let pct = chartgen::indicator::change_pct(from, to)?;
     Some(Reading {
@@ -514,6 +530,12 @@ mod tests {
         zero[at] = 0.0;
         assert!(futures_reading(&spec, &bars, &zero).is_none());
         assert!(futures_reading(&spec, &bars[..3], &y[..3]).is_none());
+        // No value at the bar that closed: no reading, not the change up to an earlier
+        // bar (which change_over, ending at the last finite value, would give).
+        let gap = [100.0, 100.0, 100.0, 106.0, f64::NAN, f64::NAN, f64::NAN];
+        let tail = &bars[..gap.len()];
+        assert!(chartgen::indicator::change_over(&gap, false, 3).is_some());
+        assert!(futures_reading(&spec, tail, &gap).is_none());
         assert_eq!(view(&spec, Some(r.value))["change_bars"], 3);
         let rsi = parse(&json!({ "indicator": "rsi", "level": 30 }))
             .unwrap()

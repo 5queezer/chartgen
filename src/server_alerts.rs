@@ -2683,7 +2683,15 @@ impl ServerAlerts {
                     a.drawing.clone(),
                 ),
             };
-        for field in ["indicator", "params", "line", "compare", "drawing", "and"] {
+        for field in [
+            "indicator",
+            "params",
+            "line",
+            "compare",
+            "change_bars",
+            "drawing",
+            "and",
+        ] {
             if args.get(field).is_some_and(|v| !v.is_null()) {
                 return Err(format!(
                     "{field} cannot change: delete the alert and create another"

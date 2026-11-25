@@ -5849,3 +5849,24 @@ async fn an_oi_alert_needs_change_bars_and_a_futures_market() {
     assert!(call(&a, "create_server_alert", args, "me").await.is_err());
     assert!(a.lock().alerts.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oi_alerts_change_bars_cannot_change() {
+    let (store, _) = store_at("oi-update");
+    let a = plain(store);
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "indicator": "oi", "change_bars": 3, "condition": "crossing_up", "level": 5,
+        "trigger": "once",
+    });
+    let id = create(&a, args, "me").await;
+    let args = json!({ "alert_id": id, "change_bars": 6 });
+    let err = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("change_bars cannot change"), "{err}");
+    assert_eq!(
+        a.lock().alerts[&id].indicator.as_ref().unwrap().change_bars,
+        Some(3)
+    );
+}
