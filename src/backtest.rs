@@ -81,6 +81,19 @@ fn parse_rule(text: &str) -> Result<Rule, String> {
     if file.symbols.is_empty() {
         return Err("symbols: name at least one".into());
     }
+    // The answer groups by symbol, and a record holds at most this many groups.
+    if file.symbols.len() > setups::MAX_RECORD_GROUPS {
+        return Err(format!("symbols: at most {}", setups::MAX_RECORD_GROUPS));
+    }
+    // Twice the same symbol would score its trades twice.
+    if let Some((i, s)) = file
+        .symbols
+        .iter()
+        .enumerate()
+        .find(|(i, s)| file.symbols[..*i].contains(s))
+    {
+        return Err(format!("symbols: {s} is named twice (symbols[{i}])"));
+    }
     if let Some(s) = file
         .symbols
         .iter()
@@ -239,7 +252,8 @@ fn run_symbol(rule: &Rule, replay: &Replay, symbol: &str, run: &mut Run) -> Resu
             close_ms,
             &mut problems,
         );
-        if !problems.is_empty() || levels.invalidation <= 0.0 {
+        // A price at or below 0 (a far stop, a far target) is no bracket a setup can have.
+        if !problems.is_empty() || !levels.positive() {
             run.refused += 1;
             continue;
         }
@@ -516,6 +530,22 @@ mod tests {
         assert!(records.is_empty());
     }
 
+    #[test]
+    fn a_bracket_with_a_price_below_0_is_refused_and_counted() {
+        // Short, in at 105 with the stop 60 % above: risk 63, so a 2 R target is at -21.
+        let text = CROSS_RULE
+            .replace(r#""long""#, r#""short""#)
+            .replace(r#""pct": 2"#, r#""pct": 60"#);
+        let rule = parse_rule(&text).unwrap();
+        let (answer, records) =
+            report(&rule, &text, &replay_of(hours(&[100.0, 105.0, 105.0]))).unwrap();
+        assert_eq!(
+            (answer["signals"].as_u64(), answer["refused"].as_u64()),
+            (Some(1), Some(1))
+        );
+        assert!(records.is_empty());
+    }
+
     /// RSI over the bars an alert reads: a cut of the fixture after a signal gives the
     /// same signals up to it, and no fill is inside its signal bar.
     #[test]
@@ -551,6 +581,15 @@ mod tests {
     fn what_a_rule_refuses() {
         let err = |from: &str, to: &str| parse_rule(&CROSS_RULE.replace(from, to)).err().unwrap();
         assert!(err(r#""BTCUSDT""#, r#""NVDA""#).contains("is a stock"));
+        assert_eq!(
+            err(r#"["BTCUSDT"]"#, r#"["BTCUSDT", "ETHUSDT", "BTCUSDT"]"#),
+            "symbols: BTCUSDT is named twice (symbols[2])"
+        );
+        let many: Vec<String> = (0..51).map(|i| format!("\"S{i}USDT\"")).collect();
+        assert_eq!(
+            err(r#"["BTCUSDT"]"#, &format!("[{}]", many.join(","))),
+            "symbols: at most 50"
+        );
         assert!(err(r#""level": 102"#, r#""level": 102, "x": 1"#).starts_with("when[0]:"));
         assert!(err(r#""pct": 2"#, r#""pct": 0"#).starts_with("stop:"));
         assert!(err("[2]", "[2, 1.5]").starts_with("targets_r:"));

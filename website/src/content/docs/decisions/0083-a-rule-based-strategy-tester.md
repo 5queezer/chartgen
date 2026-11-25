@@ -340,8 +340,9 @@ chartgen backtest --rule rule.json --fixtures <dir> [--trades trades.csv]
    R multiples of that risk, nearest first, at most four; the expiry is a duration from the
    signal (`24h`, `3d`), at most 90 days. The trade is a take whose entry zone is the fill price,
    so it fills in that bar, and is scored by `apply_bar` exactly as a setup. Levels that
-   `create_setup` would refuse, in practice a stop closer than the risk floor, are not traded
-   and are counted as `refused`; they are never widened. The stop at the signal bar's extreme is
+   `create_setup` would refuse, in practice a stop closer than the risk floor, and levels with a
+   price at or below 0 (`Levels::positive`), are not traded and are counted as `refused`; they
+   are never widened. The stop at the signal bar's extreme is
    not in this first version. **Overlap:** one open trade per rule and symbol. A signal before
    the 1m bar in which that trade ended has closed is counted as `skipped_open`. A trade whose
    exit variants are still open does not hold the symbol. The per-owner limits of a server

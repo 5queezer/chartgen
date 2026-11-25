@@ -54,7 +54,7 @@ after 24 hours. The example is made up and is in the repository as
 | Field | Meaning |
 |-------|---------|
 | `name` | The rule's name. Its trades are tagged `backtest` and `rule:<name>`. |
-| `symbols` | Binance symbols the fixtures hold. Stocks are refused for now. |
+| `symbols` | Binance symbols the fixtures hold, each once, at most 50. Stocks are refused for now. |
 | `interval` | The interval the conditions are read on, 1m or longer, built from the fixture's 1m bars as a replay builds it. |
 | `direction` | `long` or `short`. |
 | `when` | One to four conditions, joined by AND. Each is written as a [server alert's `and` condition](/chartgen/reference/mcp/#conditions-joined-by-and): `condition` (`crossing`, `crossing_up`, `crossing_down`, `greater`, `less`) with a price `level`, or with an `indicator` (`rsi`, `ma`, `macd`, `stoch`, `cci`, `mfi`, `williams_r`, `roc`, `atr`, `adx`), its `params`, `line` and `compare` (`level` or `close`). Funding and open interest are refused: fixtures hold neither. |
@@ -77,8 +77,8 @@ server's indicator alerts read intervals of 1h and longer only.
   never inside the signal bar.
 - **The levels** are set from the fill price: the stop at the rule's distance, the targets in R
   of that risk, the expiry from the signal. They are checked as `create_setup` checks them; a stop
-  closer than the risk floor (three round trips of costs, 42 bps on Binance) is not traded and is
-  counted as `refused`, never widened.
+  closer than the risk floor (three round trips of costs, 42 bps on Binance), or a stop or target
+  at or below 0, is not traded and is counted as `refused`, never widened.
 - **The scoring** is `apply_bar` on every 1m bar from the fill, the setup scorer: its stop, target,
   expiry and tie rules, its costs, `mae_r` and `mfe_r`, and the three exit variants.
 - **Overlap:** one trade per rule and symbol at a time. A signal before the 1m bar in which that
@@ -112,7 +112,7 @@ server's indicator alerts read intervals of 1h and longer only.
 | `signals` | Closes where every condition held. Each is traded, skipped, refused or not filled. |
 | `traded` | Signals that became a trade. |
 | `skipped_open` | Signals while the rule's trade on that symbol was open. |
-| `refused` | Signals whose levels a setup would refuse. |
+| `refused` | Signals whose levels a setup would refuse, or with a stop or target at or below 0. |
 | `no_fill` | Signals at the fixture's last close, with no 1m bar after them. |
 | `open_at_end` | Trades still open when the fixture's bars run out. They have no result and are in no figure below. |
 | `summary` | The closed trades: their count, the statuses of a setup, the share won, and the mean and sum of `result_r`, which is after costs. |
