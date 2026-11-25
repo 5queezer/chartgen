@@ -1013,13 +1013,15 @@ something else, the others read *inactive: open BTCUSDT 1h in the other tab*.
 
 ### Setups
 
-The **Setups** tab lists the [setups](/chartgen/guides/setups/) your agent made under your sign-in,
-the ones the server scores on paper ([ADR-0071](/chartgen/decisions/0071-setups-panel/)). It reads
-them with the same tools the agent uses, so it shows yours only.
+The **Setups** tab lists the [setups](/chartgen/guides/setups/) your agent made under your sign-in
+on the chart's symbol, the ones the server scores on paper
+([ADR-0071](/chartgen/decisions/0071-setups-panel/),
+[ADR-0091](/chartgen/decisions/0091-a-setups-page/)). It reads them with the same tools the agent
+uses, so it shows yours only. The whole list, the track record and the open risk are on the
+[Setups page](#the-setups-page); **All setups** in the tab's header opens it.
 
-- **Order and filter.** Open setups (watching or triggered) come first, newest first, then closed
-  ones, the most recently ended first. **Open**, **Closed** and **All** filter them, each with its
-  count; your choice is remembered.
+- **Order.** The open setups (watching or triggered), newest first, then the five closed ones that
+  ended last. A line under them says how many more the symbol has, and links to the page.
 - **A row:**
   - symbol, interval, direction, `skip` for a decision not to trade, the status, and the result in
     R once closed;
@@ -1030,14 +1032,46 @@ them with the same tools the agent uses, so it shows yours only.
 - **Won below 0 R.** A setup marked `won` with a result below 0 R reached its first target, but
   the fill was at or past it, so the costs of getting in and out were more than the move. Its row
   says so in red. The status stays `won`: that is what the agent reads.
-- **Totals.** **Taken** and **Skipped** each show the closed setups, how many won, the total and
-  mean R, and how many are open, as the server's `get_track_record` counts them.
 - **Click a row** to open its symbol at its interval with its drawings. A skip also gets the
   server's bracket as a long or short position: from the fill (or from when it was made) to its
   expiry while open, or to where it ended, with the target and stop it is scored against. The
   drawings join the symbol's own, as a shared link's do; opening the setup again replaces what
   it drew before, so a setup that moved on shows once, as it is now.
-- The tab asks again every minute while it shows. A server without setups says so.
+- The tab asks again every minute while it shows, and when the chart switches symbols. A server
+  without setups says so.
+
+### The Setups page
+
+`/setups` shows your setups as a record to read
+([ADR-0091](/chartgen/decisions/0091-a-setups-page/)). Open it from the Setups tab, or go to the
+address. On a server with sign-in you sign in first, as anywhere in the app; the page then shows
+the setups of your account only, read with the same tools the agent uses. On a server without
+setups the address is the app. It is read only: your agent makes and changes setups.
+
+- **Figures** on top: open setups, taken and skipped; the open risk long and short (each open take
+  risks 1 R), how many of them are filled and what those would end at at their stops; the closed
+  setups; and for takes and for skips the total R after costs, how many ended above 0 R after costs
+  of how many, and the mean R. They are what `get_track_record` and `list_setups` answer.
+- **Filters:** status, take or skip, side, symbol, tag, and the days the setups were made in. The
+  tables and the chart follow all of them; the figures and the track record follow those the
+  record takes (symbol, side, decision and days).
+- **Open** and **closed** setups as two tables: symbol, side, status, entry (or fill), stop, T1,
+  MFE and MAE in R, and when each was made, ended or expires; the closed one with the result. Click
+  a column's header to sort by it, again to turn the order round. A ⚠ marks a win below 0 R, and
+  `gap` a result that does not cover bars the server missed.
+- **Results per day:** each closed setup listed, at its own result, on the day it ended, as bars,
+  and their running sum as a line. It covers the newest 500 setups; the figures cover the record.
+- **Open risk by symbol:** the open takes per symbol and side.
+- **Track record by** symbol, direction, playbook version, skip reason, tag, feature, probability
+  or bracket anchor: per group, the closed setups, won, above and below 0 R after costs, total and
+  mean R, entered and the mean R of those, and gaps, as `get_track_record` counts them. By tag, pick
+  the families (the part of a tag up to its first `:`, such as `strategy:`) or one family's tags.
+  A setup is in the group of each tag prefix it has, so tag groups can overlap.
+- **Click a row** for the setup in a panel: its thesis, levels, fill and exit, net result, MFE and
+  MAE, bars to fill and exit, the rule that set its levels, costs, what the agent stated, and its
+  [shadow exits](/chartgen/guides/setups/#shadow-results). **Open chart** opens it on the chart, as
+  a click in the tab does. **Back to the chart** returns to the app.
+- The page asks again every minute, and when a filter changes.
 
 ### Data Window
 

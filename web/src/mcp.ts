@@ -42,6 +42,8 @@ import {
   SeriesPayloadSchema,
   SetupPayloadSchema,
   SetupsPayloadSchema,
+  SetupRowsPayloadSchema,
+  SETUP_ROW_FIELDS,
   TrackRecordPayloadSchema,
   ServerAlertChangePayloadSchema,
   ServerAlertsPayloadSchema,
@@ -63,6 +65,7 @@ import {
   type SeriesPayload,
   type SetupPayload,
   type SetupsPayload,
+  type SetupRowsPayload,
   type TrackRecordPayload,
   type ServerAlertChangePayload,
   type ServerAlertsPayload,
@@ -171,6 +174,8 @@ export interface McpSession {
   callUnsubscribePush: (args: UnsubscribePushInput) => Promise<UnsubscribePushPayload>;
   /** Invoke `list_setups` (ADR-0059): the caller's setups; says so when the server keeps none. */
   callListSetups: (args: ListSetupsInput) => Promise<SetupsPayload>;
+  /** `list_setups` with only the fields the Setups page shows (ADR-0091). */
+  callListSetupRows: (args: Omit<ListSetupsInput, "fields">) => Promise<SetupRowsPayload>;
   /** Invoke `get_setup`: one of the caller's setups with its log. */
   callGetSetup: (args: GetSetupInput) => Promise<SetupPayload>;
   /** Invoke `get_track_record` (ADR-0064): counts over the caller's closed setups. */
@@ -486,6 +491,13 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return SetupsPayloadSchema.parse(json);
+    },
+    async callListSetupRows(args) {
+      const json = await callToolWithAuthRetry("list_setups", {
+        ...(args as unknown as Record<string, unknown>),
+        fields: [...SETUP_ROW_FIELDS],
+      });
+      return SetupRowsPayloadSchema.parse(json);
     },
     async callGetSetup(args) {
       const json = await callToolWithAuthRetry(

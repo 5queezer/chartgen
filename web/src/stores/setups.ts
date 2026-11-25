@@ -1,6 +1,7 @@
-// The signed-in owner's setups for the Setups panel (ADR-0071), read through the same
-// MCP session and token as every other tool: the server answers with the caller's own
-// setups only. Nothing is kept in storage; the panel asks again when it opens.
+// The setups of the chart's symbol for the Setups tab (ADR-0071, ADR-0091), read through
+// the same MCP session and token as every other tool: the server answers with the
+// caller's own setups only. The whole record is the Setups page's. Nothing is kept in
+// storage; the tab asks again when it opens and when the symbol changes.
 
 import { createSignal } from "solid-js";
 
@@ -8,12 +9,12 @@ import { setupDrawingPrefix, setupDrawings } from "../lib/setups";
 import { parseTimeframe } from "../lib/timeframe";
 import type { McpSession } from "../mcp";
 import { showToast } from "../services/alertEngine";
-import type { Setup, TrackRecordPayload } from "../types/responses";
+import type { Setup } from "../types/responses";
 import { announceDrawings, replaceDrawings } from "./drawings";
 import { setSymbol, setTimeframe, symbol } from "./layout";
 
-/** The most `list_setups` returns at once. */
-export const LIST_LIMIT = 500;
+/** The most of one symbol's setups the tab asks for: its newest. */
+export const LIST_LIMIT = 50;
 
 export type SetupsState =
   | { kind: "loading" }
@@ -21,12 +22,10 @@ export type SetupsState =
   | { kind: "error"; message: string }
   | {
       kind: "ready";
+      symbol: string;
       setups: Setup[];
-      /** How many the server has; more than `setups` holds past `LIST_LIMIT`. */
+      /** How many the symbol has; more than `setups` holds past `LIST_LIMIT`. */
       total: number;
-      /** Counts over the closed setups taken and skipped, as `get_track_record` gives them. */
-      takes: TrackRecordPayload | null;
-      skips: TrackRecordPayload | null;
     };
 
 const [state, setState] = createSignal<SetupsState>({ kind: "loading" });
@@ -43,30 +42,21 @@ let refreshes = 0;
 let opens = 0;
 
 /**
- * Ask the server for the caller's setups and their track record. What was shown stays
- * while a refresh fails; the totals are left out alone when only they could not be read.
- * A refresh that answers after a later one is dropped: its statuses would be older.
+ * Ask the server for the caller's setups on `on`. What was shown stays while a refresh
+ * fails. A refresh that answers after a later one is dropped: its statuses would be
+ * older, or its symbol not the chart's any more.
  */
-export async function refreshSetups(session: McpSession): Promise<void> {
+export async function refreshSetups(session: McpSession, on: string): Promise<void> {
   const mine = ++refreshes;
   const latest = () => mine === refreshes;
   try {
-    const list = await session.callListSetups({ limit: LIST_LIMIT });
+    const list = await session.callListSetups({ symbol: on, limit: LIST_LIMIT });
+    if (!latest()) return;
     if (!list.enabled) {
-      if (latest()) setState({ kind: "off" });
+      setState({ kind: "off" });
       return;
     }
-    const record = (decision: "take" | "skip") =>
-      session.callGetTrackRecord({ decision }).catch(() => null);
-    const [takes, skips] = await Promise.all([record("take"), record("skip")]);
-    if (!latest()) return;
-    setState({
-      kind: "ready",
-      setups: list.setups,
-      total: list.total ?? list.setups.length,
-      takes,
-      skips,
-    });
+    setState({ kind: "ready", symbol: on, setups: list.setups, total: list.total ?? list.setups.length });
   } catch (err) {
     if (latest() && state().kind !== "ready") {
       setState({ kind: "error", message: reason(err) });

@@ -5,7 +5,6 @@ import { SetupPayloadSchema, SetupsPayloadSchema, type Setup } from "../types/re
 import {
   bracketDrawing,
   entryText,
-  filterSetups,
   formatR,
   setupDrawings,
   sortSetups,
@@ -36,13 +35,6 @@ describe("the setups list", () => {
       "setup-000003",
       "setup-000002",
     ]);
-  });
-
-  it("filters open and closed, and keeps all", () => {
-    const all = [...list, open];
-    expect(filterSetups(all, "open").map((s) => s.status)).toEqual(["watching"]);
-    expect(filterSetups(all, "closed")).toHaveLength(3);
-    expect(filterSetups(all, "all")).toHaveLength(4);
   });
 });
 

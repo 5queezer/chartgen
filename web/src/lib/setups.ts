@@ -1,5 +1,5 @@
-// Setups (ADR-0059) as the Setups panel shows them (ADR-0071): their order, the
-// open/closed filter, what a row says, and the drawings a click puts on the chart.
+// Setups (ADR-0059) as the Setups tab (ADR-0071) and page (ADR-0091) show them: their
+// order, what a row says, and the drawings a click puts on the chart.
 // Everything the server scores is taken as it answers; nothing is computed again here.
 
 import { parseRecord, type DrawingRecord } from "../stores/drawings";
@@ -7,14 +7,11 @@ import type { Setup } from "../types/responses";
 import { barCloseMs } from "./countdown";
 import { parseTimeframe } from "./timeframe";
 
-export const SETUP_FILTERS = ["open", "closed", "all"] as const;
-export type SetupFilter = (typeof SETUP_FILTERS)[number];
-
 /** Watching or triggered: the server still moves it. */
-export const isOpen = (s: Setup): boolean => s.status === "watching" || s.status === "triggered";
+export const isOpen = (s: Pick<Setup, "status">): boolean => s.status === "watching" || s.status === "triggered";
 
 /** When a closed setup ended, as far as the record says: its exit, or the last bar scored. */
-const endedAt = (s: Setup): number => s.exit?.bar_time ?? s.scored_through ?? s.created_at;
+export const endedAt = (s: Pick<Setup, "exit" | "scored_through" | "created_at">): number => s.exit?.bar_time ?? s.scored_through ?? s.created_at;
 
 /**
  * Open setups first, newest first; then closed ones, the most recently ended first. Ties
@@ -28,17 +25,12 @@ export function sortSetups(list: readonly Setup[]): Setup[] {
   });
 }
 
-export function filterSetups(list: readonly Setup[], filter: SetupFilter): Setup[] {
-  if (filter === "all") return [...list];
-  return list.filter((s) => isOpen(s) === (filter === "open"));
-}
-
 /**
  * "won" below 0 R: price reached the first target, but the fill was at or beyond it, or so
  * near it that the costs of getting in and out were more than the move. The status keeps
  * its meaning for the agent (ADR-0071); the row says what happened.
  */
-export function wonAtALoss(s: Setup): boolean {
+export function wonAtALoss(s: Pick<Setup, "status" | "result_r">): boolean {
   return s.status === "won" && s.result_r !== null && s.result_r < 0;
 }
 
@@ -46,7 +38,7 @@ export const WON_AT_A_LOSS =
   "Reached the first target, but below 0 R after costs: the fill was at or past the target, or too near it to cover the costs of getting in and out.";
 
 /** The fill once there is one, else the entry zone, one price when it is a level. */
-export function entryText(s: Setup, price: (p: number) => string): string {
+export function entryText(s: Pick<Setup, "fill" | "entry">, price: (p: number) => string): string {
   if (s.fill) return `fill ${price(s.fill.price)}`;
   const { low, high } = s.entry;
   return low === high ? price(low) : `${price(low)}–${price(high)}`;

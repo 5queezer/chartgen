@@ -16,7 +16,8 @@ needs [durable tokens](/chartgen/reference/oauth/#refresh-tokens) for them: a se
 the owner its token resolves to, which with sign-in off is the OAuth client, so an agent whose
 token does not outlive a restart loses sight of its setups until someone authorizes it again. The tools
 are in the [MCP reference](/chartgen/reference/mcp/#setups-chartgen_setups1). The web app's
-[Setups tab](/chartgen/guides/web/#setups) lists them.
+[Setups page](/chartgen/guides/web/#the-setups-page) at `/setups` lists them with the track record,
+and its [Setups tab](/chartgen/guides/web/#setups) those of the chart's symbol.
 
 ## A setup
 
