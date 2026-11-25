@@ -650,7 +650,7 @@ export type MarketContextPayload = z.infer<typeof MarketContextPayloadSchema>;
 
 // ---------------------------------------------------------------------------
 // get_news (ADR-0086, ADR-0088)
-//   Produced by `compose` in `src/news.rs`, from the feeds or from the server's
+//   Produced by `compose` in `crates/news/src/lib.rs`, from the feeds or from the server's
 //   record. Headlines only, newest first. A feed that could not be read is in
 //   `sources_failed`; `more` is present only when more headlines matched than
 //   `limit`.

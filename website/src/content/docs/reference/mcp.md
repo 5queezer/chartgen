@@ -1102,9 +1102,11 @@ the tool.
 
 #### `get_news`
 
-Recent crypto headlines about one symbol, from the public RSS feeds of a few crypto news
-outlets, so an agent needs no web search for them
-([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)).
+Recent crypto headlines about one symbol, from the public RSS feeds of about 35 crypto outlets
+and financial outlets' markets desks, so an agent needs no web search for them
+([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)). A server with a store
+records every feed every 5 minutes and answers from that record
+([ADR-0088](/chartgen/decisions/0088-recording-the-news/)).
 
 | Argument | Default | |
 |----------|---------|---|
@@ -1142,7 +1144,8 @@ outlets, so an agent needs no web search for them
 - `more`: how many more matched than `limit`; absent when none.
 - `sources`: the feeds read; `sources_failed`: the feeds that could not be read, each
   `{source, error}` (`HTTP 503`, `timed out`, `not a feed: …`, `no headlines in it`). A feed
-  that fails never fails the call.
+  that fails never fails the call. From the record, an entry also has `since`: when the feed's
+  failures in a row began (ISO 8601 UTC), and the headlines recorded from it before still count.
 - `terms`: the words a headline was matched by.
 
 **How a headline is matched, a heuristic.** The coin is read off the symbol: the quote
@@ -1175,15 +1178,22 @@ cashtag in the title (`$AI`): as a word it is everyday text ("AI agents", "U.S."
 file stories about artificial intelligence under an `AI` category. It can miss a story whose title names neither, and take one that names the coin
 in passing: read the titles as leads.
 
-**The feeds** are CoinDesk, Cointelegraph, Decrypt, The Block and Bitcoin Magazine, none of
-which needs a key. `CHARTGEN_NEWS_FEEDS` replaces them
-([environment variables](/chartgen/guides/deploy/#environment-variables)). All are read at once,
-with 8 s per request. A feed's last read is held in memory and read again when a call comes more
-than ten minutes after it; a feed that failed is tried again after a minute. A relative link is
+**The feeds** are 34 crypto outlets and markets desks, none of which needs a key; the list and
+how each was checked are in [ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds).
+`CHARTGEN_NEWS_FEEDS` replaces them
+([environment variables](/chartgen/guides/deploy/#environment-variables)). A relative link is
 read against the feed's URL (`xml:base` is not read), and an item whose link is not `http` or
 `https` is left out. An Atom feed whose elements carry a prefix (`atom:entry`) is not read, and
-shows as `no headlines in it`. History is what the feeds still carry, usually one to three days, so a larger
-`hours` rarely finds more. A replay server refuses the tool.
+shows as `no headlines in it`. A replay server refuses the tool.
+
+**Where the answer comes from.** A server with a store
+[records the news](/chartgen/guides/deploy/#the-news-recorded): while it has read a feed within
+the last 30 minutes, `get_news` answers from that record, which reaches back as far as `hours`
+does once the server has recorded for a week. Otherwise (no store, recording off, a server that
+was stopped) all feeds are read at once, with 8 s per request; a feed's last read is held in
+memory and read again when a call comes more than ten minutes after it, a feed that failed is
+tried again after a minute, and history is what the feeds still carry, usually one to three days.
+The answer has the same fields and order either way.
 
 #### `search_symbols`
 

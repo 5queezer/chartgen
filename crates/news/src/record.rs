@@ -196,6 +196,7 @@ fn rows(outlet: &str, items: &[Item], oldest: i64, now: i64) -> Vec<Recorded> {
             first_seen: now,
             categories: i.categories.clone(),
             coins: coins_of(i),
+            author: Some(i.author.clone()).filter(|a| !a.is_empty()),
         })
         .collect()
 }
@@ -231,6 +232,7 @@ pub(super) fn answer(
                 published: r.published,
                 from_updated: r.from_updated,
                 categories: r.categories.clone(),
+                author: r.author.clone().unwrap_or_default(),
             };
             (r.outlet.as_str(), item)
         })

@@ -154,6 +154,7 @@ fn a_round_records_each_headline_once_with_when_it_was_first_read() {
             first_seen: NOW,
             categories: vec!["Markets".into()],
             coins: vec!["BTC".into()],
+            author: None,
         }
     );
     // Filed under a coin, and dated by its update as it has no published time.
@@ -311,6 +312,7 @@ fn headlines_older_than_the_retention_are_dropped_and_not_recorded_again() {
         first_seen: later - 3 * DAY_S,
         categories: vec![],
         coins: vec!["BTC".into()],
+        author: None,
     };
     store.save_items(&[old]).unwrap();
     let new = round(

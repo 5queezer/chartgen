@@ -154,6 +154,9 @@ struct Item {
     /// `published` is an Atom entry's `updated`, as it has no `published`.
     from_updated: bool,
     categories: Vec<String>,
+    /// Who the feed says wrote it (`dc:creator`, `author`, an Atom author's `name`), at most
+    /// 100 characters; empty when it does not say. A press-release wire shows here.
+    author: String,
 }
 
 type Fetched = Result<Arc<Vec<Item>>, String>;
@@ -358,6 +361,7 @@ enum Field {
     /// An Atom entry's `updated`, read while it has no `published`.
     Updated,
     Category,
+    Author,
 }
 
 /// The items of an RSS 2.0 or Atom feed that have a title, an http(s) link and a time they
@@ -374,6 +378,8 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
     let mut item: Option<Item> = None;
     let mut depth = 0;
     let mut field: Option<Field> = None;
+    // Inside an Atom author's child other than its `name` (`email`, `uri`).
+    let mut skip = false;
     let mut text = String::new();
     loop {
         let event = reader
@@ -392,9 +398,12 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
                             "pubDate" | "published" | "dc:date" => Some(Field::Date),
                             "updated" if it.published == 0 => Some(Field::Updated),
                             "category" => Some(Field::Category),
+                            "author" | "dc:creator" => Some(Field::Author),
                             _ => None,
                         };
                         atom_attributes(it, &e, &base);
+                    } else if depth == 2 && field == Some(Field::Author) {
+                        skip = name.as_ref() != "name";
                     }
                 } else if matches!(name.as_ref(), "item" | "entry") {
                     item = Some(Item::default());
@@ -408,13 +417,13 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
                     }
                 }
             }
-            Event::Text(e) if field.is_some() => {
+            Event::Text(e) if field.is_some() && !skip => {
                 text.push_str(&e.html_content());
             }
-            Event::CData(e) if field.is_some() => {
+            Event::CData(e) if field.is_some() && !skip => {
                 text.push_str(&e.html_content());
             }
-            Event::GeneralRef(e) if field.is_some() => {
+            Event::GeneralRef(e) if field.is_some() && !skip => {
                 if let Ok(Some(c)) = e.resolve_char_ref() {
                     text.push(c);
                 } else if let Some(s) =
@@ -449,8 +458,14 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
                             }
                         }
                         Some(Field::Category) if !value.is_empty() => it.categories.push(value),
+                        Some(Field::Author) if it.author.is_empty() => {
+                            it.author = value.chars().take(100).collect()
+                        }
                         _ => {}
                     }
+                }
+                if depth == 2 {
+                    skip = false;
                 }
                 depth -= 1;
             }
@@ -737,6 +752,8 @@ pub struct Recorded {
     pub categories: Vec<String>,
     /// The coins matched when it was recorded, as tickers.
     pub coins: Vec<String>,
+    /// Who the feed says wrote it; None when it does not say.
+    pub author: Option<String>,
 }
 
 /// A feed's last read, by the recorder (ADR-0088): its status. Times in unix seconds.

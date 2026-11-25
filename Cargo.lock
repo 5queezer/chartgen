@@ -399,7 +399,6 @@ dependencies = [
  "libc",
  "openssl",
  "plotters",
- "quick-xml",
  "rand 0.9.2",
  "reqwest",
  "rusqlite",

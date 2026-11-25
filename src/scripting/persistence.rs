@@ -191,7 +191,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
         from_updated  INTEGER NOT NULL,
         first_seen    INTEGER NOT NULL,
         categories    TEXT    NOT NULL,
-        coins         TEXT    NOT NULL
+        coins         TEXT    NOT NULL,
+        author        TEXT
     ) WITHOUT ROWID;
     CREATE INDEX news_items_published ON news_items (published);
     CREATE TABLE news_feeds (
@@ -1794,8 +1795,9 @@ impl chartgen_news::Store for Store {
             {
                 let mut stmt = tx.prepare(
                     "INSERT OR IGNORE INTO news_items
-                         (url, outlet, title, published, from_updated, first_seen, categories, coins)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                         (url, outlet, title, published, from_updated, first_seen, categories, coins,
+                          author)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 )?;
                 for i in items {
                     new += stmt.execute(params![
@@ -1807,6 +1809,7 @@ impl chartgen_news::Store for Store {
                         i.first_seen,
                         serde_json::to_string(&i.categories).unwrap_or_default(),
                         serde_json::to_string(&i.coins).unwrap_or_default(),
+                        i.author,
                     ])?;
                 }
             }
@@ -1820,7 +1823,8 @@ impl chartgen_news::Store for Store {
         let conn = self.conn();
         let read = (|| {
             let mut stmt = conn.prepare_cached(
-                "SELECT url, outlet, title, published, from_updated, first_seen, categories, coins
+                "SELECT url, outlet, title, published, from_updated, first_seen, categories, coins,
+                        author
                  FROM news_items WHERE published BETWEEN ?1 AND ?2 ORDER BY published DESC",
             )?;
             let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -1834,6 +1838,7 @@ impl chartgen_news::Store for Store {
                     first_seen: r.get(5)?,
                     categories: list(r.get(6)?),
                     coins: list(r.get(7)?),
+                    author: r.get(8)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1915,6 +1920,7 @@ mod news_tests {
             first_seen: published + 60,
             categories: vec!["Markets".into()],
             coins: vec!["BTC".into(), "ETH".into()],
+            author: (published % 2 == 0).then(|| "Example Wire".into()),
         }
     }
 

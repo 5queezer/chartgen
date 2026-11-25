@@ -1,0 +1,287 @@
+---
+title: "0088 — Recording the news"
+description: "A server with a store reads 34 public crypto and finance feeds every 5 minutes, conditionally, and keeps every headline once, by its link, with when it was first read, its categories, author and the coins matched then, for a year by default. get_news answers from that record while it is current. The news lives in a crate of its own behind a Cargo feature, so it can move out of chartgen."
+sidebar:
+  order: 88
+---
+
+**Status:** Accepted
+**Date:** 2026-11-25
+**Amends:** [ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/) (five feeds,
+read on demand and held in memory only)
+
+## Context and Problem Statement
+
+`get_news` ([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)) reads five
+outlets' feeds when asked and keeps only each feed's last read in memory. That answers "what are
+the last headlines about this coin". It cannot answer what comes next: which stories about a
+coin are getting attention, and how unusual that is. That needs
+
+- **many outlets**, since "how many outlets carry this story" has no resolution with five;
+- **when each outlet picked a story up**, which only a reader that polls on a schedule sees, as a
+  feed nobody asked about for six hours has dropped headlines by then;
+- **what a normal day looks like** for a coin, which needs weeks of history.
+
+None of it exists after a restart, and none of it can be had later for a time nobody recorded.
+Grouping headlines into stories and scoring them come later (ADR-0089, ADR-0090); they need the
+record to start now.
+
+Should chartgen record the news, where, and from which feeds?
+
+## Decision Drivers
+
+- What is not recorded now is lost for good.
+- The server already has one store, SQLite at `CHARTGEN_DB`, migrated on open, and a pattern for
+  recording into it ([ADR-0082](/chartgen/decisions/0082-recording-open-interest-history/)).
+- Outlets publish their feeds for readers: polling has to be polite (conditional requests, a
+  pause between requests, a failing feed left alone longer each time).
+- The store must stay small on a small host, and recording must not slow a tool call.
+- `get_news` reaches an agent client the moment it deploys: its answer keeps its shape and its
+  defaults.
+- The news may later want to run apart from chartgen (recording through chartgen's redeploys,
+  or a store that outgrows the host).
+
+## Considered Options
+
+### What is kept
+
+1. **On demand only** (ADR-0086 as it is): nothing kept.
+2. **Record in the SQLite store** (chosen): a table of headlines and one of the feeds' state,
+   filled by a background thread.
+3. **Record to files** beside the store (one append-only file a day).
+
+### Where the code lives
+
+- a. **A module of chartgen**, as ADR-0086's `src/news.rs`.
+- b. **A crate of its own in this repository, behind a Cargo feature, in the chartgen process**
+  (chosen).
+- c. **A service of its own**, with its own MCP endpoint.
+
+## Pros and Cons of the Options
+
+### 1. On demand only
+
+- Good: nothing to build, store or back up.
+- Bad: no history beyond what the feeds still carry (hours to three days), no first-seen times,
+  nothing to group or score against.
+
+### 2. Record in the SQLite store
+
+- Good: one store, migrated and backed up as everything else is; the record is queried by time,
+  which is what grouping and scoring need.
+- Good: each feed's state (its `ETag`, its failures) survives a restart, so a restart neither
+  asks every feed for its whole body again nor forgets a feed it should leave alone.
+- Bad: a background thread to run, and a store that grows unless a retention is set.
+
+### 3. Files beside the store
+
+- Good: cheap to append, easy to copy elsewhere.
+- Bad: a second thing to back up and migrate, its own reader, and "each headline once" needs an
+  index of its own anyway.
+
+### a. A module of chartgen
+
+- Good: nothing new to set up.
+- Bad: nothing stops the rest of chartgen from reaching into the news, or the news into chartgen,
+  so moving it out later means untangling it first.
+
+### b. A crate in this repository, behind a feature
+
+- Good: a hard boundary with a narrow interface: `record::start(store)`, `read(store, symbol,
+  hours, limit)`, and the feeds' state through the `Store` trait. Nothing else in chartgen uses
+  the news but `get_news` (and later an alert condition).
+- Good: it runs in the chartgen process and uses its store, so no second endpoint, sign-in,
+  deployment or watchdog.
+- Good: it can become a service in a day, by giving it its own store behind the same trait.
+- Bad: the repository becomes a Cargo workspace, and the build copies one more directory.
+
+### c. A service of its own
+
+- Good: records through chartgen's redeploys; can scale apart.
+- Bad: today another MCP endpoint, its own auth, deployment and watchdog, for a load that is a
+  few requests a minute.
+
+## Decision Outcome
+
+Chosen: **2 and b**. The news is the crate `chartgen-news` in `crates/news`, which chartgen uses
+behind the feature `news` (on by default). Recording needs the store as well, so the feature
+`scripting` too, like every default build. The repository is a Cargo workspace whose default
+members are chartgen and the crate, so `cargo test` and `cargo clippy` at its root cover both, and
+the chartgen binary is built as before.
+
+**The store stays chartgen's.** The crate does not open a database. It declares a `Store` trait
+(save headlines, read them by time, drop old ones, read and save a feed's state), and chartgen
+implements it on its SQLite store, where the tables are one more migration in the one list of
+migrations. Sharing that list from the crate would tie both to one `PRAGMA user_version`; a
+service of its own would implement the same trait on a store of its own.
+
+### What is recorded
+
+Two tables in the store:
+
+```sql
+CREATE TABLE news_items (
+    url          TEXT PRIMARY KEY,  -- the link, its utm_ parameters dropped
+    outlet       TEXT NOT NULL,     -- the feed's name
+    title        TEXT NOT NULL,     -- as the feed wrote it, whitespace collapsed
+    published    INTEGER NOT NULL,  -- unix seconds
+    from_updated INTEGER NOT NULL,  -- 1: published is an Atom entry's `updated`
+    first_seen   INTEGER NOT NULL,  -- when the recorder first read it
+    categories   TEXT NOT NULL,     -- the outlet's categories for it, JSON
+    coins        TEXT NOT NULL,     -- the coins matched when it was read, JSON
+    author       TEXT               -- dc:creator, author, an Atom author's name
+) WITHOUT ROWID;
+CREATE INDEX news_items_published ON news_items (published);
+CREATE TABLE news_feeds (url TEXT PRIMARY KEY, name TEXT NOT NULL, etag TEXT,
+    last_modified TEXT, last_success INTEGER, last_error TEXT, failing_since INTEGER,
+    failures INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0);
+```
+
+- **Each headline once**, by its link: a link read again (a later round, another feed carrying
+  it, an edited title) leaves the row as it was first read. Every recorded headline has a link,
+  since an item without one is not read (ADR-0086), so the outlet and title are never needed as
+  the key.
+- **The coins** are ADR-0086's heuristic applied when the headline is read: each coin of its
+  table of about 30 that the title or a category names, then each cashtag in the title
+  (`$PEPE`). They are kept so a later change to the table does not rewrite what was matched
+  then; the raw title and categories are kept too, so a reader can match again.
+- **The author** is kept because press-release copies are what the record most needs to tell
+  apart, and they show there (`Chainwire`, `Advertorial`) more often than in a category; see the
+  feed list below.
+- **Not kept:** descriptions and article text, as in ADR-0086.
+
+### How
+
+A thread, started with the server when it has a store (not on a replay server, as with ADR-0082),
+reads every feed once a round, a round every 5 minutes, one feed after another with 2 s between
+requests, so a round takes about a minute and a half and no host is asked twice within 2 s (two
+feeds share a host). Each request:
+
+- is **conditional**: it sends the feed's last `ETag` (`If-None-Match`) and `Last-Modified`
+  (`If-Modified-Since`), and a `304 Not Modified` is a read with nothing new. They are kept only
+  from a response that was a feed, so a challenge page cannot make the next request answer "not
+  modified".
+- has the limits of ADR-0086: 8 s, 4 MB, and the user agent `chartgen/<version>` with the
+  project's URL.
+- records the items published within the retention, each new one with the round's time as its
+  first seen.
+
+**A feed that fails** (an HTTP error, a time-out, a page that is not a feed) is tried again after
+5 minutes, then 10, 20, 40, and so on up to 6 hours between tries, or after its `Retry-After` if
+that is longer (up to a day). Its state says why it last failed and since when; the log says when
+a feed starts failing and when it is read again, and once an hour how many headlines came in.
+
+**Retention:** `CHARTGEN_NEWS_RECORD_DAYS`, default 365; a headline published longer ago is
+dropped, and one that old is not recorded. `0` records nothing. A year lets a coin's normal be
+taken over many weeks and leaves the record small (below).
+
+**`get_news` reads the record** when the store has a feed read within the last 30 minutes, and
+the feeds as before otherwise (no store, recording off, or a server stopped for a while). The
+answer from the record is what the feeds would give for the same headlines: the same matching,
+on the stored title and categories, the same order, the same fields and defaults. Two things are
+added and none changed: `hours` up to 168 now reaches as far back as the record does, not only
+as far as the feeds still carry, and an entry of `sources_failed` from the record has `since`,
+when its failures began, so a feed failing for days is told from one that failed a minute ago.
+Its headlines recorded before still count.
+
+### The feeds
+
+Each candidate was read once on 2026-11-25, with one request for the feed and one for its site's
+`robots.txt`, with chartgen's user agent. Kept: it answered without a key, its items are dated in
+a form RSS or Atom allows, its newest item is recent, and `robots.txt` neither disallows the feed
+for every agent nor carries `ai-input=no`. A `robots.txt` that answered 403 is no refusal (RFC
+9309 reads an unavailable `robots.txt` as no rule). "Items a day" is from that one read: the items
+of the last 24 hours, or for a feed that holds less than a day, its items spread over a day.
+"Press-release copies" counts the items of that read whose author is a press-release wire or
+"Advertorial", or whose category is "Press Release" or "Sponsored".
+
+| Outlet | Feed | Items a day | Newest item | `robots.txt` | Press-release copies |
+|---|---|---|---|---|---|
+| CoinDesk | `https://www.coindesk.com/arc/outboundfeeds/rss/` | 17 | 2 h | allows | 0 of 25 |
+| Cointelegraph | `https://cointelegraph.com/rss` | 23 | 1 h | allows | 0 of 30 |
+| Decrypt | `https://decrypt.co/feed` | 15 | 30 min | allows | 0 of 38 |
+| The Block | `https://www.theblock.co/rss.xml` | 22 | 18 min | allows | 0 of 20 |
+| Bitcoin Magazine | `https://bitcoinmagazine.com/.rss/full/` | 48 | 6 min | allows | 0 of 10 |
+| CryptoSlate | `https://cryptoslate.com/feed/` | 25 | 1 h | allows | 0 of 10 |
+| CryptoPotato | `https://cryptopotato.com/feed/` | 15 | 1 h | allows | 1 of 36 |
+| NewsBTC | `https://www.newsbtc.com/feed/` | 3 | 7 h | allows | 3 of 10 |
+| Cryptonews | `https://cryptonews.com/news/feed/` | 6 | 12 min | allows | 0 of 20 |
+| Crypto Briefing | `https://cryptobriefing.com/feed/` | 259 | 12 min | allows | 0 of 30 |
+| BeInCrypto | `https://beincrypto.com/feed/` | 38 | 2 h | allows (403) | 4 of 12 |
+| The Daily Hodl | `https://dailyhodl.com/feed/` | 3 | 6 h | allows | 2 of 10 |
+| CoinGape | `https://coingape.com/feed/` | 53 | 2 h | allows | 0 of 20 |
+| Bitcoin.com News | `https://news.bitcoin.com/feed/` | 32 | 24 min | allows | 2 of 10 |
+| Coinpedia | `https://coinpedia.org/feed/` | 71 | 2 h | allows | 0 of 10 |
+| CoinJournal | `https://coinjournal.net/feed/` | 1 | 12 h | allows | 0 of 9 |
+| Unchained | `https://unchainedcrypto.com/feed/` | 42 | 4 h | allows | 0 of 10 |
+| Protos | `https://protos.com/feed/` | 5 | 1 h | allows | 0 of 10 |
+| crypto.news | `https://crypto.news/feed/` | 47 | 24 min | allows | 2 of 50 |
+| Blockonomi | `https://blockonomi.com/feed/` | 136 | 2 h | allows | 0 of 10 |
+| ZyCrypto | `https://zycrypto.com/feed/` | 2 | 12 min | allows | 0 of 14 |
+| Coincu | `https://coincu.com/feed/` | 8 | 5 h | allows | 2 of 10 |
+| Crypto Daily | `https://cryptodaily.co.uk/feed` | 23 | 1 h | allows | 22 of 200 |
+| Finbold | `https://finbold.com/feed/` | 55 | 4 h | allows | 1 of 11 |
+| CoinCentral | `https://coincentral.com/feed/` | 76 | 6 h | allows (403) | 0 of 10 |
+| Cryptopolitan | `https://www.cryptopolitan.com/feed/` | 32 | 24 min | allows | 0 of 22 |
+| Coinspeaker | `https://www.coinspeaker.com/feed/` | 3 | 4 h | allows | 0 of 10 |
+| FXStreet | `https://www.fxstreet.com/rss/crypto` | 11 | 2 h | allows | 0 of 30 |
+| TheStreet | `https://www.thestreet.com/crypto/.rss/full/` | 13 | 30 min | allows | 0 of 50 |
+| CNBC | `https://www.cnbc.com/id/10000664/device/rss/rss.html` | 5 | 3 h | allows | 0 of 30 |
+| MarketWatch | `https://feeds.content.dowjones.io/public/rss/mw_topstories` | 97 | 12 min | allows (403) | 0 of 10 |
+| The Wall Street Journal | `https://feeds.content.dowjones.io/public/rss/RSSMarketsMain` | 28 | 24 min | allows (403) | 0 of 61 |
+| Bloomberg | `https://feeds.bloomberg.com/crypto/news.rss` | 2 | 15 h | allows (none) | 0 of 3 |
+| Financial Times | `https://www.ft.com/cryptocurrencies?format=rss` | under 1 | 5 days | allows | 0 of 25 |
+
+Left out:
+
+| Outlet | Feed | Because |
+|---|---|---|
+| Investing.com | `https://www.investing.com/rss/news_301.rss` | its dates have no time zone (`2026-11-25 16:34:12`), so its times are guesses; it was also the one outlet mostly republishing (6 of 10 items from a press-release wire) |
+| Blockworks | `https://blockworks.co/feed` | newest item 322 days old |
+| Bitcoinist | `https://bitcoinist.com/feed/` | newest item 28 hours old: the feed lags the site |
+| DL News | `https://www.dlnews.com/arc/outboundfeeds/rss/` | newest item 27 hours old; the feed is a selection reaching back months |
+| The Defiant | `https://thedefiant.io/api/feed` | `robots.txt` disallows `/api/*`, where the feed is |
+| AMBCrypto | `https://ambcrypto.com/feed/` | `robots.txt` disallows `/feed/` |
+| U.Today | `https://u.today/rss` | `robots.txt` content signal `ai-input=no` |
+| CCN | `https://www.ccn.com/feed/` | HTTP 403 |
+| Glassnode Insights | `https://insights.glassnode.com/rss/` | HTTP 403 |
+| GlobeNewswire (blockchain) | `https://www.globenewswire.com/RssFeed/subjectcode/37-Blockchain/…` | HTTP 403 |
+| Yahoo Finance | `https://finance.yahoo.com/news/rssindex` | HTTP 404 |
+| The Crypto Basic | `https://thecryptobasic.com/feed/` | answers a web page, not a feed |
+| Watcher.Guru | `https://watcher.guru/news/feed` | answers a web page, not a feed |
+| Benzinga | `https://www.benzinga.com/feed` | mostly single stocks, about 120 items a day, 238 kB a read without an `ETag` |
+| Bloomberg (markets) | `https://feeds.bloomberg.com/markets/news.rss` | one feed per outlet: its crypto feed is kept |
+
+**No outlet kept mostly republishes others**, so the feed list carries no flag for it. Press-release
+copies are spread instead: the same release appears under several outlets with the same title
+(two releases of that read did so across four outlets), a few to a third of some outlets' items.
+They are one voice, not several, and the record keeps what tells them apart (the author, the
+categories, the identical title), so grouping (ADR-0089) can count them once without a flag per
+outlet. ADR-0086's five stay first in the list. `CHARTGEN_NEWS_FEEDS` replaces the list, as before.
+
+### Cost
+
+TBD-COST
+
+### Consequences
+
+- From the first start of this build the store holds every headline the feeds carry: on its
+  first round what they still hold (hours to days back), from then on each new one within about 5
+  minutes of its publication, with when it was first read.
+- `get_news` on a server that records answers from 34 outlets instead of 5, so `sources` lists
+  34 names and more headlines compete for `limit`; its arguments, defaults and fields are as
+  before. Its answer is a little longer for the list of sources (about 0.5 kB).
+- A server stopped for a while records nothing meanwhile; what the feeds still carry at the next
+  start is recorded then, with that start as its first seen, so a stop of more than a few hours
+  loses headlines of the busiest feeds and the first-seen times of the rest.
+- A replay server neither records nor answers `get_news`, as before.
+- **Off:** `CHARTGEN_NEWS_RECORD_DAYS=0`, a build without the store, or one without the feature
+  `news`, which has no `get_news` at all.
+- **After a rollback**, a build from before this ignores both tables and reads the feeds on
+  demand, and nothing is recorded while it runs. Rolling forward again needs no step; the rows
+  stay until the retention drops them, and dropping the two tables removes the record.
+
+## More Information
+
+- Running it (settings, cost, the log): [deploy guide](/chartgen/guides/deploy/#the-news-recorded).
+- `get_news`: [MCP reference](/chartgen/reference/mcp/#get_news).

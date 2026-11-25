@@ -62,6 +62,7 @@ fn an_rss_item_is_its_own_title_link_time_and_categories() {
             published: time_of("Wed, 25 Nov 2026 06:33:10 +0000").unwrap(),
             from_updated: false,
             categories: vec!["Tech".into(), "News".into()],
+            author: "Example Author".into(),
         }
     );
 }
@@ -97,6 +98,8 @@ fn an_atom_entry_takes_its_alternate_link_and_published_time() {
     // No published: its updated time, and that is said.
     assert_eq!(items[1].published, time_of("2026-11-25T02:00:00Z").unwrap());
     assert!(items[1].from_updated && !items[0].from_updated);
+    // An author's name, not its email.
+    assert_eq!(items[0].author, "Example Author");
     assert_eq!(items[1].categories, vec!["Solana".to_string()]);
     assert_eq!(items[2].url, "https://news.example.com/stories/relative");
 }
