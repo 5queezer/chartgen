@@ -438,7 +438,7 @@ export interface GetIndicatorsInput {
    */
   as_of?: number | string;
   /**
-   * Also answer each line's and histogram's change over this many bars, ending at the bar its last_value is from: change {from, abs (last_value - from), pct (abs over |from|, in %, null when from is 0)}, or change null when there is no value that far back. Open interest (oi) and the long/short ratios have none older than the 30 days Binance keeps (about 185 bars on 4h, 31 on 1d). The answer then also carries change_bars.
+   * Also answer each line's and histogram's change over this many bars, ending at the bar its last_value is from: change {from, abs (last_value - from), pct (abs over |from|, in %, null when from is 0)}, or change null when either end has no value (nothing that far back, or a line with no value on its last bar, such as an inactive Supertrend line). Open interest (oi) and the long/short ratios have none older than the 30 days Binance keeps (about 185 bars on 4h, 31 on 1d). The answer then also carries change_bars.
    */
   change_bars?: number;
   /**

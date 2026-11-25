@@ -923,7 +923,9 @@ answer. Is open interest rising or falling over the last day on 4h:
 ```
 
 `abs` is `last_value - from`; `pct` is `abs` over `|from|` in percent, `null` when `from`
-is 0. `change` is `null` when the series has no value that far back. Open interest (`oi`)
+is 0. `change` is `null` when either end has no value: nothing that far back, or a line
+without a value on its last bar (an inactive Supertrend line, whose `last_value` is `null`
+too). Open interest (`oi`)
 and the long/short ratios have none older than the 30 days Binance keeps: about 185 bars
 on 4h, 31 on 1d, and the 200 bars the tool reads cover only about 8 days on 1h. History
 beyond the 30 days would have to be recorded by chartgen itself
@@ -931,7 +933,8 @@ beyond the 30 days would have to be recorded by chartgen itself
 `change_bars` the answer is as before.
 
 With `intervals`, `change_bars` applies to each interval, counted in its own bars,
-and each entry carries `change_bars` and every line's `change`.
+and each entry that answers carries `change_bars` and every line's `change`; an entry for an
+interval that failed has only `interval` and `error`.
 
 For every value of a series rather than one change, `generate_chart` with
 `format=series` and a small `bars` answers each bar's value.

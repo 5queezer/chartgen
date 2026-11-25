@@ -57,12 +57,20 @@ One row is a time and a value; in SQLite with its key about 40 to 60 bytes.
 |---|---|---|---|
 | 5m (the finest Binance has) | 105,120 | about 5 MB | 1 per symbol every 41 h (500 rows a request), plus a catch-up after a pause |
 | 1h | 8,760 | about 0.5 MB | 1 per symbol every 20 days |
-| 4h | 2,190 | about 0.1 MB | 1 per symbol every 83 days |
+| 4h | 2,190 | about 0.1 MB | 1 per symbol well within 30 days: a page holds 83 days, but rows older than the retention are already gone |
 
-Coarser periods can be derived from 5m (the value at the period's close), so one period
-answers every interval from 5m up. Twenty symbols at 5m are about 100 MB a year and about a
-dozen requests a day, far inside Binance's budget. The same table holds the long/short and
-taker ratios at the same cost per series.
+Whatever the page size, a series must be read again before its oldest unread row is 30 days
+old, with a margin; a pause longer than that leaves a gap that cannot be filled.
+
+Open interest and the three long/short ratios are snapshots: a coarser period's row is the 5m
+row with the same timestamp (checked against the API for BTCUSDT on 1h: 29 of 29 hours equal,
+for `sumOpenInterest`, `sumOpenInterestValue` and each `longShortRatio`). For them one 5m
+series answers every interval from 5m up. The taker buy/sell ratio is not: a period's row
+aggregates the volume within it (its 1h `buyVol` and `sellVol` differ from the sum of the
+twelve 5m rows by up to 1.7 %, and its ratio from any single 5m row), so it would have to be
+recorded at each period it is read at. Twenty symbols of open interest at 5m are about 100 MB a
+year and about a dozen requests a day, far inside Binance's budget; each long/short ratio costs
+the same.
 
 ## Pros and Cons of the Options
 
@@ -95,7 +103,8 @@ taker ratios at the same cost per series.
 ## Decision Outcome
 
 None yet. If recording is wanted, option 2 at 5m for a configured list of symbols, with a
-retention in days, is the smallest that answers every interval and keeps one store. The choice
+retention in days, is the smallest that answers open interest (and the long/short ratios) at
+every interval and keeps one store; the taker ratio would need a row per period. The choice
 of symbols and retention is the owner's. Until then, `change_bars` answers the change within
 the 30 days.
 
