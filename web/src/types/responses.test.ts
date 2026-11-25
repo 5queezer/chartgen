@@ -215,6 +215,19 @@ describe("setups (ADR-0059), against the server's own answers", () => {
     expect(list.setups.some((s) => s.fill !== null && s.exit !== null)).toBe(true);
   });
 
+  it("parses the risk of the open takes (ADR-0078), whatever the list's filters", () => {
+    const open = SetupsPayloadSchema.strict().parse(answers.list_setups_open);
+    expect(open.open_risk?.long).toEqual({ takes: 1, risk_r: 1, filled: 0, filled_at_stop_r: 0 });
+    expect(open.open_risk?.by_symbol.map((r) => [r.symbol, r.direction])).toEqual([
+      ["BTCUSDT", "long"],
+      ["ETHUSDT", "short"],
+    ]);
+    // Nothing is open once they closed.
+    const closed = SetupsPayloadSchema.parse(answers.list_setups).open_risk;
+    expect(closed?.by_symbol).toEqual([]);
+    expect(closed?.short.takes).toBe(0);
+  });
+
   it("parses shadow results (ADR-0066): null before a fill, kept apart from result_r", () => {
     expect(SetupPayloadSchema.parse(answers.create_setup).shadow_results).toBeNull();
     const list = SetupsPayloadSchema.parse(answers.list_setups);

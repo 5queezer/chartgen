@@ -40,7 +40,7 @@ Status legend:
 | Right-click context menu | ✅ | ◐ | Menus on the chart, sub-panes, price and time axes, drawings, alert lines, indicator legends, watchlist rows and sections, alert rows and Object Tree rows. Mouse only. "Lock vertical cursor line by time", "Scale price chart only" and submenus for flag colors or moving an indicator to another pane are not offered. [Right-click menus](/chartgen/guides/web/#right-click-menus) |
 | Add alert at the clicked price (context menu) | ✅ | ✅ | "Add alert at price" opens the alert dialog at that price. [Chart context menu](/chartgen/guides/web/#chart-context-menu), [Alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 | Titled dialogs (symbol search, compare, add symbol) | ✅ | ✅ | The compare and watchlist dialogs say "Compare symbol" and "Add symbol". [Compare symbols](/chartgen/guides/web/#compare-symbols), [Watchlist](/chartgen/guides/web/#watchlist) |
-| Mobile and touch layout | ✅ | ◐ | Compact layout with a dock and bottom sheets, pan, pinch and long-press crosshair. No native app, no long-press menu with price actions, tested in device emulation only. [Phones and tablets](/chartgen/guides/web/#phones-and-tablets) |
+| Mobile and touch layout | ✅ | ◐ | Compact layout with a dock and bottom sheets, pan, pinch, long-press crosshair, and a one-finger drag on the price axis to scale it. No native app, no long-press menu with price actions, tested in device emulation only. [Phones and tablets](/chartgen/guides/web/#phones-and-tablets) |
 | Volume candles | ✅ | ◐ | No help page exists to compare with, so this is unverified: width by volume on an even time axis. [Order flow](/chartgen/guides/web/#order-flow) |
 | Volume footprint chart type | ✅ | ◐ | Row size, Cluster and Profile, Buy and Sell, Delta, Total, Ladder, gradient, value area, POC, info box, table pane, imbalances, stacked imbalances. From klines only: no tick-based mode, so rows are estimates. Departures: an empty level is no imbalance, a stack needs 2 klines per level. Bars at most 50 px wide. No open interest or footprint alerts. [Order flow](/chartgen/guides/web/#order-flow), [ADR-0048](/chartgen/decisions/0048-order-flow/) |
 | TPO chart type | ✅ | ◐ | Period, block size, row size, value area, split by blocks, letters and blocks, POC, poor high and low, single prints, VAH, VAL, midpoint, open and close, initial balance, volume profile, summary pane, custom sessions. Departures: auto row size, tails left out of single prints, a block too short for its period is widened. No pre and post market, no right click to split or merge. [Order flow](/chartgen/guides/web/#order-flow), [ADR-0048](/chartgen/decisions/0048-order-flow/) |
@@ -65,7 +65,7 @@ Status legend:
 
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
-| Built-in indicator library | ✅ (100+) | ◐ | 75 registered indicators: overlays, oscillators, volume and external data. [Indicator reference](/chartgen/reference/indicators/) |
+| Built-in indicator library | ✅ (100+) | ◐ | 79 registered indicators: overlays, oscillators, volume and external data. [Indicator reference](/chartgen/reference/indicators/) |
 | Pine v5 value semantics and TradingView defaults | ✅ | ◐ | Values equal TradingView's for the same parameters and first bar. Known differences: UTC calendar periods, pivots from loaded bars, intrabar profiles approximated, long warmups. [ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/), [differences list](/chartgen/reference/indicators/#values-match-tradingview) |
 | Session VWAP and VWAP bands | ✅ | ◐ | Resets per session by default, but sessions are UTC days, not exchange sessions. [ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) |
 | Higher-timeframe pivots | ✅ | ◐ | Day, week, month, year periods. Only P, R1, S1, R2, S2 are drawn, for every period. [Pivots](/chartgen/reference/indicators/#pivot) |
@@ -85,7 +85,7 @@ Status legend:
 | Profiles from lower-timeframe data | ✅ | ◐ | `volume_profile`, `fixed_range_vp` and `anchored_vp` read finer klines on a chart load and say which. `session_vp`, `hvn_lvn`, `naked_poc`, `tpo` and `cvd` still spread each bar's volume over its range. [ADR-0048](/chartgen/decisions/0048-order-flow/) |
 | Fixed range, anchored and session volume profile | ✅ | ◐ | Fixed and anchored take typed times and draw at the chart's edge, not over their range. Session draws POC, VAH and VAL lines, no histogram per session. [Order flow](/chartgen/guides/web/#order-flow) |
 | Volume in the default set | ✅ | ✅ | A fresh install starts with the EMA stack, Volume and RSI. Stored sets are never changed. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
-| Persisted indicator set | ✅ (cloud) | ◐ | Saved in `localStorage` per browser, not synced. [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
+| Persisted indicator set | ✅ (cloud) | ◐ | Saved in `localStorage`. On a server with [sign-in](/chartgen/reference/oauth/#sign-in) it follows your account to every device, and a change from another device shows after a reload. Without sign-in it stays in one browser. [Your workspace on any device](/chartgen/guides/web/#your-workspace-on-any-device), [ADR-0005](/chartgen/decisions/0005-client-indicator-state/), [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/) |
 
 ## Drawing tools
 
@@ -105,7 +105,7 @@ Status legend:
 | Pitchfork (Andrews) | ✅ | ◐ | Original pitchfork only; no Schiff or modified Schiff variants, no inner levels. |
 | Long and short position | ✅ | ◐ | Entry, target and stop handles with risk/reward; no account size, quantity or P&L. |
 | Gann, Elliott and chart pattern drawing tools, other fib tools | ✅ | ❌ | Not implemented. Auto chart patterns and Auto Fib are [indicators](/chartgen/guides/web/#pattern-indicators). |
-| Drawings stored per symbol | ✅ | ◐ | `localStorage`, per browser, max 500 per symbol. Shared across layouts. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Drawings stored per symbol | ✅ | ◐ | `localStorage`, max 500 per symbol. Shared across layouts. With sign-in they follow your account, and two devices' drawings are merged; without it they stay in one browser. [Drawing tools](/chartgen/guides/web/#drawing-tools), [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/) |
 
 ## Data & live updates
 
@@ -124,22 +124,22 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Watchlist with last, change, change % | ✅ | ◐ | Polled every 5 s for the active list, max 50 symbols per list. Crypto change is rolling 24 h. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/) |
-| Multiple named watchlists, sections, flags | ✅ | ◐ | Named lists (create, rename, duplicate, delete), collapsible sections, drag and Alt+Arrow reordering, seven flag colors and one Flagged view across lists. No separate list per flag color, no nested sections, no sync across devices; at most 20 lists and 20 sections per list. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0031](/chartgen/decisions/0031-multiple-watchlists/) |
+| Multiple named watchlists, sections, flags | ✅ | ◐ | Named lists (create, rename, duplicate, delete), collapsible sections, drag and Alt+Arrow reordering, seven flag colors and one Flagged view across lists. No separate list per flag color, no nested sections; synced across devices only with sign-in ([ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)); at most 20 lists and 20 sections per list. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0031](/chartgen/decisions/0031-multiple-watchlists/) |
 | Price alerts (crossing, up, down, greater, less) | ✅ | ◐ | Same conditions, once or every time, toast, beep and browser notification. Evaluated in the browser, or on the server where it is on. [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts), [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
-| Alerts that fire with no tab open | ✅ | ◐ | Price alerts on Binance symbols, on a server with `CHARTGEN_SERVER_ALERTS=1` that allows your sign-in, with a browser or phone notification ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). Drawing and indicator alerts, and stocks, still need an open tab. [Alerts on the server](/chartgen/guides/web/#alerts-on-the-server), [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) |
-| Alerts synced across devices | ✅ | ❌ | Stored per browser profile. |
-| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ◐ | Alerts on trend lines, rays, horizontal lines and channels, and on indicator plots against a value, another plot or the price. Indicator and sloped-line alerts only run while the chart shows their symbol and interval. Webhooks on [server alerts](/chartgen/guides/web/#alerts-on-the-server) only, for sign-ins the operator allowed. No email or SMS. [Drawing and indicator alerts](/chartgen/guides/web/#drawing-and-indicator-alerts), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/). [Push notifications](/chartgen/guides/notifications/) covers the server side. |
+| Alerts that fire with no tab open | ✅ | ◐ | On a server with `CHARTGEN_SERVER_ALERTS=1` that allows your sign-in, and on Binance symbols only: price alerts, checked on every tick or at a bar's close, made in the web app or over MCP. Over MCP an agent can also make an alert on an indicator's line at bar closes of 1h or longer (RSI, MA, MACD, Stoch, CCI, MFI, Williams %R, ROC, ATR, ADX), and one that fires at every bar close. The web app lists those and can pause, resume and delete them, but not make or edit them. They notify by browser or phone push ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)), a webhook, or a wake-up of the owner's agent ([ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/)). Drawing alerts, the web app's indicator alerts and alerts on stocks still need an open tab. [Alerts on the server](/chartgen/guides/web/#alerts-on-the-server), [ADR-0042](/chartgen/decisions/0042-server-side-alerts/), [ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/), [ADR-0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) |
+| Alerts synced across devices | ✅ | ◐ | With sign-in, browser alerts follow your account to every device, and server alerts belong to the account and can notify each of its devices that turned notifications on. A browser alert still runs in each browser that has the app open, so two open devices both notify. Without sign-in, alerts stay in one browser profile. [Your workspace on any device](/chartgen/guides/web/#your-workspace-on-any-device), [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/) |
+| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ◐ | Alerts on trend lines, rays, horizontal lines and channels, and on indicator plots against a value, another plot or the price. Made in the web app, indicator and sloped-line alerts only run while the chart shows their symbol and interval; an agent can put an indicator alert on the server, checked at bar closes ([ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/)). Webhooks on [server alerts](/chartgen/guides/web/#alerts-on-the-server) only, for sign-ins the operator allowed. No email or SMS. [Drawing and indicator alerts](/chartgen/guides/web/#drawing-and-indicator-alerts), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/). [Push notifications](/chartgen/guides/notifications/) covers the server side. |
 | Alert lines on the chart (drag to move) | ✅ | ✅ | [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 
 ## Layouts & settings
 
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
-| Named layouts (save, copy, rename, load, delete) | ✅ | ◐ | Symbol, timeframe, chart type, scale, compare symbols and indicators, per chart of the grid. Drawings are not part of a layout. Stored in `localStorage`, max 50. [Layouts](/chartgen/guides/web/#layouts), [ADR-0015](/chartgen/decisions/0015-named-layouts/) |
+| Named layouts (save, copy, rename, load, delete) | ✅ | ◐ | Symbol, timeframe, chart type, scale, compare symbols and indicators, per chart of the grid. Drawings are not part of a layout. Stored in `localStorage`, max 50, and synced across devices with sign-in. [Layouts](/chartgen/guides/web/#layouts), [ADR-0015](/chartgen/decisions/0015-named-layouts/) |
 | Layout export and import | ✅ | ✅ | JSON file, validated on import. [Layouts](/chartgen/guides/web/#layouts) |
-| Cloud sync of layouts and settings | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
+| Cloud sync of layouts and settings | ✅ | ◐ | On a server with [sign-in](/chartgen/reference/oauth/#sign-in), chart settings, layouts and grids, watchlists, indicators, drawings and browser alerts follow the account to every device. `localStorage` stays the working copy, a change from another device shows after a reload, and an account holds up to 2 MiB. Without sign-in nothing syncs. [Your workspace on any device](/chartgen/guides/web/#your-workspace-on-any-device), [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/) |
 | Shareable chart links | ✅ | ◐ | Query-param links for symbol, timeframe, chart type, indicators, compare symbols, time zone and the symbol's drawings (`draw`); no short links. [Sharing a chart](/chartgen/guides/web/#sharing-a-chart), [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/), [ADR-0054](/chartgen/decisions/0054-agent-drawings/) |
-| Chart settings (colors, grid, scales) | ✅ | ◐ | Saved in `localStorage` under `chartgen.chartSettings`, not synced and not in named layouts. [Chart settings](/chartgen/guides/web/#chart-settings), [ADR-0019](/chartgen/decisions/0019-chart-settings/) |
+| Chart settings (colors, grid, scales) | ✅ | ◐ | Saved in `localStorage` under `chartgen.chartSettings`, synced only with sign-in, and not in named layouts. [Chart settings](/chartgen/guides/web/#chart-settings), [ADR-0019](/chartgen/decisions/0019-chart-settings/) |
 | Keyboard shortcuts | ✅ | ◐ | A documented subset with `Alt` modifiers for tools. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 
 ## Analysis tools
@@ -150,8 +150,8 @@ Status legend:
 | Bar replay | ✅ | ◐ | Pick a bar or date, step, play at 1, 3 or 10 bars per second. Repainting indicators are recomputed on the server and lag while playing; only the last 500 bars before the cursor are recomputed. [Bar replay](/chartgen/guides/web/#bar-replay), [ADR-0023](/chartgen/decisions/0023-bar-replay/) |
 | Data Window | ✅ | ✅ | OHLC, change, volume, each plot value, compare symbols. [Data Window](/chartgen/guides/web/#data-window) |
 | Object Tree | ✅ | ✅ | Indicators, drawings, compare symbols and alerts with hide, lock and remove. [Object Tree](/chartgen/guides/web/#object-tree) |
-| Paper trading and orders from the chart | ✅ | ❌ | Order entry is out of scope of the web app. The server has a `--trade` engine, see [Trading](/chartgen/guides/trading/). |
-| Strategy tester and backtesting | ✅ | ❌ | Not offered. |
+| Paper trading and orders from the chart | ✅ | ◐ | No order entry and no paper account in the web app. An agent records [setups](/chartgen/guides/setups/) over MCP (entry zone, invalidation, targets and expiry, or a decision to skip), and the server scores them on paper from closed 1m bars, in R after assumed fees and slippage. Every filled setup is also scored under three fixed [shadow exit variants](/chartgen/guides/setups/#shadow-results), for comparison only. The web app's [Setups tab](/chartgen/guides/web/#setups) lists them with their totals, and a click opens a setup's chart with its drawings. Needs `CHARTGEN_SETUPS=1`. The `--trade` engine's orders stay local, see [Trading](/chartgen/guides/trading/). [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/), [ADR-0066](/chartgen/decisions/0066-shadow-exit-variants/), [ADR-0071](/chartgen/decisions/0071-setups-panel/) |
+| Strategy tester and backtesting | ✅ | ◐ | No strategy script, and no backtest that runs a rule over history by itself: an agent makes every decision, through the tools. A [replay server](/chartgen/guides/setups/#replay) answers the chart, indicator, quote and setup tools as of a past time, from fixture bars that `chartgen replay-fixtures` can write from real Binance history, so an agent trades a past period on paper with the live scorer. [`get_track_record`](/chartgen/guides/setups/#your-track-record) counts the closed setups, in R and by group, with the shadow exits side by side. [Replay over real history](/chartgen/guides/replay/), [ADR-0068](/chartgen/decisions/0068-replay-over-real-history/) |
 | Symbol fundamentals, financials, news | ✅ | ❌ | Not offered. |
 
 ## Scripting
@@ -164,7 +164,7 @@ Status legend:
 | Pine-like series operators and `ta.*` functions in scripts | ✅ | ✅ | Element-wise operators, `close[1]`, comparisons, `ta.sma/ema/rsi/atr/macd/crossover` and more, with the Pine v5 code the built-ins use. Pivot tie rule is unverified against TradingView. [Series](/chartgen/guides/scripted-indicators/#series), [`ta.*`](/chartgen/guides/scripted-indicators/#ta-functions) |
 | Fork a built-in as a script | ✅ (open source scripts) | ◐ | `fork_indicator` works for `wavetrend` only. [Forking](/chartgen/guides/scripted-indicators/#forking-a-built-in) |
 | Script editor in the web app | ✅ | ◐ | Create, edit, save, delete and add to the chart, with errors at their line. Only on servers with `CHARTGEN_SCRIPTING=1`. No autocomplete, no renaming and no fork button yet. [Script editor](/chartgen/guides/web/#script-editor), [ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) |
-| Programmatic access (API, agents) | partial | ✅ | The MCP server exposes 21 tools (plus optional scripting and server-alert tools), including chart generation, quotes and symbol search. [MCP reference](/chartgen/reference/mcp/) |
+| Programmatic access (API, agents) | partial | ✅ | The MCP server lists 24 tools on every server, including chart generation, indicators, quotes, market context, symbol search, order flow and the 12 `--trade` tools. Where the features are on it adds 5 scripting tools, 6 server-alert tools, 6 setup tools and `list_events`: 42 at most. [MCP reference](/chartgen/reference/mcp/#tool-catalog) |
 
 ## Data sources
 
@@ -182,12 +182,14 @@ Deliberate deviations recorded in the ADRs. Each is a trade-off, not an
 oversight.
 
 - **Alerts run in the browser unless put on the server.** A browser alert fires
-  only while chartgen is open in a visible tab, is per browser profile and does not
-  sync. A crossing that happens and reverts while the tab is asleep is lost.
+  only while chartgen is open in a visible tab, and syncs across devices only with
+  sign-in. A crossing that happens and reverts while the tab is asleep is lost.
   [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/). A server alert
-  fires with no tab open, but only for a price level on a Binance symbol, and only
-  where the server has them on.
-  [ADR-0042](/chartgen/decisions/0042-server-side-alerts/)
+  fires with no tab open, but only on a Binance symbol, for a price level, a bar's
+  close or, made by an agent, an indicator's line at bar closes, and only where the
+  server has them on.
+  [ADR-0042](/chartgen/decisions/0042-server-side-alerts/),
+  [ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/)
 - **Crypto watchlist change is the rolling 24 hours** that Binance reports,
   not the change since the daily open. Stocks, ETFs, indices and FX change
   against the previous close, like TradingView.
@@ -225,10 +227,13 @@ oversight.
 - **Compare costs up to five extra requests per poll.** It relies on
   klinecharts' percent axis behavior, pinned by a unit test.
   [ADR-0022](/chartgen/decisions/0022-compare-symbols/)
-- **Client state is local.** Indicators, layouts, drawings, alerts and the
-  watchlist live in `localStorage`: no sync, links carry only the
-  chart setup, and clearing browser data wipes them.
-  [ADR-0005](/chartgen/decisions/0005-client-indicator-state/)
+- **Client state lives in the browser.** Indicators, layouts, drawings, alerts and
+  the watchlist live in `localStorage`, and links carry only the chart setup.
+  Without sign-in nothing syncs, and clearing browser data wipes them. With
+  sign-in they follow the account, but a change from another device shows only
+  after a reload, and an account holds up to 2 MiB.
+  [ADR-0005](/chartgen/decisions/0005-client-indicator-state/),
+  [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)
 - **Visual parity drifts.** TradingView changes its look over time, so the
   match is periodically revisited.
   [ADR-0006](/chartgen/decisions/0006-tradingview-visual-parity/)

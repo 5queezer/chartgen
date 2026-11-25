@@ -86,7 +86,7 @@ one and link both ways.
 | [0056](/chartgen/decisions/0056-png-and-summary-warm-up/) | A png or summary reads its indicators' warmup | Accepted | 2026-11-09 |
 | [0057](/chartgen/decisions/0057-e2e-shards/) | The e2e suite runs in duration-balanced CI shards | Accepted | 2026-11-09 |
 | [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) | Refresh tokens, so a client authorized once keeps working | Accepted | 2026-11-11 |
-| [0059](/chartgen/decisions/0059-setups-paper-scored/) | A setup is a stored record, scored on paper by the server | Accepted; amended by [0066](/chartgen/decisions/0066-shadow-exit-variants/), [0068](/chartgen/decisions/0068-replay-over-real-history/), [0070](/chartgen/decisions/0070-stock-setups/), [0071](/chartgen/decisions/0071-setups-panel/) and [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) | 2026-11-11 |
+| [0059](/chartgen/decisions/0059-setups-paper-scored/) | A setup is a stored record, scored on paper by the server | Accepted; amended by [0066](/chartgen/decisions/0066-shadow-exit-variants/), [0068](/chartgen/decisions/0068-replay-over-real-history/), [0070](/chartgen/decisions/0070-stock-setups/), [0071](/chartgen/decisions/0071-setups-panel/), [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) and [0078](/chartgen/decisions/0078-compact-tool-answers/) | 2026-11-11 |
 | [0060](/chartgen/decisions/0060-image-built-in-ci/) | The production image is built in CI and pulled by the host | Accepted; superseded in part by [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | 2026-11-11 |
 | [0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) | An alert can wake the owner's agent | Accepted; amended by [0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) and [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) | 2026-11-11 |
 | [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) | Other origins get an answer on the MCP and OAuth client routes only, and the app is not framed | Accepted | 2026-11-11 |
@@ -104,4 +104,5 @@ one and link both ways.
 | [0075](/chartgen/decisions/0075-autodeploy-follows-the-deployment/) | The autodeploy follows a deployment until the platform finished it | Accepted | 2026-11-15 |
 | [0076](/chartgen/decisions/0076-get-quotes-marks-stale-quotes/) | get_quotes marks a quote that is not trading as stale | Accepted | 2026-11-15 |
 | [0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) | A setup records the market context it was made in | Accepted | 2026-11-15 |
+| [0078](/chartgen/decisions/0078-compact-tool-answers/) | Compact tool answers: fields for list_setups, its open risk, compact JSON and a compact list_indicators | Accepted | 2026-11-24 |
 | [0083](/chartgen/decisions/0083-a-rule-based-strategy-tester/) | A rule-based strategy tester over replay fixtures | Proposed | 2026-11-24 |
