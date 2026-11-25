@@ -5535,3 +5535,231 @@ async fn a_drawing_alert_refuses_what_does_not_fit() {
     assert_eq!(err, "No such setup");
     assert!(a.lock().alerts.is_empty());
 }
+
+// ---- Conditions joined by AND (ADR-0084) ----
+
+fn with_and(condition: &str, level: Option<f64>, and: Value) -> Value {
+    let mut args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "condition": condition, "trigger": "every", "and": and,
+    });
+    if let Some(l) = level {
+        args["level"] = json!(l);
+    }
+    args
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alert_fires_only_where_every_clause_holds_at_that_close() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let above_sma = json!([{
+        "indicator": "ma", "params": { "type": "sma", "length": 5 },
+        "compare": "close", "condition": "greater",
+    }]);
+    let (a, _, id) =
+        with_history("and", bars, with_and("crossing_up", Some(105.0), above_sma)).await;
+    let never = create(
+        &a,
+        with_and(
+            "crossing_up",
+            Some(105.0),
+            json!([{ "condition": "less", "level": 50 }]),
+        ),
+        "me",
+    )
+    .await;
+    let k = key("1h");
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 104.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 106.0)));
+    // SMA 5 is 102 at that close, under 106: the clause holds, and it fires.
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    assert_eq!(a.lock().alerts[&never].fire_count, 0, "106 is not under 50");
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["and"][0]["condition"], "greater");
+    assert!(view["and"][0]["level"].is_null(), "compare: close has none");
+    assert_eq!(view["and"][0]["indicator"]["line"], "SMA 5");
+    assert!((view["and"][0]["indicator"]["value"].as_f64().unwrap() - 102.0).abs() < 1e-9);
+    let view = get(&a, "me", &never).await;
+    assert_eq!(view["and"][0]["price"], 106.0);
+    assert_eq!(view["and"][0]["level"], 50.0);
+    // A held-back crossing is not kept for later: the next close is a new reading.
+    a.on_event(&k, FeedEvent::Bar(bar(t + 3 * HOUR, 40.0)));
+    assert_eq!(a.lock().alerts[&never].fire_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bar_close_with_clauses_fires_at_the_closes_they_hold() {
+    let bars = history(&[100.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "condition": "bar_close", "trigger": "every",
+        "and": [{ "condition": "greater", "level": 110 }],
+    });
+    let (a, _, id) = with_history("and-bar-close", bars, args).await;
+    let k = key("1h");
+    // The first two close before the alert was made, which a bar_close alert leaves
+    // alone (ADR-0069); the bars still need them, in a row.
+    for (i, close) in [(1, 120.0), (2, 120.0), (3, 105.0)] {
+        a.on_event(&k, FeedEvent::Bar(bar(t + i * HOUR, close)));
+    }
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 4 * HOUR, 111.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(t + 5 * HOUR, 112.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clauses_are_refused_where_they_cannot_be_read() {
+    let (store, _) = store_at("and-bad");
+    let a = plain(store);
+    let one = json!([{ "condition": "less", "level": 50 }]);
+    let mut live = with_and("crossing_up", Some(105.0), one.clone());
+    live["evaluate_on"] = json!("live");
+    let err = call(&a, "create_server_alert", live, "me")
+        .await
+        .unwrap_err();
+    assert!(err.contains("reads bar closes"), "{err}");
+    let mut short = with_and("crossing_up", Some(105.0), one.clone());
+    short["interval"] = json!("15m");
+    let err = call(&a, "create_server_alert", short, "me")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "An alert with and reads closes of 1h or longer, not 15m"
+    );
+    let err = call(
+        &a,
+        "create_server_alert",
+        with_and("crossing_up", Some(105.0), json!([{ "condition": "less" }])),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, "and[0]: level is required: a price greater than 0");
+    assert!(a.lock().alerts.is_empty());
+    let id = create(&a, with_and("crossing_up", Some(105.0), one.clone()), "me").await;
+    let args = json!({ "alert_id": id, "and": [] });
+    let err = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("and cannot change"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_funding_condition_in_and_is_refused() {
+    let (store, _) = store_at("and-funding");
+    let a = plain(store);
+    let args = with_and(
+        "crossing_up",
+        Some(105.0),
+        json!([{ "indicator": "funding", "condition": "greater", "level": 0.01 }]),
+    );
+    let err = call(&a, "create_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "and[0]: funding cannot be an and condition; make it the alert's own indicator"
+    );
+    assert!(a.lock().alerts.is_empty());
+}
+
+/// A drawing alert with clauses reads a close only once the bars hold it. A close that
+/// comes while they are being read again must not move its baseline: the crossing it
+/// makes is read when the bars are back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drawing_alert_with_clauses_waits_for_the_bars_before_reading_a_close() {
+    let (store, _) = store_at("and-drawing-window");
+    let fake = Arc::new(Fake::default());
+    let bars = history(&[95.0; 300]);
+    let t = bar_time_of(bars.last().unwrap()).unwrap();
+    *fake.history.lock().unwrap() = Some(bars);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake),
+        Policy::default(),
+        Access::Open,
+        None,
+        Limits::default(),
+        quick_timing(),
+    );
+    let setups = crate::setup_service::Setups::new(
+        store,
+        Some(hub_with(Arc::new(Fake::default()))),
+        None,
+        crate::fetch::DataSource::Sample,
+        Access::parse(None),
+        crate::setup_service::Limits::default(),
+        Some(a.clone()),
+    );
+    let p = chartgen::data::sample_ohlcv("BTCUSDT", "1m", 1, None, crate::fetch::now_ms())
+        .unwrap()
+        .bars[0]
+        .close;
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "direction": "long", "thesis": "a level",
+        "entry": { "low": p * 0.5, "high": p * 0.51 },
+        "invalidation": p * 0.4, "targets": [p * 0.9],
+        "expires_at": crate::fetch::now_ms() + 86_400_000,
+        "drawings": [{ "tool": "horizontalStraightLine", "points": [{ "time": t, "price": 100 }] }],
+    });
+    let resp = setups.call_tool("create_setup", None, &args, Some("me"));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert_ne!(resp["result"]["isError"], json!(true), "{text}");
+    let setup = serde_json::from_str::<Value>(text).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "drawing": { "setup_id": setup, "index": 0 },
+        "condition": "crossing_up", "trigger": "once",
+        "and": [{ "condition": "greater", "level": 1 }],
+    });
+    args["message"] = json!("over the line");
+    let id = create(&a, args, "me").await;
+    let k = key("1h");
+    until("the bars", || {
+        a.lock().watches.get(&k).is_some_and(|w| w.bars.is_some())
+    })
+    .await;
+    // Under the line: the baseline.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 99.0)));
+    // The bars go, as after a lag, and the close over the line comes meanwhile.
+    let kept = a.lock().watches.get_mut(&k).unwrap().bars.take().unwrap();
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 101.0)));
+    assert_eq!(
+        a.lock().alerts[&id].fire_count,
+        0,
+        "its clauses cannot be read yet"
+    );
+    // The bars are back with that close: it is read then, and crosses.
+    let mut back = kept;
+    back.push(bar(t + 2 * HOUR, 101.0));
+    a.install_window(&k, Ok(back));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    std::mem::forget(setups);
+}
+
+/// A funding alert's clauses are read with the close its funding read started for: the
+/// bars can be gone by the time the read is back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_funding_alerts_clauses_are_read_at_its_close_not_when_the_read_is_back() {
+    let mut args = on_funding("SLOWUSDT", "greater", 0.05);
+    args["and"] = json!([{ "condition": "crossing_up", "level": 100 }]);
+    let (a, k, id, t) = funding_alert("and-funding-slow", "SLOWUSDT", args).await;
+    // Funding is over 0.05% at both closes; the price crosses 100 at the second.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 99.0)));
+    until("the first read", || {
+        a.lock().futures_bars.get(&id) == Some(&(t + HOUR))
+    })
+    .await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 0, "99 did not cross 100");
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 101.0)));
+    // The bars go while the 400 ms read is out, as after a lag.
+    a.lock().watches.get_mut(&k).unwrap().bars.take();
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+    assert_eq!(get(&a, "me", &id).await["and"][0]["price"], 101.0);
+}

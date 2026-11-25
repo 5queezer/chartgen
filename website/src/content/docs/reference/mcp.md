@@ -1347,7 +1347,7 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"`, `condition: "bar_close"` or `drawing`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `drawing`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"`, `condition: "bar_close"` or `drawing`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `drawing`, `and`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
 | `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
@@ -1415,7 +1415,8 @@ An alert that [wakes your agent](#waking-your-agent) also has `"notify_agent": t
 `"setup_id"` if it is about a setup; other alerts have neither field.
 An [indicator alert](#indicator-alerts-on-the-server) also has `"indicator"`, and its `level` is
 `null` when it compares the close with the line. A [drawing alert](#a-close-beyond-a-drawing-of-a-setup)
-has `"drawing"` and a `null` `level`. An alert with an end has `"expires_at"`.
+has `"drawing"` and a `null` `level`. An alert with [conditions joined by
+AND](#conditions-joined-by-and) has `"and"`. An alert with an end has `"expires_at"`.
 `feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
@@ -1550,6 +1551,39 @@ line broken at a close, or a close out of a range.
   fire at the close that fired. The fire's `level` is that price too.
 - `update_server_alert` changes its `condition` and `trigger`; not `drawing`, and it takes no
   `level`.
+
+#### Conditions joined by AND
+
+An alert can take up to 3 more conditions in `and`
+([ADR-0084](/chartgen/decisions/0084-conditions-joined-by-and/)): it fires only at a close where
+its own condition fires **and** each of them holds.
+
+```json
+{ "symbol": "BTCUSDT", "interval": "4h", "evaluate_on": "close",
+  "condition": "crossing_up", "level": 98000, "trigger": "once",
+  "and": [
+    { "indicator": "rsi", "condition": "less", "level": 70 },
+    { "indicator": "ma", "params": { "type": "ema", "length": 50 }, "compare": "close", "condition": "greater" }
+  ] }
+```
+
+- Each condition has its own `condition` (`crossing`, `crossing_up`, `crossing_down`,
+  `greater`, `less`) and either a price `level` (the close against it) or an
+  [indicator](#indicator-alerts-on-the-server) with `params`, `line`, `compare` and `level`,
+  checked as an indicator alert's are. `funding` cannot be one: it is read with the symbol, off
+  the lock, so make it the alert's own `indicator`. Nor can a drawing; a [drawing
+  alert](#a-close-beyond-a-drawing-of-a-setup) takes `and` beside its own condition.
+- All are read at the same close, from the symbol and interval's closed bars: `greater` and `less`
+  at that close, a crossing between the bar before and that close. So, unlike the alert's own
+  price crossing, they read the same after a restart.
+- The alert needs `evaluate_on: "close"` and an interval of 1h or longer. With
+  `condition: "bar_close"` it fires at every close where all of them hold.
+- When its own condition fires and one of them does not hold, nothing fires and nothing is kept:
+  `once` stays armed, and a crossing is not carried to a later close.
+- The alert in a list, the [webhook payload](#webhook-payload) and the
+  [wake-up](#waking-your-agent) carry `"and": [...]`: each condition with what it read at the last
+  close, or at the close that fired: `"price"` for a price level, `"indicator": {…, "value"}` for
+  an indicator. `and` cannot change.
 
 #### An alert at a bar's close
 

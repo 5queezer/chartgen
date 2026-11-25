@@ -728,6 +728,15 @@ export const IndicatorViewSchema = z.object({
   value: z.number().nullable(),
 });
 
+/** One of an alert's `and` conditions (ADR-0084), with what it read at the last close:
+ * `price` for a price level, `indicator.value` for an indicator's line. */
+export const AndClauseViewSchema = z.object({
+  condition: z.enum(["crossing", "crossing_up", "crossing_down", "greater", "less"]),
+  level: z.number().nullable(),
+  indicator: IndicatorViewSchema.optional(),
+  price: z.number().nullable().optional(),
+});
+
 /** A drawing alert's drawing (ADR-0081): copied from one of the owner's setups. `level` is
  * its price at the last close read, null before the first. */
 export const DrawingViewSchema = z.object({
@@ -791,6 +800,8 @@ export const ServerAlertSchema = z.object({
    * the line at the last close it read, null until it has read one.
    */
   indicator: IndicatorViewSchema.optional(),
+  /** Present only on an alert with conditions joined by AND (ADR-0084). */
+  and: z.array(AndClauseViewSchema).optional(),
   /** Present only on an alert on a drawing of a setup, at bar closes (ADR-0081). */
   drawing: DrawingViewSchema.optional(),
 });
@@ -1391,6 +1402,9 @@ export const LoggedEventSchema = z.discriminatedUnion("type", [
       fire_count: z.number().int(),
       /** Only on an indicator alert's fire (ADR-0067). */
       indicator: IndicatorViewSchema.optional(),
+      /** Only on the fire of an alert with conditions joined by AND, each with what it read
+       * at that close (ADR-0084). */
+      and: z.array(AndClauseViewSchema).optional(),
       /** Only on a drawing alert's fire: the drawing, with its price at that close (ADR-0081). */
       drawing: DrawingViewSchema.optional(),
     }),

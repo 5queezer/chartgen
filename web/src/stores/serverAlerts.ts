@@ -41,7 +41,7 @@ export function serverAlertStatus(a: ServerAlert): ServerAlertStatus {
 export function editsInDialog(
   a: ServerAlert,
 ): a is ServerAlert & { condition: AlertCondition; indicator?: undefined; drawing?: undefined } {
-  return !a.indicator && !a.drawing && a.condition !== "bar_close";
+  return !a.indicator && !a.drawing && !a.and?.length && a.condition !== "bar_close";
 }
 
 /** The drawing tools a server alert can watch, as the toolbar names them. */
@@ -76,7 +76,8 @@ export function serverAlertCondition(a: ServerAlert): string {
 }
 
 export function serverAlertText(a: ServerAlert): string {
-  const head = `${a.symbol} ${serverAlertCondition(a)}`;
+  const more = a.and?.length ? ` and ${a.and.length} more` : "";
+  const head = `${a.symbol} ${serverAlertCondition(a)}${more}`;
   return a.message ? `${head} — ${a.message}` : head;
 }
 

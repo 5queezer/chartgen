@@ -38,6 +38,97 @@ export interface CancelSetupInput {
 
 export interface CreateServerAlertInput {
   /**
+   * Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them (not funding: make that the alert's own indicator), with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. A condition that cannot be read (too little history, no bars yet) does not hold. A fire held back keeps nothing: once stays armed, and with every and greater or less the re-arming follows the alert's own condition only. Fixed after creation.
+   *
+   * @maxItems 3
+   */
+  and?:
+    | []
+    | [
+        {
+          compare?: "level" | "close";
+          condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+          indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+          /**
+           * A price, greater than 0; or with indicator the line's level, none with compare: close.
+           */
+          level?: number;
+          line?: string;
+          params?: {
+            [k: string]: unknown;
+          };
+        }
+      ]
+    | [
+        {
+          compare?: "level" | "close";
+          condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+          indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+          /**
+           * A price, greater than 0; or with indicator the line's level, none with compare: close.
+           */
+          level?: number;
+          line?: string;
+          params?: {
+            [k: string]: unknown;
+          };
+        },
+        {
+          compare?: "level" | "close";
+          condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+          indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+          /**
+           * A price, greater than 0; or with indicator the line's level, none with compare: close.
+           */
+          level?: number;
+          line?: string;
+          params?: {
+            [k: string]: unknown;
+          };
+        }
+      ]
+    | [
+        {
+          compare?: "level" | "close";
+          condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+          indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+          /**
+           * A price, greater than 0; or with indicator the line's level, none with compare: close.
+           */
+          level?: number;
+          line?: string;
+          params?: {
+            [k: string]: unknown;
+          };
+        },
+        {
+          compare?: "level" | "close";
+          condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+          indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+          /**
+           * A price, greater than 0; or with indicator the line's level, none with compare: close.
+           */
+          level?: number;
+          line?: string;
+          params?: {
+            [k: string]: unknown;
+          };
+        },
+        {
+          compare?: "level" | "close";
+          condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+          indicator?: "rsi" | "ma" | "macd" | "stoch" | "cci" | "mfi" | "williams_r" | "roc" | "atr" | "adx";
+          /**
+           * A price, greater than 0; or with indicator the line's level, none with compare: close.
+           */
+          level?: number;
+          line?: string;
+          params?: {
+            [k: string]: unknown;
+          };
+        }
+      ];
+  /**
    * level: the line against level. close: the bar's close against the line, with no level; a crossing is then the close and the line one bar before against both now.
    */
   compare?: "level" | "close";

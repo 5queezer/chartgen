@@ -704,6 +704,24 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "push": { "type": "boolean", "description": "Notify your devices (subscribe_push) when it fires. May go with a webhook.", "default": false },
                     "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires: a signed POST to the receiver this server's operator configured for you. Instead of webhook_url, not with it. Refused where no receiver is configured for you.", "default": false },
                     "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, shadow results, thesis)." },
+                    "and": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "condition": { "type": "string", "enum": ["crossing", "crossing_up", "crossing_down", "greater", "less"] },
+                                "level": { "type": "number", "description": "A price, greater than 0; or with indicator the line's level, none with compare: close." },
+                                "indicator": { "type": "string", "enum": ["rsi", "ma", "macd", "stoch", "cci", "mfi", "williams_r", "roc", "atr", "adx"] },
+                                "params": { "type": "object", "additionalProperties": true },
+                                "line": { "type": "string" },
+                                "compare": { "type": "string", "enum": ["level", "close"] }
+                            },
+                            "required": ["condition"],
+                            "additionalProperties": false
+                        },
+                        "description": "Up to 3 more conditions, joined by AND: the alert fires only at a close where its own condition fires and each of these holds. Each is a price level (the close against it) or an indicator's line, as the alert's own fields take them (not funding: make that the alert's own indicator), with its own condition; a crossing holds when it crossed between the bar before and this close. All are read from the same symbol and interval's closed bars, so it needs evaluate_on: close (or condition: bar_close, to fire at every close where they all hold) and an interval of 1h or longer. A condition that cannot be read (too little history, no bars yet) does not hold. A fire held back keeps nothing: once stays armed, and with every and greater or less the re-arming follows the alert's own condition only. Fixed after creation."
+                    },
                     "drawing": {
                         "type": "object",
                         "properties": {
@@ -721,12 +739,12 @@ pub fn server_alert_tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_server_alerts",
-            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, expires_at (unix ms, when set), feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, a drawing alert's drawing with its price at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, expires_at (unix ms, when set), feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, a drawing alert's drawing with its price at the last close, the and conditions with what each read at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "update_server_alert",
-            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. An alert past its expires_at runs again only with active: true and a later expires_at, or an empty one; without active: true it stays stopped. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on, an indicator alert's indicator, params, line and compare, and a drawing alert's drawing cannot change: delete and create instead; a drawing alert takes no level.",
+            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. An alert past its expires_at runs again only with active: true and a later expires_at, or an empty one; without active: true it stays stopped. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on, an indicator alert's indicator, params, line and compare, a drawing alert's drawing, and the and conditions cannot change: delete and create instead; a drawing alert takes no level.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -13,6 +13,7 @@ sidebar:
 **Amended by:** [ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) (deliveries also carry the Standard Webhooks headers; an alert can wake the owner's agent at one receiver the operator configures, with limits of its own)
 **Amended by:** [ADR-0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) (an alert can watch an indicator's line at bar closes of 1h or longer; a watched pair can keep a window of bars)
 **Amended by:** [ADR-0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) (an alert can fire at every bar close of 1h or longer, whatever the price)
+**Amended by:** [ADR-0084](/chartgen/decisions/0084-conditions-joined-by-and/) (an alert can take up to three more conditions, joined by AND)
 **Amends:** [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) (an alert may now run without a tab), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) (its sources stay browser-only)
 
 ## Context and Problem Statement
