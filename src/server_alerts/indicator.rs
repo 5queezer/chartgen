@@ -352,8 +352,14 @@ pub(super) fn read_futures(
         ));
     };
     futures_reading(spec, tail, &y).ok_or_else(|| match spec.change_bars {
+        // The panel names its reason in brackets; without one, the change reached past
+        // what Binance keeps.
+        Some(n) if why.contains('(') => format!(
+            "{symbol} has no {} change over {n} bars at its last close: {why}",
+            spec.line
+        ),
         Some(n) => format!(
-            "{symbol} has no {} change over {n} bars at its last close: {why}; Binance keeps 30 days of it, about 185 bars on 4h, 31 on 1d",
+            "{symbol} has no {} change over {n} bars at its last close: Binance keeps 30 days of it, about 185 bars on 4h, 31 on 1d",
             spec.line
         ),
         None => format!("{symbol} has no {} at its last close: {why}", spec.line),
