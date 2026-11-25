@@ -2,7 +2,7 @@
 //! from the server's record of the news while it is current (ADR-0088), else from the
 //! feeds.
 
-use chartgen_news::{MAX_HOURS, MAX_LIMIT};
+use chartgen_news::{Pick, MAX_HOURS, MAX_LIMIT};
 use serde_json::Value;
 
 use crate::mcp::{tool_err, tool_ok};
@@ -48,7 +48,32 @@ pub fn call_tool(id: Option<Value>, args: &Value) -> Value {
         (Ok(h), Ok(l)) => (h, l as usize),
         (Err(e), _) | (_, Err(e)) => return tool_err(id, &e),
     };
-    match chartgen_news::read(store(), &symbol, hours, limit) {
+    let pick = match args.get("sources").filter(|v| !v.is_null()) {
+        None => Pick::Default,
+        Some(v) => match v
+            .as_array()
+            .map(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+        {
+            Some(Some(ids)) if ids == ["all"] => Pick::All,
+            Some(Some(ids)) if !ids.is_empty() => {
+                Pick::Ids(ids.into_iter().map(str::to_string).collect())
+            }
+            _ => {
+                return tool_err(
+                    id,
+                    "sources must be a list of source ids, or [\"all\"] for every source",
+                )
+            }
+        },
+    };
+    let language = match args.get("language").filter(|v| !v.is_null()) {
+        None => "en",
+        Some(v) => match v.as_str().filter(|l| !l.trim().is_empty()) {
+            Some(l) => l.trim(),
+            None => return tool_err(id, "language must be a language code, e.g. \"en\""),
+        },
+    };
+    match chartgen_news::read(store(), &symbol, hours, limit, &pick, language) {
         Ok(v) => tool_ok(id, v),
         Err(e) => tool_err(id, &e),
     }
@@ -84,5 +109,9 @@ mod tests {
         assert!(err(json!({ "symbol": "BTCUSDT", "hours": 0 })).contains("hours"));
         assert!(err(json!({ "symbol": "BTCUSDT", "hours": 169 })).contains("hours"));
         assert!(err(json!({ "symbol": "BTCUSDT", "limit": 51 })).contains("limit"));
+        assert!(err(json!({ "symbol": "BTCUSDT", "sources": [] })).contains("sources"));
+        assert!(err(json!({ "symbol": "BTCUSDT", "sources": "all" })).contains("sources"));
+        assert!(err(json!({ "symbol": "BTCUSDT", "sources": [1] })).contains("sources"));
+        assert!(err(json!({ "symbol": "BTCUSDT", "language": "" })).contains("language"));
     }
 }

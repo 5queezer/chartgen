@@ -78,7 +78,8 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_OI_RECORD_SYMBOLS` | `src/indicators/external/record.rs` | Comma-separated Binance futures symbols to record besides those of the setups and server alerts, such as `BTCUSDT,ETHUSDT`. |
 | `CHARTGEN_SETUPS` | `src/setup_service.rs` | `1` enables [setups](/chartgen/guides/setups/): five MCP tools for trading setups the server scores on paper. Off when unset; setups already stored wait in `chartgen.db`. Needs a build with the `scripting` feature and the store. It does not need `CHARTGEN_SERVER_ALERTS`. Read [before turning it on](#setups). |
 | `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` | `src/setup_service.rs` | Symbols one owner may have open setups on. Default 5. |
-| `CHARTGEN_NEWS_FEEDS` | `crates/news/src/lib.rs` | The feeds [`get_news`](/chartgen/reference/mcp/#get_news) reads and the server [records](#the-news-recorded), RSS 2.0 or Atom: entries separated by commas, each `Name=https://…` or a bare URL, then named by its host. Unset: the 34 outlets of [ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds). Empty: no feed, nothing is recorded, and `get_news` answers an error. A URL that is not `http` or `https` makes every `get_news` call an error naming it. |
+| `CHARTGEN_NEWS_SOURCES` | `crates/news/src/sources.rs` | A JSON file of the [news sources](#the-news-recorded) that [`get_news`](/chartgen/reference/mcp/#get_news) reads and the server records, read again when it changes. Unset: `CHARTGEN_NEWS_FEEDS`, else the 34 of [ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds). |
+| `CHARTGEN_NEWS_FEEDS` | `crates/news/src/sources.rs` | ADR-0086's shorter form, used when `CHARTGEN_NEWS_SOURCES` is unset: entries separated by commas, each `Name=https://…` or a bare URL, then named by its host; each an English RSS or Atom source in the default set, its id its name in lower case with `-` (`The Block` is `the-block`). Empty: no source, nothing is recorded, and `get_news` answers an error. A URL that is not `http` or `https` makes every `get_news` call an error naming it. |
 | `CHARTGEN_NEWS_RECORD_DAYS` | `crates/news/src/record.rs` | How many days a [recorded headline](#the-news-recorded) is kept after it was published. Default 365; `0` records nothing. Needs the store. |
 | `CHARTGEN_BIND` | `src/server.rs` | The IP address `--serve` and `--trade` listen on, such as `127.0.0.1` or a VPN overlay address in the CGNAT range `100.64.0.0/10`. Default `0.0.0.0`, every interface, which a container needs. A replay server warns when it is neither loopback nor such an overlay address ([private replay](/chartgen/guides/replay/#run-a-private-replay-server)). |
 | `CHARTGEN_REPLAY_FIXTURES` | `src/replay.rs` | A directory of 1m fixture bars. Set, the server is a [replay server](/chartgen/guides/setups/#replay): it answers only from those bars, as of the time each call names, and refuses to start with `--trade`, `--mcp`, `CHARTGEN_SERVER_ALERTS=1`, `CHARTGEN_SETUPS=1` or a sign-in provider. For evaluation, not for a public server: [keep it private](/chartgen/guides/replay/#run-a-private-replay-server). `chartgen replay-fixtures` writes fixtures from real Binance history. |
@@ -155,12 +156,33 @@ bar's open; within the 30 days it reads Binance as before.
 ### The news recorded
 
 A server with a store records the news ([ADR-0088](/chartgen/decisions/0088-recording-the-news/)):
-every 5 minutes a thread reads each feed of `CHARTGEN_NEWS_FEEDS` (unset: 34 outlets), one after
-another with 2 s between requests, and writes each headline it has not seen to the store's
-`news_items` table, once by its link: outlet, title, link, published time, when it was first
-read, the outlet's categories, its author and the coins matched then. Each feed's state is in
+every 5 minutes a thread reads each enabled source, one after another with 2 s between
+requests, and writes each headline it has not seen to the store's `news_items` table, once by
+its link: the source's id, name, kind and language, title, link, published time, when it was
+first read, the categories, the author and the coins matched then. Each source's state is in
 `news_feeds`. [`get_news`](/chartgen/reference/mcp/#get_news) answers from the record while a
-feed was read within the last 30 minutes.
+source was read within the last 30 minutes, from the default set unless a call names sources.
+
+- **The sources** are the list built in (`crates/news/sources.json`: 34 crypto outlets and
+  markets desks, ADR-0086's five as the default set) unless `CHARTGEN_NEWS_SOURCES` names a
+  file of your own, in the same form:
+
+  ```json
+  [
+    { "id": "coindesk", "name": "CoinDesk", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+      "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": true }
+  ]
+  ```
+
+  `id` (lower case letters, digits, `-`), `name` and `url` are needed. `kind` is `rss`
+  (default), `atom`, `reddit` or `youtube`; `language` defaults to `en`; `enabled` to true;
+  `syndicates` (it mostly republishes others) and `default` (answered without `sources`) to
+  false, and when no enabled source is `default`, all are; `coins`, a list of tickers, makes a
+  source about those coins only. Copy `crates/news/sources.json` to start. **Changing the file
+  needs no restart**: it is read again within 5 minutes of a change. A file that does not parse
+  keeps the sources read before, and the log says why. Keep an `id` once used: it is recorded
+  with each headline. Reddit and YouTube refuse these feeds in their `robots.txt`, so the list
+  has none ([ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds)).
 
 - **Politely:** each request sends the feed's last `ETag` and `Last-Modified`, so an unchanged
   feed answers `304` without a body. A feed that fails is tried again after 5 minutes, then 10,
@@ -173,7 +195,8 @@ feed was read within the last 30 minutes.
 - **Restarts:** the record and each feed's state are in the store, so a restart continues where
   it stopped. Headlines a feed published and dropped again while the server was stopped are lost.
 - **Off** with `CHARTGEN_NEWS_RECORD_DAYS=0`, without a store, on a replay server, and in a build
-  without the `news` feature (which has no `get_news`).
+  without the `news` feature (which has no `get_news`). One source: `"enabled": false` in the
+  file.
 - **After a rollback:** a build from before this ignores both tables and reads the feeds when
   asked. No step is needed on the file in either direction.
 

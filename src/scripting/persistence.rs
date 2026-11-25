@@ -181,11 +181,14 @@ pub(super) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (kind, symbol, period, ts)
     ) WITHOUT ROWID;
 ",
-    // Headlines of the news feeds, each once, and each feed's last read (ADR-0088).
+    // Headlines of the news sources, each once, and each source's last read (ADR-0088).
     "
     CREATE TABLE news_items (
         url           TEXT    PRIMARY KEY,
+        source        TEXT    NOT NULL,
         outlet        TEXT    NOT NULL,
+        kind          TEXT    NOT NULL,
+        language      TEXT    NOT NULL,
         title         TEXT    NOT NULL,
         published     INTEGER NOT NULL,
         from_updated  INTEGER NOT NULL,
@@ -196,7 +199,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;
     CREATE INDEX news_items_published ON news_items (published);
     CREATE TABLE news_feeds (
-        url            TEXT    PRIMARY KEY,
+        id             TEXT    PRIMARY KEY,
+        url            TEXT    NOT NULL,
         name           TEXT    NOT NULL,
         etag           TEXT,
         last_modified  TEXT,
@@ -1795,14 +1799,17 @@ impl chartgen_news::Store for Store {
             {
                 let mut stmt = tx.prepare(
                     "INSERT OR IGNORE INTO news_items
-                         (url, outlet, title, published, from_updated, first_seen, categories, coins,
-                          author)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                         (url, source, outlet, kind, language, title, published, from_updated,
+                          first_seen, categories, coins, author)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )?;
                 for i in items {
                     new += stmt.execute(params![
                         i.url,
+                        i.source,
                         i.outlet,
+                        i.kind,
+                        i.language,
                         i.title,
                         i.published,
                         i.from_updated,
@@ -1823,22 +1830,25 @@ impl chartgen_news::Store for Store {
         let conn = self.conn();
         let read = (|| {
             let mut stmt = conn.prepare_cached(
-                "SELECT url, outlet, title, published, from_updated, first_seen, categories, coins,
-                        author
+                "SELECT url, source, outlet, kind, language, title, published, from_updated,
+                        first_seen, categories, coins, author
                  FROM news_items WHERE published BETWEEN ?1 AND ?2 ORDER BY published DESC",
             )?;
             let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
             let rows = stmt.query_map(params![from, to], |r| {
                 Ok(chartgen_news::Recorded {
                     url: r.get(0)?,
-                    outlet: r.get(1)?,
-                    title: r.get(2)?,
-                    published: r.get(3)?,
-                    from_updated: r.get(4)?,
-                    first_seen: r.get(5)?,
-                    categories: list(r.get(6)?),
-                    coins: list(r.get(7)?),
-                    author: r.get(8)?,
+                    source: r.get(1)?,
+                    outlet: r.get(2)?,
+                    kind: r.get(3)?,
+                    language: r.get(4)?,
+                    title: r.get(5)?,
+                    published: r.get(6)?,
+                    from_updated: r.get(7)?,
+                    first_seen: r.get(8)?,
+                    categories: list(r.get(9)?),
+                    coins: list(r.get(10)?),
+                    author: r.get(11)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1859,21 +1869,22 @@ impl chartgen_news::Store for Store {
         let conn = self.conn();
         let read = (|| {
             let mut stmt = conn.prepare(
-                "SELECT url, name, etag, last_modified, last_success, last_error,
+                "SELECT id, url, name, etag, last_modified, last_success, last_error,
                         failing_since, failures, next_attempt
-                 FROM news_feeds ORDER BY url",
+                 FROM news_feeds ORDER BY id",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(chartgen_news::FeedState {
-                    url: r.get(0)?,
-                    name: r.get(1)?,
-                    etag: r.get(2)?,
-                    last_modified: r.get(3)?,
-                    last_success: r.get(4)?,
-                    last_error: r.get(5)?,
-                    failing_since: r.get(6)?,
-                    failures: r.get(7)?,
-                    next_attempt: r.get(8)?,
+                    id: r.get(0)?,
+                    url: r.get(1)?,
+                    name: r.get(2)?,
+                    etag: r.get(3)?,
+                    last_modified: r.get(4)?,
+                    last_success: r.get(5)?,
+                    last_error: r.get(6)?,
+                    failing_since: r.get(7)?,
+                    failures: r.get(8)?,
+                    next_attempt: r.get(9)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1885,10 +1896,11 @@ impl chartgen_news::Store for Store {
         self.conn()
             .execute(
                 "INSERT OR REPLACE INTO news_feeds
-                     (url, name, etag, last_modified, last_success, last_error,
+                     (id, url, name, etag, last_modified, last_success, last_error,
                       failing_since, failures, next_attempt)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
+                    f.id,
                     f.url,
                     f.name,
                     f.etag,
@@ -1913,7 +1925,10 @@ mod news_tests {
     fn headline(url: &str, published: i64) -> Recorded {
         Recorded {
             url: url.into(),
+            source: "outlet".into(),
             outlet: "Outlet".into(),
+            kind: "rss".into(),
+            language: "en".into(),
             title: "Bitcoin and Ether slide".into(),
             published,
             from_updated: published % 2 == 1,
@@ -1929,6 +1944,7 @@ mod news_tests {
         let dir = crate::test_dir::new("news_store");
         let path = dir.join("chartgen.db");
         let feed = FeedState {
+            id: "outlet".into(),
             url: "https://outlet.example/rss".into(),
             name: "Outlet".into(),
             etag: Some("\"v1\"".into()),

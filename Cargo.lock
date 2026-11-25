@@ -422,6 +422,7 @@ dependencies = [
  "chrono",
  "quick-xml",
  "reqwest",
+ "serde",
  "serde_json",
  "url",
 ]

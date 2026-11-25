@@ -606,9 +606,17 @@ export interface GetNewsInput {
    */
   hours?: number;
   /**
+   * Only sources of this language.
+   */
+  language?: string;
+  /**
    * Most headlines returned.
    */
   limit?: number;
+  /**
+   * Source ids to answer from, e.g. ["coindesk", "the-block"], or ["all"] for every enabled source. Default: the default set (CoinDesk, Cointelegraph, Decrypt, The Block, Bitcoin Magazine unless configured otherwise).
+   */
+  sources?: string[];
   /**
    * Ticker symbol, e.g. "BTCUSDT": its coin (BTC) is read off the quote (USDT, USDC, FDUSD, BUSD, USD).
    */

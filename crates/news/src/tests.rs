@@ -9,15 +9,46 @@ pub(super) fn fixture(name: &str) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
-/// The feeds a test reads: the five of ADR-0086, which `download` serves.
-pub(super) fn feeds() -> Vec<Feed> {
-    DEFAULT_FEEDS[..5]
-        .iter()
-        .map(|(name, url)| Feed {
-            name: name.to_string(),
-            url: url.to_string(),
-        })
-        .collect()
+/// A source of a test.
+pub(super) fn source(name: &str, url: &str) -> Source {
+    Source {
+        id: name.to_lowercase().replace(' ', "-"),
+        name: name.into(),
+        url: url.into(),
+        ..Source::default()
+    }
+}
+
+/// The sources a test reads, which `download` serves: the five of ADR-0086, the default
+/// set, and a sixth, which is not, and a seventh about Solana only.
+pub(super) fn sources() -> Vec<Source> {
+    let mut sources: Vec<Source> = [
+        (
+            "CoinDesk",
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        ),
+        ("Cointelegraph", "https://cointelegraph.com/rss"),
+        ("Decrypt", "https://decrypt.co/feed"),
+        ("The Block", "https://www.theblock.co/rss.xml"),
+        ("Bitcoin Magazine", "https://bitcoinmagazine.com/.rss/full/"),
+        ("Wide", "https://wide.example/feed"),
+        ("r/solana", "https://www.reddit.com/r/solana/.rss"),
+    ]
+    .iter()
+    .map(|(name, url)| Source {
+        default: true,
+        ..source(name, url)
+    })
+    .collect();
+    sources[5].default = false;
+    sources[6] = Source {
+        id: "r-solana".into(),
+        kind: Kind::Reddit,
+        coins: vec!["SOL".into()],
+        default: false,
+        ..sources[6].clone()
+    };
+    sources
 }
 
 /// The test's feeds, served from fixtures: no test reaches an outlet. Decrypt is down.
@@ -28,6 +59,8 @@ pub(super) fn download(url: &str) -> Result<String, String> {
         u if u.contains("cointelegraph") => "cointelegraph",
         u if u.contains("bitcoinmagazine") => "bitcoinmagazine",
         u if u.contains("theblock") => "atom",
+        u if u.contains("wide.example") => "cointelegraph",
+        u if u.contains("reddit") => "reddit",
         _ => return Err("HTTP 503".into()),
     };
     Ok(fixture(name))
@@ -181,10 +214,7 @@ fn a_name_that_is_an_ordinary_word_is_matched_capitalised() {
 
 #[test]
 fn a_headline_dated_after_now_is_left_out_beyond_a_skew() {
-    let feed = Feed {
-        name: "Outlet".into(),
-        url: "https://outlet.example/rss".into(),
-    };
+    let feed = source("Outlet", "https://outlet.example/rss");
     let at = |published: i64, url: &str| Item {
         title: "Bitcoin headline".into(),
         url: url.into(),
@@ -222,14 +252,11 @@ fn an_item_with_an_empty_link_is_left_out() {
 
 #[test]
 fn the_answer_is_the_newest_headlines_about_the_symbol_in_the_window() {
-    let feeds: Vec<Feed> = ["CoinDesk", "Cointelegraph", "Bitcoin Magazine", "Decrypt"]
+    let feeds: Vec<Source> = ["CoinDesk", "Cointelegraph", "Bitcoin Magazine", "Decrypt"]
         .iter()
-        .map(|n| Feed {
-            name: n.to_string(),
-            url: format!("https://{n}.example/rss"),
-        })
+        .map(|n| source(n, &format!("https://{}.example/rss", n.replace(' ', ""))))
         .collect();
-    let reads: Vec<(&Feed, Fetched)> = vec![
+    let reads: Vec<(&Source, Fetched)> = vec![
         (&feeds[0], Ok(Arc::new(parsed("coindesk")))),
         (&feeds[1], Ok(Arc::new(parsed("cointelegraph")))),
         (&feeds[2], Ok(Arc::new(parsed("bitcoinmagazine")))),
@@ -288,7 +315,7 @@ fn the_answer_is_the_newest_headlines_about_the_symbol_in_the_window() {
 
 #[test]
 fn feeds_are_read_once_in_ten_minutes_and_a_failed_one_is_named() {
-    let call = || read(None, "SOLUSDT", 168, 10).unwrap();
+    let call = || read(None, "SOLUSDT", 168, 10, &Pick::Default, "en").unwrap();
     let v = call();
     let read = DOWNLOADS.load(Ordering::SeqCst);
     assert_eq!(v["symbol"], "SOLUSDT");
@@ -306,39 +333,52 @@ fn feeds_are_read_once_in_ten_minutes_and_a_failed_one_is_named() {
 }
 
 #[test]
-fn the_feeds_are_named_urls_separated_by_commas() {
-    let feeds =
-        feeds_from(" Outlet A=https://a.example/rss , https://b.example/feed?x=1,").unwrap();
+fn an_answer_is_from_the_default_set_unless_sources_are_named() {
+    let names = |v: &Value| v["sources"].clone();
+    let v = read(None, "SOLUSDT", 168, 10, &Pick::All, "en").unwrap();
     assert_eq!(
-        feeds,
-        [
-            Feed {
-                name: "Outlet A".into(),
-                url: "https://a.example/rss".into(),
-            },
-            Feed {
-                name: "b.example".into(),
-                url: "https://b.example/feed?x=1".into(),
-            },
-        ]
+        names(&v),
+        json!([
+            "CoinDesk",
+            "Cointelegraph",
+            "The Block",
+            "Bitcoin Magazine",
+            "Wide",
+            "r/solana"
+        ])
     );
-    assert_eq!(feeds_from("").unwrap(), []);
-    assert!(feeds_from("Old=ftp://a.example/rss").is_err());
+    let ids = |ids: &[&str]| Pick::Ids(ids.iter().map(|i| i.to_string()).collect());
+    let v = read(None, "SOLUSDT", 168, 10, &ids(&["wide"]), "en").unwrap();
+    assert_eq!(names(&v), json!(["Wide"]));
+    assert!(read(None, "SOLUSDT", 168, 10, &ids(&["nope"]), "en")
+        .unwrap_err()
+        .contains("not a source"));
+    let v = read(None, "SOLUSDT", 168, 10, &Pick::All, "de").unwrap();
+    assert_eq!((names(&v), v["items"].clone()), (json!([]), json!([])));
 }
 
 #[test]
-fn the_default_feeds_are_https_urls_with_names_of_their_own() {
-    let all = default_feeds();
-    let mut names: Vec<&str> = all.iter().map(|f| f.name.as_str()).collect();
-    names.sort();
-    names.dedup();
-    assert_eq!(names.len(), all.len());
-    for f in &all {
-        let url = url::Url::parse(&f.url).unwrap();
-        assert_eq!(url.scheme(), "https", "{}", f.name);
-    }
-    // The five of ADR-0086 first: what a test reads.
-    assert_eq!(all[..5], feeds()[..]);
+fn a_source_about_certain_coins_answers_for_those_only() {
+    let sources = sources();
+    let solana = &sources[6];
+    let url = &solana.url;
+    let posts = Ok(Arc::new(parse(&fixture("reddit"), url).unwrap()));
+    let reads = [(solana, posts)];
+    // Its posts are Solana's, whether they name it or not.
+    let v = answer("SOLUSDT", 24, 10, NOW, &reads);
+    assert_eq!(
+        titles(&v),
+        [
+            "Validators are upgrading tonight",
+            "Bridging Bitcoin over, any tips?",
+            "Is staking worth it?"
+        ]
+    );
+    // Not Bitcoin's, though one names it.
+    assert!(titles(&answer("BTCUSDT", 24, 10, NOW, &reads)).is_empty());
+    // A subreddit's author is its user's name, not the link to them.
+    let Ok(posts) = &reads[0].1 else { panic!() };
+    assert_eq!(posts[0].author, "/u/example_one");
 }
 
 #[test]

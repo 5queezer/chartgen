@@ -51,15 +51,12 @@ impl Store for Memory {
     }
 }
 
-fn feed(name: &str, url: &str) -> Feed {
-    Feed {
-        name: name.into(),
-        url: url.into(),
-    }
+fn feed(name: &str, url: &str) -> Source {
+    super::super::tests::source(name, url)
 }
 
 /// Two feeds: an RSS feed with an `ETag`, and an Atom feed with a `Last-Modified`.
-fn two() -> Vec<Feed> {
+fn two() -> Vec<Source> {
     vec![
         feed("CoinDesk", "https://www.coindesk.com/rss"),
         feed("Atom News", "https://news.example.com/atom"),
@@ -102,6 +99,10 @@ fn outlets<'a>(
             last_modified: at.map(Into::into),
         })
     }
+}
+
+fn refs(sources: &[Source]) -> Vec<&Source> {
+    sources.iter().collect()
 }
 
 fn at(t: i64) -> impl FnMut() -> i64 {
@@ -147,7 +148,10 @@ fn a_round_records_each_headline_once_with_when_it_was_first_read() {
         *btc,
         Recorded {
             url: "https://www.coindesk.com/markets/2026/11/25/btc-slips-example".into(),
+            source: "coindesk".into(),
             outlet: "CoinDesk".into(),
+            kind: "rss".into(),
+            language: "en".into(),
             title: "BTC slips below $90K as ETF outflows continue".into(),
             published: super::super::time_of("Wed, 25 Nov 2026 05:15:08 +0000").unwrap(),
             from_updated: false,
@@ -305,7 +309,10 @@ fn headlines_older_than_the_retention_are_dropped_and_not_recorded_again() {
     let later = NOW + 7 * DAY_S;
     let old = Recorded {
         url: "https://old.example/a".into(),
+        source: "old".into(),
         outlet: "Old".into(),
+        kind: "rss".into(),
+        language: "en".into(),
         title: "Bitcoin a year ago".into(),
         published: later - 3 * DAY_S,
         from_updated: false,
@@ -351,7 +358,7 @@ fn get_news_answers_from_the_record_as_from_the_feeds_while_it_is_current() {
             (&feeds[1], parsed("atom", &feeds[1].url)),
         ],
     );
-    let from_record = answer(&store, &feeds, "SOLUSDT", 24, 10, NOW).unwrap();
+    let from_record = answer(&store, &refs(&feeds), "SOLUSDT", 24, 10, NOW).unwrap();
     assert_eq!(from_record, live);
     assert_eq!(live["items"].as_array().unwrap().len(), 3);
 
@@ -365,7 +372,7 @@ fn get_news_answers_from_the_record_as_from_the_feeds_while_it_is_current() {
         &mut outlets(&mut asked, &["coindesk"]),
         &mut || {},
     );
-    let v = answer(&store, &feeds, "SOLUSDT", 24, 10, NOW + 300).unwrap();
+    let v = answer(&store, &refs(&feeds), "SOLUSDT", 24, 10, NOW + 300).unwrap();
     assert_eq!(v["items"], live["items"]);
     assert_eq!(v["sources"], json!(["Atom News"]));
     assert_eq!(
@@ -382,7 +389,15 @@ fn get_news_answers_from_the_record_as_from_the_feeds_while_it_is_current() {
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
     // Half an hour after the last read the record is not current: the feeds are read.
-    assert!(answer(&store, &feeds, "SOLUSDT", 24, 10, NOW + 300 + 31 * 60).is_none());
+    assert!(answer(
+        &store,
+        &refs(&feeds),
+        "SOLUSDT",
+        24,
+        10,
+        NOW + 300 + 31 * 60
+    )
+    .is_none());
     // A store that never recorded: the feeds are read.
-    assert!(answer(&Memory::default(), &feeds, "SOLUSDT", 24, 10, NOW).is_none());
+    assert!(answer(&Memory::default(), &refs(&feeds), "SOLUSDT", 24, 10, NOW).is_none());
 }

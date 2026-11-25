@@ -1,6 +1,6 @@
 ---
 title: "0088 — Recording the news"
-description: "A server with a store reads 34 public crypto and finance feeds every 5 minutes, conditionally, and keeps every headline once, by its link, with when it was first read, its categories, author and the coins matched then, for a year by default. get_news answers from that record while it is current. The news lives in a crate of its own behind a Cargo feature, so it can move out of chartgen."
+description: "A server with a store reads 34 public crypto and finance feeds every 5 minutes, conditionally, and keeps every headline once, by its link, with its source, kind and language, when it was first read, its categories, author and the coins matched then, for a year by default. The sources are a JSON file read again when it changes. get_news answers from that record while it is current, from the same five outlets by default. The news lives in a crate of its own behind a Cargo feature."
 sidebar:
   order: 88
 ---
@@ -40,6 +40,8 @@ Should chartgen record the news, where, and from which feeds?
   defaults.
 - The news may later want to run apart from chartgen (recording through chartgen's redeploys,
   or a store that outgrows the host).
+- Sources change (an outlet moves its feed, a subreddit is worth watching for one coin): that
+  must not need a release.
 
 ## Considered Options
 
@@ -49,6 +51,15 @@ Should chartgen record the news, where, and from which feeds?
 2. **Record in the SQLite store** (chosen): a table of headlines and one of the feeds' state,
    filled by a background thread.
 3. **Record to files** beside the store (one append-only file a day).
+
+### Where the sources are configured
+
+- i. **In code**, as ADR-0086's list: a change is a release.
+- ii. **An environment variable**, as ADR-0086's `CHARTGEN_NEWS_FEEDS`: a change is a restart,
+  and a list of 34 sources with their attributes does not fit one line.
+- iii. **A JSON file the server reads, again when it changes** (chosen).
+- iv. **A table in the store with an admin page or tool** to change it: no file to deploy, but
+  a page or tool to build and secure, for a list that changes a few times a year.
 
 ### Where the code lives
 
@@ -103,7 +114,7 @@ Should chartgen record the news, where, and from which feeds?
 
 ## Decision Outcome
 
-Chosen: **2 and b**. The news is the crate `chartgen-news` in `crates/news`, which chartgen uses
+Chosen: **2, iii and b**. The news is the crate `chartgen-news` in `crates/news`, which chartgen uses
 behind the feature `news` (on by default). Recording needs the store as well, so the feature
 `scripting` too, like every default build. The repository is a Cargo workspace whose default
 members are chartgen and the crate, so `cargo test` and `cargo clippy` at its root cover both, and
@@ -115,6 +126,39 @@ implements it on its SQLite store, where the tables are one more migration in th
 migrations. Sharing that list from the crate would tie both to one `PRAGMA user_version`; a
 service of its own would implement the same trait on a store of its own.
 
+### The sources are configuration
+
+`CHARTGEN_NEWS_SOURCES` names a JSON file, a list of sources:
+
+```json
+[
+  { "id": "coindesk", "name": "CoinDesk", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": true },
+  { "id": "r-solana", "name": "r/solana", "url": "https://…", "kind": "reddit", "coins": ["SOL"] }
+]
+```
+
+- `id`: stable, recorded with every headline; lower case letters, digits and `-`, `all`
+  reserved. `name`: what an answer calls it. `url`: the feed.
+- `kind`: `rss` (default), `atom`, `reddit` (a subreddit's feed) or `youtube` (a channel's
+  feed). Each is read as RSS or Atom; the kind is recorded so a later score can weigh a post or
+  a video apart from an article (ADR-0090 decides whether they count).
+- `language`: default `en`. `enabled`: default true; a source switched off is neither read
+  nor answered from, and its rows stay. `syndicates`: it mostly republishes others.
+- `coins`: the only coins it is about (a coin's subreddit). Its headlines are about those
+  coins whatever their titles say, and about no other.
+- `default`: in `get_news`'s answer when the call names no sources. When no enabled source is
+  marked, all are.
+
+The file is read when the news is first asked for or recorded, and again whenever its
+modification time changes: the recorder looks each round, so a change takes effect within 5
+minutes, without a restart. A file that does not parse (bad JSON, an unknown field, an id twice,
+a URL that is not `http(s)`) keeps the sources read before, and the log says why once; a file
+that never parsed makes `get_news` an error naming it. Without the variable the server uses
+`CHARTGEN_NEWS_FEEDS` (ADR-0086's form, each entry an English RSS source, all in the default
+set), and without that the list built in (`crates/news/sources.json`), the 34 below with
+ADR-0086's five as the default set.
+
 ### What is recorded
 
 Two tables in the store:
@@ -122,7 +166,10 @@ Two tables in the store:
 ```sql
 CREATE TABLE news_items (
     url          TEXT PRIMARY KEY,  -- the link, its utm_ parameters dropped
-    outlet       TEXT NOT NULL,     -- the feed's name
+    source       TEXT NOT NULL,     -- the source's id
+    outlet       TEXT NOT NULL,     -- the source's name
+    kind         TEXT NOT NULL,     -- rss, atom, reddit, youtube
+    language     TEXT NOT NULL,     -- the source's language
     title        TEXT NOT NULL,     -- as the feed wrote it, whitespace collapsed
     published    INTEGER NOT NULL,  -- unix seconds
     from_updated INTEGER NOT NULL,  -- 1: published is an Atom entry's `updated`
@@ -132,7 +179,7 @@ CREATE TABLE news_items (
     author       TEXT               -- dc:creator, author, an Atom author's name
 ) WITHOUT ROWID;
 CREATE INDEX news_items_published ON news_items (published);
-CREATE TABLE news_feeds (url TEXT PRIMARY KEY, name TEXT NOT NULL, etag TEXT,
+CREATE TABLE news_feeds (id TEXT PRIMARY KEY, url TEXT NOT NULL, name TEXT NOT NULL, etag TEXT,
     last_modified TEXT, last_success INTEGER, last_error TEXT, failing_since INTEGER,
     failures INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0);
 ```
@@ -143,7 +190,7 @@ CREATE TABLE news_feeds (url TEXT PRIMARY KEY, name TEXT NOT NULL, etag TEXT,
   the key.
 - **The coins** are ADR-0086's heuristic applied when the headline is read: each coin of its
   table of about 30 that the title or a category names, then each cashtag in the title
-  (`$PEPE`). They are kept so a later change to the table does not rewrite what was matched
+  (`$PEPE`); for a source about certain coins, those. They are kept so a later change to the table does not rewrite what was matched
   then; the raw title and categories are kept too, so a reader can match again.
 - **The author** is kept because press-release copies are what the record most needs to tell
   apart, and they show there (`Chainwire`, `Advertorial`) more often than in a category; see the
@@ -153,7 +200,7 @@ CREATE TABLE news_feeds (url TEXT PRIMARY KEY, name TEXT NOT NULL, etag TEXT,
 ### How
 
 A thread, started with the server when it has a store (not on a replay server, as with ADR-0082),
-reads every feed once a round, a round every 5 minutes, one feed after another with 2 s between
+reads every enabled source once a round, a round every 5 minutes, one feed after another with 2 s between
 requests, so a round takes about a minute and a half and no host is asked twice within 2 s (two
 feeds share a host). Each request:
 
@@ -163,7 +210,7 @@ feeds share a host). Each request:
   modified".
 - has the limits of ADR-0086: 8 s, 4 MB, and the user agent `chartgen/<version>` with the
   project's URL.
-- records the items published within the retention, each new one with the round's time as its
+- records the items published within the retention, each new one with the time of the read as its
   first seen.
 
 **A feed that fails** (an HTTP error, a time-out, a page that is not a feed) is tried again after
@@ -175,14 +222,23 @@ a feed starts failing and when it is read again, and once an hour how many headl
 dropped, and one that old is not recorded. `0` records nothing. A year lets a coin's normal be
 taken over many weeks and leaves the record small (below).
 
-**`get_news` reads the record** when the store has a feed read within the last 30 minutes, and
-the feeds as before otherwise (no store, recording off, or a server stopped for a while). The
-answer from the record is what the feeds would give for the same headlines: the same matching,
-on the stored title and categories, the same order, the same fields and defaults. Two things are
-added and none changed: `hours` up to 168 now reaches as far back as the record does, not only
-as far as the feeds still carry, and an entry of `sources_failed` from the record has `since`,
-when its failures began, so a feed failing for days is told from one that failed a minute ago.
-Its headlines recorded before still count.
+**`get_news` reads the record** when the store has a source read within the last 30 minutes,
+and the feeds as before otherwise (no store, recording off, or a server stopped for a while).
+The answer from the record is what the feeds would give for the same headlines: the same
+matching, on the stored title and categories, the same order, the same fields. Its defaults do
+not change: **without `sources` it answers from the default set, ADR-0086's five**, though all
+34 are recorded. The wide list is for grouping and scoring (ADR-0089, ADR-0090); as a list of
+headlines it is noisier, and at `limit` 10 it covered about the last hour where the five covered
+about three (measured below). Added, all optional:
+
+- `sources`: source ids to answer from, or `["all"]` for every enabled source. An id that is
+  not a source, or is switched off, is an error that lists the ids.
+- `language`: only sources of this language, default `en`.
+- `hours` up to 168 now reaches as far back as the record does, not only as far as the feeds
+  still carry.
+- An entry of `sources_failed` from the record has `since`, when its failures began, so a
+  source failing for days is told from one that failed a minute ago. Its headlines recorded
+  before still count.
 
 ### The feeds
 
@@ -232,6 +288,17 @@ of the last 24 hours, or for a feed that holds less than a day, its items spread
 | Bloomberg | `https://feeds.bloomberg.com/crypto/news.rss` | 2 | 15 h | allows (none) | 0 of 3 |
 | Financial Times | `https://www.ft.com/cryptocurrencies?format=rss` | under 1 | 5 days | allows | 0 of 25 |
 
+Reddit and YouTube were vetted the same way, with two or three feeds each, and **neither is in
+the list**: both sites' `robots.txt` refuse them.
+
+| Kind | Feeds read | Answer | `robots.txt` |
+|---|---|---|---|
+| reddit | `/r/CryptoCurrency/.rss`, `/r/Bitcoin/.rss`, `/r/solana/.rss` | 404, 429, 429 | `User-agent: *` `Disallow: /`, with a pointer to Reddit's Public Content Policy |
+| youtube | three channels' `/feeds/videos.xml?channel_id=…` | 200, 15 dated entries each (one to two videos a day) | `User-agent: *` `Disallow: /feeds/videos.xml` |
+
+The kinds stay in the source model, so an operator with Reddit's permission (its API terms) or
+a source that serves such feeds elsewhere can add one in the file.
+
 Left out:
 
 | Outlet | Feed | Because |
@@ -252,12 +319,12 @@ Left out:
 | Benzinga | `https://www.benzinga.com/feed` | mostly single stocks, about 120 items a day, 238 kB a read without an `ETag` |
 | Bloomberg (markets) | `https://feeds.bloomberg.com/markets/news.rss` | one feed per outlet: its crypto feed is kept |
 
-**No outlet kept mostly republishes others**, so the feed list carries no flag for it. Press-release
-copies are spread instead: the same release appears under several outlets with the same title
-(two releases of that read did so across four outlets), a few to a third of some outlets' items.
+**No outlet kept mostly republishes others**, so every `syndicates` of the list is false.
+Press-release copies are spread instead: the same release appears under several outlets with the same title
+(in that read, two releases each under two outlets), and they are up to a third of some outlets' items.
 They are one voice, not several, and the record keeps what tells them apart (the author, the
-categories, the identical title), so grouping (ADR-0089) can count them once without a flag per
-outlet. ADR-0086's five stay first in the list. `CHARTGEN_NEWS_FEEDS` replaces the list, as before.
+categories, the identical title), so grouping (ADR-0089) can count them once, the flag or not. ADR-0086's five are the
+default set.
 
 ### Cost
 
@@ -268,15 +335,14 @@ TBD-COST
 - From the first start of this build the store holds every headline the feeds carry: on its
   first round what they still hold (hours to days back), from then on each new one within about 5
   minutes of its publication, with when it was first read.
-- `get_news` on a server that records answers from 34 outlets instead of 5, so `sources` lists
-  34 names and more headlines compete for `limit`; its arguments, defaults and fields are as
-  before. Its answer is a little longer for the list of sources (about 0.5 kB).
+- `get_news` without `sources` answers as before, from the same five outlets, now from the
+  record; `sources: ["all"]` answers from all 34.
 - A server stopped for a while records nothing meanwhile; what the feeds still carry at the next
   start is recorded then, with that start as its first seen, so a stop of more than a few hours
   loses headlines of the busiest feeds and the first-seen times of the rest.
 - A replay server neither records nor answers `get_news`, as before.
 - **Off:** `CHARTGEN_NEWS_RECORD_DAYS=0`, a build without the store, or one without the feature
-  `news`, which has no `get_news` at all.
+  `news`, which has no `get_news` at all. A source is switched off in the file.
 - **After a rollback**, a build from before this ignores both tables and reads the feeds on
   demand, and nothing is recorded while it runs. Rolling forward again needs no step; the rows
   stay until the retention drops them, and dropping the two tables removes the record.

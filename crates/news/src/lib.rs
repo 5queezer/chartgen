@@ -21,60 +21,9 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde_json::{json, Value};
 
-/// The feeds read when `CHARTGEN_NEWS_FEEDS` is unset: crypto outlets and the markets
-/// desks of financial outlets whose feeds need no key, date their items and are not
-/// refused by the site's `robots.txt`, each vetted on 2026-11-25 (ADR-0088).
-const DEFAULT_FEEDS: [(&str, &str); 34] = [
-    (
-        "CoinDesk",
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    ),
-    ("Cointelegraph", "https://cointelegraph.com/rss"),
-    ("Decrypt", "https://decrypt.co/feed"),
-    ("The Block", "https://www.theblock.co/rss.xml"),
-    ("Bitcoin Magazine", "https://bitcoinmagazine.com/.rss/full/"),
-    ("CryptoSlate", "https://cryptoslate.com/feed/"),
-    ("CryptoPotato", "https://cryptopotato.com/feed/"),
-    ("NewsBTC", "https://www.newsbtc.com/feed/"),
-    ("Cryptonews", "https://cryptonews.com/news/feed/"),
-    ("Crypto Briefing", "https://cryptobriefing.com/feed/"),
-    ("BeInCrypto", "https://beincrypto.com/feed/"),
-    ("The Daily Hodl", "https://dailyhodl.com/feed/"),
-    ("CoinGape", "https://coingape.com/feed/"),
-    ("Bitcoin.com News", "https://news.bitcoin.com/feed/"),
-    ("Coinpedia", "https://coinpedia.org/feed/"),
-    ("CoinJournal", "https://coinjournal.net/feed/"),
-    ("Unchained", "https://unchainedcrypto.com/feed/"),
-    ("Protos", "https://protos.com/feed/"),
-    ("crypto.news", "https://crypto.news/feed/"),
-    ("Blockonomi", "https://blockonomi.com/feed/"),
-    ("ZyCrypto", "https://zycrypto.com/feed/"),
-    ("Coincu", "https://coincu.com/feed/"),
-    ("Crypto Daily", "https://cryptodaily.co.uk/feed"),
-    ("Finbold", "https://finbold.com/feed/"),
-    ("CoinCentral", "https://coincentral.com/feed/"),
-    ("Cryptopolitan", "https://www.cryptopolitan.com/feed/"),
-    ("Coinspeaker", "https://www.coinspeaker.com/feed/"),
-    ("FXStreet", "https://www.fxstreet.com/rss/crypto"),
-    ("TheStreet", "https://www.thestreet.com/crypto/.rss/full/"),
-    (
-        "CNBC",
-        "https://www.cnbc.com/id/10000664/device/rss/rss.html",
-    ),
-    (
-        "MarketWatch",
-        "https://feeds.content.dowjones.io/public/rss/mw_topstories",
-    ),
-    (
-        "The Wall Street Journal",
-        "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain",
-    ),
-    ("Bloomberg", "https://feeds.bloomberg.com/crypto/news.rss"),
-    (
-        "Financial Times",
-        "https://www.ft.com/cryptocurrencies?format=rss",
-    ),
-];
+mod sources;
+pub use sources::{select, sources, Kind, Pick, Source};
+
 /// How long a feed that was read is served before it is read again.
 const FRESH: Duration = Duration::from_secs(600);
 /// How long a feed that could not be read waits before it is tried again.
@@ -138,12 +87,6 @@ const ORDINARY: [&str; 7] = [
     "Sui",
 ];
 
-#[derive(Clone, Debug, PartialEq)]
-struct Feed {
-    name: String,
-    url: String,
-}
-
 /// One headline of a feed.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Item {
@@ -170,69 +113,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The feeds to read: `CHARTGEN_NEWS_FEEDS` if set, else the defaults. A test's own list
-/// in tests.
-fn feeds() -> &'static Result<Vec<Feed>, String> {
-    static FEEDS: OnceLock<Result<Vec<Feed>, String>> = OnceLock::new();
-    FEEDS.get_or_init(|| {
-        if cfg!(test) {
-            return Ok(test_feeds());
-        }
-        match std::env::var("CHARTGEN_NEWS_FEEDS") {
-            Ok(list) => feeds_from(&list),
-            Err(_) => Ok(default_feeds()),
-        }
-    })
-}
-
-fn default_feeds() -> Vec<Feed> {
-    DEFAULT_FEEDS
-        .iter()
-        .map(|(name, url)| Feed {
-            name: name.to_string(),
-            url: url.to_string(),
-        })
-        .collect()
-}
-
-#[cfg(test)]
-fn test_feeds() -> Vec<Feed> {
-    tests::feeds()
-}
-
-#[cfg(not(test))]
-fn test_feeds() -> Vec<Feed> {
-    Vec::new()
-}
-
-/// `CHARTGEN_NEWS_FEEDS`: entries separated by commas, each `Name=https://…` or a bare URL,
-/// which is then named by its host. Empty, no feed is read.
-fn feeds_from(list: &str) -> Result<Vec<Feed>, String> {
-    let mut feeds = Vec::new();
-    for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        let (name, url) = match entry.split_once('=') {
-            Some((name, url)) if !name.contains("://") => (Some(name.trim()), url.trim()),
-            _ => (None, entry),
-        };
-        let parsed = url::Url::parse(url)
-            .ok()
-            .filter(|u| matches!(u.scheme(), "http" | "https"))
-            .ok_or_else(|| format!("CHARTGEN_NEWS_FEEDS: {entry:?} is not an http(s) URL"))?;
-        let name = name
-            .filter(|n| !n.is_empty())
-            .map(str::to_string)
-            .or_else(|| parsed.host_str().map(str::to_string))
-            .unwrap_or_else(|| url.to_string());
-        feeds.push(Feed {
-            name,
-            url: url.to_string(),
-        });
-    }
-    Ok(feeds)
-}
-
 /// A feed's headlines, as held if fresh. Blocking.
-fn read_feed(feed: &Feed) -> Fetched {
+fn read_feed(feed: &Source) -> Fetched {
     let slot = lock(&SLOTS).entry(feed.url.clone()).or_default().clone();
     let mut held = lock(&slot);
     if let Some((at, read)) = &*held {
@@ -541,6 +423,21 @@ fn clean_url(link: &str, base: &url::Url) -> Option<String> {
 /// `NAMES`. A ticker of under 3 letters that has a name (OP) is left to its name; one without
 /// (AI) is kept, and `about` matches it only as `$AI`.
 fn terms_of(symbol: &str) -> Vec<String> {
+    let coin = coin_of(symbol);
+    let names = NAMES
+        .iter()
+        .find(|(ticker, _)| *ticker == coin)
+        .map_or(&[][..], |(_, names)| *names);
+    let mut terms = Vec::new();
+    if coin.len() >= 3 || names.is_empty() {
+        terms.push(coin.to_string());
+    }
+    terms.extend(names.iter().map(|n| n.to_string()));
+    terms
+}
+
+/// A symbol's coin: BTCUSDT, BTC-USD and 1000PEPEUSDT are BTC, BTC and PEPE.
+fn coin_of(symbol: &str) -> &str {
     let mut coin = symbol;
     for quote in QUOTES {
         if let Some(base) = coin.strip_suffix(quote).filter(|b| !b.is_empty()) {
@@ -555,16 +452,7 @@ fn terms_of(symbol: &str) -> Vec<String> {
             break;
         }
     }
-    let names = NAMES
-        .iter()
-        .find(|(ticker, _)| *ticker == coin)
-        .map_or(&[][..], |(_, names)| *names);
-    let mut terms = Vec::new();
-    if coin.len() >= 3 || names.is_empty() {
-        terms.push(coin.to_string());
-    }
-    terms.extend(names.iter().map(|n| n.to_string()));
-    terms
+    coin
 }
 
 /// Whether `text` holds `word` as a whole word: no letter or digit on either side. `exact`:
@@ -633,15 +521,15 @@ fn coins_of(item: &Item) -> Vec<String> {
 
 /// The answer from what each feed gave: the newest `limit` headlines about `symbol`
 /// published in the `hours` before `now` (unix seconds).
-fn answer(symbol: &str, hours: u64, limit: usize, now: i64, reads: &[(&Feed, Fetched)]) -> Value {
-    let mut found: Vec<(&str, &Item)> = Vec::new();
+fn answer(symbol: &str, hours: u64, limit: usize, now: i64, reads: &[(&Source, Fetched)]) -> Value {
+    let mut found: Vec<(&Source, &Item)> = Vec::new();
     let mut failed = Vec::new();
     let mut read_ok = Vec::new();
     for (feed, read) in reads {
         match read {
             Ok(items) => {
                 read_ok.push(feed.name.as_str());
-                found.extend(items.iter().map(|i| (feed.name.as_str(), i)));
+                found.extend(items.iter().map(|i| (*feed, i)));
             }
             Err(e) => failed.push(json!({ "source": feed.name, "error": e })),
         }
@@ -649,19 +537,28 @@ fn answer(symbol: &str, hours: u64, limit: usize, now: i64, reads: &[(&Feed, Fet
     compose(symbol, hours, limit, now, found, read_ok, failed)
 }
 
-/// The answer from headlines, each with its outlet, and the feeds read and not read.
+/// The answer from headlines, each with its source, and the sources read and not read. A
+/// headline of a source about certain coins only is about the symbol when its coin is one
+/// of them; any other when `about` says so.
 fn compose(
     symbol: &str,
     hours: u64,
     limit: usize,
     now: i64,
-    mut found: Vec<(&str, &Item)>,
+    mut found: Vec<(&Source, &Item)>,
     read_ok: Vec<&str>,
     failed: Vec<Value>,
 ) -> Value {
     let terms = terms_of(symbol);
+    let coin = coin_of(symbol);
     let since = now - hours as i64 * 3600;
-    found.retain(|(_, i)| (since..=now + SKEW_S).contains(&i.published) && about(i, &terms));
+    found.retain(|(source, i)| {
+        let about = match source.coins.is_empty() {
+            true => about(i, &terms),
+            false => source.coins.iter().any(|c| c == coin),
+        };
+        (since..=now + SKEW_S).contains(&i.published) && about
+    });
     found.sort_by_key(|(_, i)| std::cmp::Reverse(i.published));
     let mut seen = std::collections::HashSet::new();
     found.retain(|(_, i)| seen.insert(i.url.as_str()));
@@ -672,7 +569,7 @@ fn compose(
         .map(|(source, i)| {
             json!({
                 "time": iso(i.published),
-                "source": source,
+                "source": source.name,
                 "title": i.title,
                 "url": i.url,
             })
@@ -700,35 +597,40 @@ fn iso(t: i64) -> String {
 }
 
 /// One symbol's headlines published in the last `hours` (1 to `MAX_HOURS`), the newest
-/// `limit` (1 to `MAX_LIMIT`): from `store`'s record while it is current, else from the
-/// feeds, read now or held from a read within ten minutes. `symbol` as chartgen normalises
-/// it (`BTCUSDT`). An error only without feeds. Blocking.
+/// `limit` (1 to `MAX_LIMIT`), from the enabled sources of `language` that `pick` names:
+/// from `store`'s record while it is current, else from the sources, read now or held from
+/// a read within ten minutes. `symbol` as chartgen normalises it (`BTCUSDT`). An error
+/// without sources, or for a source `pick` names that is not one or is switched off.
+/// Blocking.
 pub fn read(
     store: Option<&dyn Store>,
     symbol: &str,
     hours: u64,
     limit: usize,
+    pick: &Pick,
+    language: &str,
 ) -> Result<Value, String> {
-    let feeds = match feeds() {
-        Ok(feeds) if !feeds.is_empty() => feeds,
-        Ok(_) => return Err("No news feeds: CHARTGEN_NEWS_FEEDS is empty".into()),
-        Err(e) => return Err(e.clone()),
-    };
+    let all = sources()?;
+    if all.is_empty() {
+        return Err("No news sources: the list is empty".into());
+    }
+    let picked = select(&all, pick, language)?;
     let now = chrono::Utc::now().timestamp();
-    if let Some(v) = store.and_then(|store| record::answer(store, feeds, symbol, hours, limit, now))
+    if let Some(v) =
+        store.and_then(|store| record::answer(store, &picked, symbol, hours, limit, now))
     {
         return Ok(v);
     }
     // At once, so a call waits for the slowest feed rather than for all of them in turn.
-    let reads: Vec<(&Feed, Fetched)> = std::thread::scope(|s| {
-        let handles: Vec<_> = feeds
+    let reads: Vec<(&Source, Fetched)> = std::thread::scope(|s| {
+        let handles: Vec<_> = picked
             .iter()
             .map(|f| s.spawn(move || read_feed(f)))
             .collect();
-        feeds
+        picked
             .iter()
             .zip(handles)
-            .map(|(f, h)| (f, h.join().unwrap_or_else(|_| Err("failed".into()))))
+            .map(|(f, h)| (*f, h.join().unwrap_or_else(|_| Err("failed".into()))))
             .collect()
     });
     Ok(answer(symbol, hours, limit, now, &reads))
@@ -739,8 +641,14 @@ pub fn read(
 pub struct Recorded {
     /// The link, as the feed gave it less its `utm_` parameters: what makes a headline one.
     pub url: String,
-    /// The feed's name.
+    /// The source's id.
+    pub source: String,
+    /// The source's name.
     pub outlet: String,
+    /// The source's kind (`rss`, `atom`, `reddit`, `youtube`).
+    pub kind: String,
+    /// The source's language.
+    pub language: String,
     /// The title as the feed wrote it, its whitespace collapsed.
     pub title: String,
     pub published: i64,
@@ -759,6 +667,9 @@ pub struct Recorded {
 /// A feed's last read, by the recorder (ADR-0088): its status. Times in unix seconds.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FeedState {
+    /// The source's id.
+    pub id: String,
+    /// The URL it was read from: its `etag` and `last_modified` are this URL's.
     pub url: String,
     pub name: String,
     /// What to ask with next time, so an unchanged feed is not sent again.
@@ -784,7 +695,7 @@ pub trait Store: Sync {
     fn items(&self, from: i64, to: i64) -> Result<Vec<Recorded>, String>;
     /// Delete the headlines published before `before`; how many went.
     fn forget_items(&self, before: i64) -> Result<usize, String>;
-    /// Every feed's last read.
+    /// Every source's last read.
     fn feeds(&self) -> Result<Vec<FeedState>, String>;
     fn save_feed(&self, feed: &FeedState) -> Result<(), String>;
 }

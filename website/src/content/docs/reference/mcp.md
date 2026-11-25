@@ -1102,10 +1102,10 @@ the tool.
 
 #### `get_news`
 
-Recent crypto headlines about one symbol, from the public RSS feeds of about 35 crypto outlets
-and financial outlets' markets desks, so an agent needs no web search for them
-([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)). A server with a store
-records every feed every 5 minutes and answers from that record
+Recent crypto headlines about one symbol, from public RSS and Atom feeds, so an agent needs no
+web search for them ([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)).
+By default from five large crypto outlets; 34 sources can be named. A server with a store
+records every source every 5 minutes and answers from that record
 ([ADR-0088](/chartgen/decisions/0088-recording-the-news/)).
 
 | Argument | Default | |
@@ -1113,6 +1113,8 @@ records every feed every 5 minutes and answers from that record
 | `symbol` | required | Ticker symbol, e.g. `BTCUSDT`. |
 | `hours` | 24 | How far back, 1 to 168. |
 | `limit` | 10 | Most headlines returned, 1 to 50. |
+| `sources` | the default set | Source ids to answer from, such as `["coindesk", "bloomberg"]`, or `["all"]` for every enabled source. An id that is not a source, or is switched off, is an error that lists the ids. |
+| `language` | `en` | Only sources of this language. |
 
 ```json
 {
@@ -1178,10 +1180,17 @@ cashtag in the title (`$AI`): as a word it is everyday text ("AI agents", "U.S."
 file stories about artificial intelligence under an `AI` category. It can miss a story whose title names neither, and take one that names the coin
 in passing: read the titles as leads.
 
-**The feeds** are 34 crypto outlets and markets desks, none of which needs a key; the list and
+**The sources** are 34 crypto outlets and markets desks, none of which needs a key; the list and
 how each was checked are in [ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds).
-`CHARTGEN_NEWS_FEEDS` replaces them
-([environment variables](/chartgen/guides/deploy/#environment-variables)). A relative link is
+The default set, answered when a call names no `sources`, is CoinDesk (`coindesk`),
+Cointelegraph (`cointelegraph`), Decrypt (`decrypt`), The Block (`the-block`) and Bitcoin
+Magazine (`bitcoin-magazine`). The others: `cryptoslate`, `cryptopotato`, `newsbtc`,
+`cryptonews`, `crypto-briefing`, `beincrypto`, `the-daily-hodl`, `coingape`, `bitcoin-com`,
+`coinpedia`, `coinjournal`, `unchained`, `protos`, `crypto-news`, `blockonomi`, `zycrypto`,
+`coincu`, `crypto-daily`, `finbold`, `coincentral`, `cryptopolitan`, `coinspeaker`, `fxstreet`,
+`thestreet`, `cnbc`, `marketwatch`, `wsj`, `bloomberg` and `ft`. An operator changes them in a
+file ([the news recorded](/chartgen/guides/deploy/#the-news-recorded)). A source about certain
+coins only (a coin's subreddit) answers for those coins, whatever its titles say. A relative link is
 read against the feed's URL (`xml:base` is not read), and an item whose link is not `http` or
 `https` is left out. An Atom feed whose elements carry a prefix (`atom:entry`) is not read, and
 shows as `no headlines in it`. A replay server refuses the tool.
