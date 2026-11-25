@@ -16,6 +16,20 @@ pub struct Line {
     pub breaks: bool,
 }
 
+/// The change of a series over `bars` bars, ending at the bar its last value is read at
+/// (a tool answer's `last_value`: the last bar for a line that `breaks`, else its last
+/// finite value). `(from, to)`, or `None` when either end has no value, as open
+/// interest has none older than Binance keeps.
+pub fn change_over(y: &[f64], breaks: bool, bars: usize) -> Option<(f64, f64)> {
+    let end = if breaks {
+        y.len().checked_sub(1)?
+    } else {
+        y.iter().rposition(|v| v.is_finite())?
+    };
+    let (from, to) = (y[end.checked_sub(bars)?], y[end]);
+    (from.is_finite() && to.is_finite()).then_some((from, to))
+}
+
 /// A filled region between two series.
 #[derive(Clone)]
 pub struct Fill {
@@ -407,6 +421,23 @@ pub use crate::indicators::pine::stoch;
 #[cfg(test)]
 mod fill_tests {
     use super::*;
+
+    #[test]
+    fn change_over_ends_where_the_last_value_is_read() {
+        let nan = f64::NAN;
+        // From the last finite value back: the forming bar without a value is skipped.
+        let y = [nan, 10.0, 11.0, 12.0, 15.0, nan];
+        assert_eq!(change_over(&y, false, 3), Some((10.0, 15.0)));
+        assert_eq!(change_over(&y, false, 0), Some((15.0, 15.0)));
+        // No value that far back (older than the source keeps), or too few bars.
+        assert_eq!(change_over(&y, false, 4), None);
+        assert_eq!(change_over(&y, false, 9), None);
+        // A line that breaks reads the last bar, which may have no value.
+        assert_eq!(change_over(&y, true, 2), None);
+        assert_eq!(change_over(&[1.0, 2.0, 4.0], true, 2), Some((1.0, 4.0)));
+        assert_eq!(change_over(&[], false, 1), None);
+        assert_eq!(change_over(&[nan, nan], false, 1), None);
+    }
 
     #[test]
     fn fill_color_for_uses_below_color_only_where_y1_lt_y2() {
