@@ -684,7 +684,7 @@ pub fn server_alert_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "create_server_alert",
-            "description": "Create an alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It watches the price, or with indicator an indicator's line at the closes of bars of 1h or longer: the line against level (RSI under 25, funding above 0.05%), or with compare: close the bar's close against the line (the close crossing EMA 50). It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing alerts cannot run here. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
+            "description": "Create an alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It watches the price, or with indicator an indicator's line at the closes of bars of 1h or longer: the line against level (RSI under 25, funding above 0.05%), or with compare: close the bar's close against the line (the close crossing EMA 50). It belongs to your OAuth client and survives restarts. Binance symbols only. The browser's drawing alerts cannot run here; with drawing, a trend line, horizontal line or rectangle of one of your setups can, at bar closes. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -704,6 +704,16 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "push": { "type": "boolean", "description": "Notify your devices (subscribe_push) when it fires. May go with a webhook.", "default": false },
                     "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires: a signed POST to the receiver this server's operator configured for you. Instead of webhook_url, not with it. Refused where no receiver is configured for you.", "default": false },
                     "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, shadow results, thesis)." },
+                    "drawing": {
+                        "type": "object",
+                        "properties": {
+                            "setup_id": { "type": "string", "maxLength": 64, "description": "One of your setups, on this symbol." },
+                            "index": { "type": "integer", "minimum": 0, "description": "The drawing's place in that setup's drawings, from 0, as get_setup lists them." }
+                        },
+                        "required": ["setup_id", "index"],
+                        "additionalProperties": false,
+                        "description": "Compare each close with this drawing of one of your setups instead of a level: needs evaluate_on: close, and takes no level and no indicator. Its points are copied now, so revising the setup's drawings later does not move the alert. A trend line (segment) is read along its slope past its end and not before its start; a ray from its origin; an extended line both ways; a horizontal line or price label at its price; a horizontal ray from its point on; a rectangle from its left edge on, by its top for crossing_up and greater and its bottom for crossing_down and less (crossing is refused). The price is the line's at the open time of the bar that closed. Other tools are refused. Fixed after creation, though setup_id for the wake-up is set apart from it."
+                    },
                     "expires_at": { "type": ["integer", "string"], "description": "When the alert stops, as unix seconds, unix ms or an ISO 8601 time, in the future and at most a year ahead: no price or close after it fires it, and within a minute it is switched off (active: false) and deleted 7 days later. Default: no end." }
                 },
                 "required": ["symbol", "condition", "trigger"]
@@ -711,12 +721,12 @@ pub fn server_alert_tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_server_alerts",
-            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, expires_at (unix ms, when set), feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, expires_at (unix ms, when set), feed (live or waiting), last_price, an indicator alert's indicator with the line's value at the last close, a drawing alert's drawing with its price at the last close, and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "update_server_alert",
-            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. An alert past its expires_at runs again only with active: true and a later expires_at, or an empty one; without active: true it stays stopped. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on and an indicator alert's indicator, params, line and compare cannot change: delete and create instead.",
+            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. An alert past its expires_at runs again only with active: true and a later expires_at, or an empty one; without active: true it stays stopped. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval, evaluate_on, an indicator alert's indicator, params, line and compare, and a drawing alert's drawing cannot change: delete and create instead; a drawing alert takes no level.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

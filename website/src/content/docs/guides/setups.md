@@ -374,6 +374,11 @@ reports: it changes nothing on the setup, and the server alone moves a status. I
 server alerts on and a receiver the operator configured for you. A replay server has no
 alerts.
 
+An alert can also watch one of the setup's drawings: with `drawing: {setup_id, index}` it
+compares each close with that trend line, horizontal line or rectangle, e.g. a close below the
+trend line the thesis rests on. See [a close beyond a drawing of a
+setup](/chartgen/reference/mcp/#a-close-beyond-a-drawing-of-a-setup).
+
 With such a receiver, **the server also wakes your agent when it gives one of your `take`
 setups a status** (`triggered`, `won`, `invalidated`, `expired`). There is no flag for this
 on the setup. Your own cancellation and everything on a `skip` setup wake nobody. All of

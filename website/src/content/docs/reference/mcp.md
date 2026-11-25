@@ -1347,15 +1347,16 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"` or `condition: "bar_close"`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `trigger`, and `level` unless `compare: "close"`, `condition: "bar_close"` or `drawing`; optional `interval` (default `1m`), `evaluate_on`, `indicator`, `params`, `line`, `compare`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `drawing`, `expires_at` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
 | `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id`, `expires_at` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
 | `subscribe_push` | `endpoint`, `p256dh`, `auth` | `{devices}`: registers this browser's push subscription |
 | `unsubscribe_push` | `endpoint` | `{removed, devices}` |
 
-- `symbol`: a Binance symbol. A stock is refused. Drawing alerts cannot run here;
-  [indicator alerts](#indicator-alerts-on-the-server) can, at bar closes.
+- `symbol`: a Binance symbol. A stock is refused. The browser's drawing alerts cannot run here;
+  [indicator alerts](#indicator-alerts-on-the-server) and alerts on [a drawing of a
+  setup](#a-close-beyond-a-drawing-of-a-setup) can, at bar closes.
 - `condition`: `crossing`, `crossing_up`, `crossing_down`, `greater`, `less`. A crossing
   needs a previous reading, so the first price after creating, resuming, editing or a
   server restart never fires one. `greater` and `less` can fire on it. `bar_close` fires at
@@ -1413,7 +1414,8 @@ Times are unix milliseconds. `webhook` shows the host only, never the URL or the
 An alert that [wakes your agent](#waking-your-agent) also has `"notify_agent": true`, and
 `"setup_id"` if it is about a setup; other alerts have neither field.
 An [indicator alert](#indicator-alerts-on-the-server) also has `"indicator"`, and its `level` is
-`null` when it compares the close with the line. An alert with an end has `"expires_at"`.
+`null` when it compares the close with the line. A [drawing alert](#a-close-beyond-a-drawing-of-a-setup)
+has `"drawing"` and a `null` `level`. An alert with an end has `"expires_at"`.
 `feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
@@ -1505,6 +1507,49 @@ interval like any indicator alert.
   on it. If that read fails, the close is skipped and the alert keeps the value it read before,
   so the next close still sees a crossing, a close late, if the rate is still across the level
   then; a rate that crossed and came back between two reads is missed.
+
+#### A close beyond a drawing of a setup
+
+An alert can compare each close with a drawing of one of your [setups](/chartgen/guides/setups/)
+instead of a level ([ADR-0081](/chartgen/decisions/0081-alerts-on-a-setups-drawing/)): a trend
+line broken at a close, or a close out of a range.
+
+```json
+{ "symbol": "BTCUSDT", "interval": "4h", "evaluate_on": "close",
+  "drawing": { "setup_id": "0b6f6f0e-…", "index": 0 },
+  "condition": "crossing_down", "trigger": "once",
+  "notify_agent": true, "setup_id": "0b6f6f0e-…" }
+```
+
+- `drawing.setup_id` is one of your setups, open or closed, on the alert's symbol, and
+  `drawing.index` the drawing's place in its `drawings` as [`get_setup`](#setups-chartgen_setups1)
+  lists them, from 0. `setup_id` beside it is still the setup the wake-up carries, and needs
+  `notify_agent`; the two are set apart.
+- **The points are copied when the alert is made.** Revising the setup's drawings later, or
+  closing the setup, does not move or stop the alert; delete it and make another.
+- The close of a bar is compared with the drawing's price at that bar's **open time**, as the
+  chart draws the candle on the line:
+  - a trend line (`segment`) along its slope, **past its end too**, and not before its first
+    point; a ray (`rayLine`) from its origin; an extended line (`straightLine`) both ways;
+  - a horizontal line (`horizontalStraightLine`) or price label (`simpleTag`) at its price; a
+    horizontal ray (`horizontalRayLine`) from its point on;
+  - a rectangle (`cgRect`) from its left edge on: its **top** for `crossing_up` and `greater`,
+    its **bottom** for `crossing_down` and `less`. `crossing` is refused there: make one alert
+    for each side.
+  - Other tools, a line through two points of one bar, and a ray that runs left are refused.
+- `evaluate_on` must be `close`; any interval with a Binance kline stream. No `level`, and no
+  `indicator`.
+- **A crossing compares two closes**, each with the drawing's price at its own bar, so a rising
+  line can be crossed by a close that is higher than the last one was. As for a price alert, the
+  first close after creating the alert, or after a restart, never fires a crossing; `greater` and
+  `less` can.
+- The alert in a list, the [webhook payload](#webhook-payload) and the
+  [wake-up](#waking-your-agent) carry
+  `"drawing": {"setup_id", "index", "tool", "points": [{"timestamp", "price"}], "level"}`, where
+  `level` is the drawing's price at the last close read (`null` before the first), and in a
+  fire at the close that fired. The fire's `level` is that price too.
+- `update_server_alert` changes its `condition` and `trigger`; not `drawing`, and it takes no
+  `level`.
 
 #### An alert at a bar's close
 

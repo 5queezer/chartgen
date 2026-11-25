@@ -93,7 +93,7 @@ one and link both ways.
 | [0063](/chartgen/decisions/0063-operator-page/) | A read-only operator page, for a signed-in operator in the web app only | Accepted | 2026-11-11 |
 | [0064](/chartgen/decisions/0064-a-setups-record/) | A setup states what it was made with, once, and the record is read back as counts | Proposed; amended by [0077](/chartgen/decisions/0077-a-setup-records-its-market-context/) and [0079](/chartgen/decisions/0079-track-record-after-costs/) | 2026-11-11 |
 | [0066](/chartgen/decisions/0066-shadow-exit-variants/) | Fixed shadow exit variants on every filled setup | Accepted | 2026-11-12 |
-| [0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) | Server alerts on an indicator's line, at bar closes | Accepted; amended by [0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) | 2026-11-12 |
+| [0067](/chartgen/decisions/0067-indicator-alerts-on-the-server/) | Server alerts on an indicator's line, at bar closes | Accepted; amended by [0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) and [0081](/chartgen/decisions/0081-alerts-on-a-setups-drawing/) | 2026-11-12 |
 | [0068](/chartgen/decisions/0068-replay-over-real-history/) | Replay over real Binance history | Accepted (phase 1); phases 2 and 3 proposed | 2026-11-12 |
 | [0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) | An alert at a bar's close | Accepted | 2026-11-13 |
 | [0070](/chartgen/decisions/0070-stock-setups/) | Setups on US stocks, scored on Yahoo's 1m bars | Accepted | 2026-11-14 |
@@ -107,5 +107,6 @@ one and link both ways.
 | [0078](/chartgen/decisions/0078-compact-tool-answers/) | Compact tool answers: fields for list_setups, its open risk, compact JSON and a compact list_indicators | Accepted | 2026-11-24 |
 | [0079](/chartgen/decisions/0079-track-record-after-costs/) | The record says a result's sign after costs, groups by tag prefix and skip reason, and counts a setup without a playbook version as unversioned | Accepted | 2026-11-24 |
 | [0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) | Server alerts on futures data: funding | Accepted | 2026-11-24 |
+| [0081](/chartgen/decisions/0081-alerts-on-a-setups-drawing/) | Server alerts on a drawing of a setup | Accepted | 2026-11-24 |
 | [0082](/chartgen/decisions/0082-recording-open-interest-history/) | Recording open interest beyond the 30 days Binance keeps | Proposed | 2026-11-24 |
 | [0083](/chartgen/decisions/0083-a-rule-based-strategy-tester/) | A rule-based strategy tester over replay fixtures | Proposed | 2026-11-24 |

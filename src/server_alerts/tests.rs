@@ -5366,3 +5366,172 @@ async fn an_old_fire_does_not_cut_the_time_kept_after_expiry() {
     a.sweep(&mut a.lock(), now + SPENT_TTL_MS + 60_000);
     assert!(!a.lock().alerts.contains_key(&id));
 }
+
+// ---- Drawing alerts (ADR-0081) ----
+
+/// Alerts with setups beside them, and a long setup on BTCUSDT 1h whose drawings are a
+/// trend line rising 1 an hour from 100 at `t0` (unix s), and a rectangle 90 to 80.
+fn with_drawn_setup(name: &str, t0: i64) -> (Arc<ServerAlerts>, String) {
+    let (store, _) = store_at(name);
+    let a = plain(store);
+    let setups = crate::setup_service::Setups::new(
+        store,
+        Some(hub_with(Arc::new(Fake::default()))),
+        None,
+        crate::fetch::DataSource::Sample,
+        Access::parse(None),
+        crate::setup_service::Limits::default(),
+        Some(a.clone()),
+    );
+    let p = chartgen::data::sample_ohlcv("BTCUSDT", "1m", 1, None, crate::fetch::now_ms())
+        .unwrap()
+        .bars[0]
+        .close;
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "direction": "long", "thesis": "a line",
+        "entry": { "low": p * 0.5, "high": p * 0.51 },
+        "invalidation": p * 0.4, "targets": [p * 0.9],
+        "expires_at": crate::fetch::now_ms() + 86_400_000,
+        "drawings": [
+            { "tool": "segment", "points": [{ "time": t0, "price": 100 }, { "time": t0 + 10 * HOUR, "price": 110 }] },
+            { "tool": "cgRect", "points": [{ "time": t0, "price": 90 }, { "time": t0 + 10 * HOUR, "price": 80 }] },
+            { "tool": "cgText", "points": [{ "time": t0, "price": 90 }], "text": "note" }
+        ],
+    });
+    let resp = setups.call_tool("create_setup", None, &args, Some("me"));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert_ne!(resp["result"]["isError"], json!(true), "{text}");
+    let id = serde_json::from_str::<Value>(text).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Kept alive by the alerts' weak reference for the test's length.
+    std::mem::forget(setups);
+    (a, id)
+}
+
+fn on_drawing(setup: &str, index: usize, condition: &str) -> Value {
+    json!({
+        "symbol": "BTCUSDT", "interval": "1h", "evaluate_on": "close",
+        "drawing": { "setup_id": setup, "index": index },
+        "condition": condition, "trigger": "every",
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_across_a_trend_line_fires_where_the_line_is_then() {
+    let t0 = hours(12)[0];
+    let (a, setup) = with_drawn_setup("drawing-line", t0);
+    let id = create(&a, on_drawing(&setup, 0, "crossing_up"), "me").await;
+    let k = key("1h");
+    // Past its end the line runs on: 120 at t0 + 20h, 121 an hour later.
+    let t = t0 + 20 * HOUR;
+    a.on_event(&k, FeedEvent::Bar(bar(t, 119.0)));
+    assert_eq!(
+        a.lock().alerts[&id].fire_count,
+        0,
+        "the first close is a baseline"
+    );
+    // Above where the line was an hour ago, still under where it is now.
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 120.5)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 123.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    let view = get(&a, "me", &id).await;
+    assert!(view["level"].is_null());
+    assert_eq!(view["drawing"]["tool"], "segment");
+    assert_eq!(view["drawing"]["setup_id"], setup.as_str());
+    assert!((view["drawing"]["level"].as_f64().unwrap() - 122.0).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rectangle_breaks_out_at_its_top_or_its_bottom() {
+    let t0 = hours(12)[0];
+    let (a, setup) = with_drawn_setup("drawing-box", t0);
+    let up = create(&a, on_drawing(&setup, 1, "crossing_up"), "me").await;
+    let down = create(&a, on_drawing(&setup, 1, "crossing_down"), "me").await;
+    let k = key("1h");
+    let t = t0 + 20 * HOUR;
+    a.on_event(&k, FeedEvent::Bar(bar(t, 85.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(t + HOUR, 91.0)));
+    assert_eq!(a.lock().alerts[&up].fire_count, 1);
+    assert_eq!(a.lock().alerts[&down].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(t + 2 * HOUR, 79.0)));
+    assert_eq!(a.lock().alerts[&down].fire_count, 1);
+    // Both ways at once is refused; so is a change to it.
+    let err = call(
+        &a,
+        "create_server_alert",
+        on_drawing(&setup, 1, "crossing"),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert!(err.starts_with("On a rectangle"), "{err}");
+    let args = json!({"alert_id": up, "condition": "crossing"});
+    let err = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("On a rectangle"), "{err}");
+    assert_eq!(
+        a.lock().alerts[&up].condition,
+        Condition::CrossingUp,
+        "unchanged"
+    );
+    // Another side is a change it takes.
+    let args = json!({"alert_id": up, "condition": "crossing_down"});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["condition"], "crossing_down");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drawing_alert_refuses_what_does_not_fit() {
+    let t0 = hours(12)[0];
+    let (a, setup) = with_drawn_setup("drawing-bad", t0);
+    let refused = |args: Value| {
+        let a = a.clone();
+        async move {
+            call(&a, "create_server_alert", args, "me")
+                .await
+                .unwrap_err()
+        }
+    };
+    let err = refused(on_drawing(&setup, 2, "crossing_up")).await;
+    assert!(
+        err.starts_with("A server alert cannot watch a cgText drawing"),
+        "{err}"
+    );
+    let err = refused(on_drawing(&setup, 3, "crossing_up")).await;
+    assert_eq!(
+        err,
+        format!("Setup {setup} has 3 drawing(s); index 3 is not one")
+    );
+    let err = refused(on_drawing("no-such", 0, "crossing_up")).await;
+    assert_eq!(err, "No such setup");
+    let mut args = on_drawing(&setup, 0, "crossing_up");
+    args["symbol"] = json!("ETHUSDT");
+    assert!(refused(args)
+        .await
+        .starts_with("That setup is on BTCUSDT, not ETHUSDT"));
+    let mut args = on_drawing(&setup, 0, "crossing_up");
+    args["level"] = json!(100.0);
+    assert!(refused(args).await.contains("takes no level"));
+    let mut args = on_drawing(&setup, 0, "crossing_up");
+    args["evaluate_on"] = json!("live");
+    assert!(refused(args).await.contains("reads bar closes"));
+    let mut args = on_drawing(&setup, 0, "crossing_up");
+    args["indicator"] = json!("rsi");
+    args["level"] = Value::Null;
+    assert!(refused(args).await.contains("not both"));
+    // Another owner cannot use the setup.
+    let err = call(
+        &a,
+        "create_server_alert",
+        on_drawing(&setup, 0, "crossing_up"),
+        "you",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, "No such setup");
+    assert!(a.lock().alerts.is_empty());
+}

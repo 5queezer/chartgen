@@ -352,6 +352,10 @@ struct Record {
     /// An indicator's line at bar closes instead of the price (ADR-0067).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     indicator: Option<indicator::Spec>,
+    /// A drawing of a setup at bar closes instead of a level (ADR-0081). A build from
+    /// before it reads such a row as a price alert with no level, which never fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drawing: Option<drawing::Spec>,
     /// When it stops (ms): no tick or close after it fires it, and the sweep then
     /// switches it off. Written only when set; a build from before it runs the alert
     /// with no end.
@@ -1153,6 +1157,14 @@ impl ServerAlerts {
             }
             return Some((None, 0.0, None));
         }
+        if let Some(d) = &alert.drawing {
+            let level = d.level(alert.condition, bar_time * 1000)?;
+            let dist = price - level;
+            // The distance, not the price: a line moves between two closes.
+            let prev = st.baselines.insert(id.to_string(), dist);
+            st.values.insert(id.to_string(), level);
+            return Some((prev, dist, Some(level)));
+        }
         let Some(spec) = &alert.indicator else {
             let level = alert.level?;
             let prev = st.baselines.insert(id.to_string(), price);
@@ -1413,6 +1425,9 @@ impl ServerAlerts {
         if let Some(spec) = &alert.indicator {
             body["indicator"] = indicator::view(spec, value);
         }
+        if let Some(d) = &alert.drawing {
+            body["drawing"] = drawing::view(d, value);
+        }
         NewEvent {
             id: uuid::Uuid::new_v4().to_string(),
             owner: alert.owner.clone(),
@@ -1466,9 +1481,12 @@ impl ServerAlerts {
             "fired_at": at,
             "fire_count": alert.fire_count,
         });
-        // Only on an indicator alert: a price alert's body is as it always was.
+        // Only on an indicator or drawing alert: a price alert's body is as it always was.
         if let Some(spec) = &alert.indicator {
             body["indicator"] = indicator::view(spec, value);
+        }
+        if let Some(d) = &alert.drawing {
+            body["drawing"] = drawing::view(d, value);
         }
         let body = body.to_string();
         let limits = &self.limits;
@@ -2092,6 +2110,21 @@ impl ServerAlerts {
         Err("This server only sends webhooks for sign-ins its operator allowed".into())
     }
 
+    /// The drawings of the owner's setup `id`, which must be on `symbol`.
+    fn setup_drawings(&self, owner: &str, id: &str, symbol: &str) -> Result<Vec<Value>, String> {
+        if self.setups.get().and_then(Weak::upgrade).is_none() {
+            return Err("Setups are not enabled on this server".into());
+        }
+        let setup = self.setup_of(owner, id).ok_or("No such setup")?;
+        if setup.symbol != symbol {
+            return Err(format!(
+                "That setup is on {}, not {symbol}: its drawings are placed on its own bars",
+                setup.symbol
+            ));
+        }
+        Ok(setup.drawings)
+    }
+
     /// A setup an alert may be about: the caller's own, and still open.
     fn check_setup(&self, owner: &str, id: &str) -> Result<(), String> {
         if self.setups.get().and_then(Weak::upgrade).is_none() {
@@ -2397,8 +2430,24 @@ impl ServerAlerts {
         if at_close {
             bar_close_args(args, evaluate_on)?;
         }
+        let given = |k: &str| args.get(k).is_some_and(|v| !v.is_null());
+        if given("drawing") && given("indicator") {
+            return Err("An alert watches a drawing or an indicator, not both".into());
+        }
         let spec = indicator::parse(args)?;
+        let drawn = drawing::parse(args, condition, |id| {
+            self.setup_drawings(owner, id, &symbol)
+        })?;
+        if drawn.is_some() {
+            if args.get("level").is_some_and(|v| !v.is_null()) {
+                return Err("A drawing alert takes no level: the drawing is its level".into());
+            }
+            if evaluate_on != Some(EvaluateOn::Close) {
+                return Err("A drawing alert reads bar closes: send evaluate_on: close".into());
+            }
+        }
         let level = match (at_close, &spec) {
+            _ if drawn.is_some() => None,
             (true, _) | (false, Some(_)) => None,
             (false, None) => Some(level_arg(args)?.ok_or("level is required")?),
         };
@@ -2515,6 +2564,7 @@ impl ServerAlerts {
             setup_id,
             fired_bar: None,
             indicator: spec,
+            drawing: drawn,
             expires_at,
         };
         // With setups: nobody else may take a pair between this check and the write.
@@ -2544,14 +2594,16 @@ impl ServerAlerts {
             .and_then(Value::as_str)
             .ok_or("alert_id is required")?;
         // First: a stranger's URL must not cost a lookup, or answer anything about it.
-        let (compare, at_close) = match self.lock().alerts.get(id).filter(|a| a.owner == owner) {
-            None => return Err("No such alert".into()),
-            Some(a) => (
-                a.indicator.as_ref().map(|s| s.compare),
-                a.condition == Condition::BarClose,
-            ),
-        };
-        for field in ["indicator", "params", "line", "compare"] {
+        let (compare, at_close, drawn) =
+            match self.lock().alerts.get(id).filter(|a| a.owner == owner) {
+                None => return Err("No such alert".into()),
+                Some(a) => (
+                    a.indicator.as_ref().map(|s| s.compare),
+                    a.condition == Condition::BarClose,
+                    a.drawing.clone(),
+                ),
+            };
+        for field in ["indicator", "params", "line", "compare", "drawing"] {
             if args.get(field).is_some_and(|v| !v.is_null()) {
                 return Err(format!(
                     "{field} cannot change: delete the alert and create another"
@@ -2565,8 +2617,14 @@ impl ServerAlerts {
                 "An alert cannot become a bar_close alert or stop being one: delete it and create another".into(),
             );
         }
+        if let (Some(d), Some(c)) = (&drawn, condition) {
+            d.check(c)?;
+        }
         let trigger: Option<Trigger> = enum_arg(args, "trigger")?;
         let level = match (at_close, compare) {
+            _ if drawn.is_some() && args.get("level").is_some_and(|v| !v.is_null()) => {
+                return Err("A drawing alert takes no level: the drawing is its level".into())
+            }
             (true, _) if args.get("level").is_some_and(|v| !v.is_null()) => {
                 return Err(NO_LEVEL.into())
             }
@@ -2824,6 +2882,9 @@ impl ServerAlerts {
         if let Some(spec) = &a.indicator {
             view["indicator"] = indicator::view(spec, st.values.get(&a.id).copied());
         }
+        if let Some(d) = &a.drawing {
+            view["drawing"] = drawing::view(d, st.values.get(&a.id).copied());
+        }
         view
     }
 }
@@ -2900,6 +2961,9 @@ struct FiredAlert<'a> {
     /// Only on an indicator alert, which `level` is then about.
     #[serde(skip_serializing_if = "Option::is_none")]
     indicator: Option<&'a Value>,
+    /// Only on a drawing alert: `level` is then the drawing's price at that close.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drawing: Option<&'a Value>,
     price: &'a Value,
     trigger: &'a Value,
     bar_time: &'a Value,
@@ -3000,6 +3064,7 @@ fn wake_up_body(
                     // alert's line and value at that close (ADR-0067).
                     level: &happened["level"],
                     indicator: happened.get("indicator"),
+                    drawing: happened.get("drawing"),
                     price: &happened["price"],
                     trigger: &happened["trigger"],
                     bar_time: &happened["bar_time"],
@@ -3238,6 +3303,8 @@ fn read_futures(
 
 #[cfg(test)]
 use tests::read_futures;
+
+mod drawing;
 
 #[cfg(test)]
 mod tests;
