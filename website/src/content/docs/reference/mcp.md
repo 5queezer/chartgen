@@ -861,8 +861,7 @@ scripting on, the caller's own scripts are included, tagged `"source": "user"`;
 a script replaces the entry of the built-in it shadows.
 
 Optional: `detail`, `full` (default) or `compact`. The full catalog is about 35 KB; `compact`
-gives each indicator's name and its parameters' defaults by name, about 5 KB, which is what a
-call to `get_indicators` needs
+gives each indicator's name and its parameters' defaults by name, about 5 KB
 ([ADR-0078](/chartgen/decisions/0078-compact-tool-answers/)):
 
 ```json
@@ -871,6 +870,11 @@ call to `get_indicators` needs
 
 A parameter without a default reads `null`, `params` is absent for an indicator without parameters, and a script of yours keeps
 `"source": "user"`. Ranges, enums and descriptions are only in the full entry.
+
+Which tool takes which entry: `generate_chart` takes every name, a script of yours included,
+with the parameters listed. `get_indicators` takes the names of built-ins only, and computes
+them at their defaults: it refuses a script's name, and a script that shadows a built-in's name
+reads as that built-in there.
 
 #### `get_indicators`
 

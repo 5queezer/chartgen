@@ -658,7 +658,7 @@ export interface ListEventsInput {
 
 export interface ListIndicatorsInput {
   /**
-   * full: each indicator with its description, category, aliases and every parameter's type, range and description. compact: only its name, params (each parameter's default, by name, null where it has none; params is absent when the indicator has no parameters) and, for a script of yours, source.
+   * full: each indicator with its description, category, aliases and every parameter's type, range and description. compact: only its name, params (each parameter's default, by name, null where it has none; params is absent when the indicator has no parameters) and, for a script of yours, source: "user" (generate_chart takes those; get_indicators computes built-ins only).
    */
   detail?: "full" | "compact";
 }

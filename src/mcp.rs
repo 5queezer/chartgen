@@ -2710,7 +2710,7 @@ fn tool_get_indicators(
             },
         )
         .collect();
-    tool_ok_compact(id, &json!({ "symbol": symbol, "intervals": readings }))
+    tool_ok(id, json!({ "symbol": symbol, "intervals": readings }))
 }
 
 /// `get_indicators` for one canonical interval: the engine's results when it
@@ -3700,6 +3700,23 @@ mod tests {
         assert!(rsi["params"]["length"].is_number(), "{rsi}");
         let refused = tool_list_indicators(Some(json!(1)), &json!({ "detail": "short" }), None);
         assert_eq!(refused["result"]["isError"], true);
+    }
+
+    /// The compact catalog, pinned in a file the web app's types are tested against
+    /// (`web/src/types/responses.test.ts`). To write it again after a deliberate change:
+    /// `CHARTGEN_WRITE_FIXTURES=1 cargo test compact_list_indicators`.
+    #[test]
+    fn compact_list_indicators_matches_the_file_the_web_types_are_tested_against() {
+        let resp = tool_list_indicators(Some(json!(1)), &json!({ "detail": "compact" }), None);
+        let answer: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/list_indicators_compact.json");
+        let text = serde_json::to_string_pretty(&answer).unwrap() + "\n";
+        if std::env::var("CHARTGEN_WRITE_FIXTURES").is_ok() {
+            std::fs::write(&path, &text).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
     }
 
     fn temp_dir(name: &str) -> PathBuf {

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import compactIndicators from "../../../tests/fixtures/list_indicators_compact.json";
 import answers from "../../../tests/fixtures/setup_responses.json";
 import stock from "../../../tests/fixtures/stock_setup_responses.json";
 import record from "../../../tests/fixtures/track_record_responses.json";
 import {
+  CompactIndicatorsPayloadSchema,
   EventsPayloadSchema,
   ListIndicatorsPayloadSchema,
   QuotesPayloadSchema,
@@ -137,6 +139,24 @@ describe("chart pattern times (ADR-0046)", () => {
     const p = SummaryPayloadSchema.parse(summaryOf([old]));
     expect(p.indicators.chart_patterns?.patterns?.[0]?.start_time).toBeUndefined();
     expect(() => SummaryPayloadSchema.parse(summaryOf([{ ...failed, start_time: "2026-11-12" }]))).toThrow();
+  });
+});
+
+describe("list_indicators detail: compact (ADR-0078)", () => {
+  it("parses the server's compact catalog, which the full schema refuses", () => {
+    const p = CompactIndicatorsPayloadSchema.strict().parse(compactIndicators);
+    expect(p.indicators).toHaveLength(p.total);
+    expect(p.indicators.find((i) => i.name === "rsi")?.params).toEqual({ length: 14 });
+    expect(p.indicators.some((i) => i.params === undefined)).toBe(true);
+    expect(ListIndicatorsPayloadSchema.safeParse(compactIndicators).success).toBe(false);
+  });
+
+  it("keeps a script's source tag", () => {
+    const p = CompactIndicatorsPayloadSchema.parse({
+      total: 1,
+      indicators: [{ name: "mine", params: { length: 10 }, source: "user" }],
+    });
+    expect(p.indicators[0]?.source).toBe("user");
   });
 });
 
