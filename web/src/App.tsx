@@ -76,6 +76,8 @@ import {
 import { createListIndicatorsQuery, createToolNamesQuery } from "./queries";
 import { createAlertLogger } from "./services/notifications";
 import { copyChartLink, reconcileImported } from "./services/shareLink";
+import { pendingSetup, setupOpened } from "./services/setupsPage";
+import { openSetup } from "./stores/setups";
 import {
   createAlertQuotes,
   createServerAlertPoll,
@@ -176,6 +178,9 @@ export function App(props: { authError: string | null; user: SignedInUser | null
       return;
     }
     setAuthReady(true);
+    // A setup opened from the Setups page (ADR-0091): its chart, as a click in the tab does.
+    const setup = pendingSetup();
+    if (setup !== null) void openSetup(session, setup).finally(setupOpened);
 
     const logger = createAlertLogger(session);
     logger.install();

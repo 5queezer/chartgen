@@ -41,8 +41,8 @@ const CHARTGEN_DB = join(tmpdir(), `chartgen-e2e-${CHARTGEN_PORT}.db`);
 const ALERTS_CHARTGEN_PORT = CHARTGEN_PORT - 2_000;
 const ALERTS_WEB_PORT = WEB_PORT - 2_000;
 const ALERTS_DB = join(tmpdir(), `chartgen-e2e-${ALERTS_CHARTGEN_PORT}.db`);
-// The setups panel (ADR-0071) runs on this server too: it keeps setups.
-const ALERTS_SPECS = /(server-alerts|alerts|alerts-sources|alerts-push|setups-panel)\.spec\.ts$/;
+// The setups panel (ADR-0071) and page (ADR-0091) run on this server too: it keeps setups.
+const ALERTS_SPECS = /(server-alerts|alerts|alerts-sources|alerts-push|setups-panel|setups-page)\.spec\.ts$/;
 // The webhook receiver of server-alerts.spec.ts. The server only accepts this
 // local origin because it runs on the sample source.
 const WEBHOOK_PORT = CHARTGEN_PORT - 1_000;
@@ -59,7 +59,7 @@ const SIGNIN_WEB_PORT = WEB_PORT - 3_000;
 const SIGNIN_DB = join(tmpdir(), `chartgen-e2e-${SIGNIN_CHARTGEN_PORT}.db`);
 const FAKE_PROVIDER_PORT = CHARTGEN_PORT - 4_000;
 const FAKE_PROVIDER_SECRET = "fake-provider-secret";
-const SIGNIN_SPECS = /signin(-push|-workspace|-operator)?\.spec\.ts$/;
+const SIGNIN_SPECS = /signin(-push|-workspace|-operator|-setups)?\.spec\.ts$/;
 // The fake push service of signin-push.spec.ts. The server only accepts this local
 // origin because it runs on the sample source.
 const SIGNIN_PUSH_PORT = CHARTGEN_PORT - 5_000;
@@ -84,7 +84,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: [/(server-alerts|alerts-push|setups-panel)\.spec\.ts$/, SCRIPTING_SPECS, SIGNIN_SPECS],
+      testIgnore: [/(server-alerts|alerts-push|setups-panel|setups-page)\.spec\.ts$/, SCRIPTING_SPECS, SIGNIN_SPECS],
       use: { ...devices["Desktop Chrome"] },
     },
     {
@@ -214,6 +214,8 @@ export default defineConfig({
         CHARTGEN_WEBHOOK_TEST_ORIGIN: `http://127.0.0.1:${SIGNIN_PUSH_PORT}`,
         // The fake provider's GitHub user, for signin-operator.spec.ts (ADR-0063).
         CHARTGEN_ADMIN_USERS: "github:1001",
+        // For signin-setups.spec.ts (ADR-0091): an account's setups at /setups.
+        CHARTGEN_SETUPS: "1",
       },
       reuseExistingServer: REUSE_SERVER,
       timeout: 300_000,

@@ -21,7 +21,7 @@ vi.mock("./drawings", async (original) => ({
 }));
 vi.mock("../services/alertEngine", () => ({ showToast: () => undefined }));
 
-import { openSetup, refreshSetups, setupsState } from "./setups";
+import { LIST_LIMIT, openSetup, refreshSetups, setupsState } from "./setups";
 
 /** A promise a test resolves when it chooses. */
 function later<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
@@ -39,16 +39,29 @@ beforeEach(() => {
 });
 
 describe("refreshing the setups (ADR-0071)", () => {
+  it("asks for the chart's symbol only, and says which symbol it answered for (ADR-0091)", async () => {
+    const asked: unknown[] = [];
+    const session = {
+      callListSetups: (args: unknown) => {
+        asked.push(args);
+        return Promise.resolve(list);
+      },
+    } as unknown as McpSession;
+    await refreshSetups(session, "ETHUSDT");
+    expect(asked).toEqual([{ symbol: "ETHUSDT", limit: LIST_LIMIT }]);
+    const state = setupsState();
+    expect(state.kind === "ready" && state.symbol).toBe("ETHUSDT");
+  });
+
   it("keeps a newer refresh's answer when an older one answers after it", async () => {
     const older = later<SetupsPayload>();
     const newer = later<SetupsPayload>();
     const lists = [older.promise, newer.promise];
     const session = {
       callListSetups: () => lists.shift()!,
-      callGetTrackRecord: () => Promise.reject(new Error("not here")),
     } as unknown as McpSession;
-    const first = refreshSetups(session);
-    const second = refreshSetups(session);
+    const first = refreshSetups(session, "ETHUSDT");
+    const second = refreshSetups(session, "ETHUSDT");
     const won = list.setups.map((s) => ({ ...s, status: "won" as const }));
     newer.resolve({ ...list, setups: won });
     await second;
@@ -59,17 +72,29 @@ describe("refreshing the setups (ADR-0071)", () => {
     if (state.kind === "ready") expect(state.setups.map((s) => s.status)).toEqual(["won", "won", "won"]);
   });
 
+  it("keeps a symbol's setups when its refresh fails, and says so when another symbol's does", async () => {
+    let fail = false;
+    const session = {
+      callListSetups: () => (fail ? Promise.reject(new Error("MCP tool error: busy")) : Promise.resolve(list)),
+    } as unknown as McpSession;
+    await refreshSetups(session, "ETHUSDT");
+    fail = true;
+    await refreshSetups(session, "ETHUSDT");
+    expect(setupsState()).toEqual(expect.objectContaining({ kind: "ready", symbol: "ETHUSDT" }));
+    await refreshSetups(session, "BTCUSDT");
+    expect(setupsState()).toEqual({ kind: "error", message: "busy" });
+  });
+
   it("drops an older refresh's off and error too", async () => {
     const older = later<SetupsPayload>();
     const older2 = later<SetupsPayload>();
     const lists = [older.promise, older2.promise, Promise.resolve(list)];
     const session = {
       callListSetups: () => lists.shift()!,
-      callGetTrackRecord: () => Promise.reject(new Error("not here")),
     } as unknown as McpSession;
-    const off = refreshSetups(session);
-    const failed = refreshSetups(session);
-    await refreshSetups(session);
+    const off = refreshSetups(session, "ETHUSDT");
+    const failed = refreshSetups(session, "ETHUSDT");
+    await refreshSetups(session, "ETHUSDT");
     older.resolve({ enabled: false, setups: [] });
     older2.resolve(Promise.reject(new Error("late")) as unknown as SetupsPayload);
     await Promise.allSettled([off, failed]);

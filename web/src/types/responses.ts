@@ -1256,6 +1256,52 @@ export const SetupsPayloadSchema = z.object({
 });
 export type SetupsPayload = z.infer<typeof SetupsPayloadSchema>;
 
+/**
+ * The fields of a setup the Setups page (ADR-0091) asks `list_setups` for, by its
+ * `fields` argument (ADR-0078): what its tables, figures and filters show. The thesis,
+ * drawings, shadow results and log come with `get_setup` when one setup is opened.
+ */
+export const SETUP_ROW_FIELDS = [
+  "symbol",
+  "interval",
+  "direction",
+  "decision",
+  "status",
+  "created_at",
+  "entry",
+  "invalidation",
+  "targets",
+  "expires_at",
+  "fill",
+  "exit",
+  "result_r",
+  "net",
+  "scored_through",
+  "gap",
+  "tags",
+  "mae_r",
+  "mfe_r",
+  "features",
+  "playbook_version",
+  "skip_reason",
+] as const;
+
+// `list_setups` keeps `id` whatever `fields` say (ADR-0078).
+export const SetupRowSchema = SetupSchema.pick({
+  id: true,
+  ...(Object.fromEntries(SETUP_ROW_FIELDS.map((f) => [f, true])) as Record<
+    (typeof SETUP_ROW_FIELDS)[number],
+    true
+  >),
+});
+export type SetupRow = z.infer<typeof SetupRowSchema>;
+
+// `list_setups` with `fields: SETUP_ROW_FIELDS`.
+export const SetupRowsPayloadSchema = SetupsPayloadSchema.extend({
+  setups: z.array(SetupRowSchema),
+});
+export type SetupRowsPayload = z.infer<typeof SetupRowsPayloadSchema>;
+
 // ---------------------------------------------------------------------------
 // Track record (ADR-0064)
 //   Produced by `Setups::track_record` in `src/setup_service.rs` and `track_record`
