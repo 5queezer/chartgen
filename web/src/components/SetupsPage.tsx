@@ -20,6 +20,7 @@ import {
   age,
   featureNames,
   filterRows,
+  withOpen,
   nextSort,
   recordArgs,
   resultsByDay,
@@ -55,24 +56,37 @@ export type PageLoad =
   | {
       kind: "ready";
       list: SetupRowsPayload;
-      takes: TrackRecordPayload | null;
-      skips: TrackRecordPayload | null;
+      /** The record for takes and for skips: null when it could not be read, undefined when the decision filter leaves it out. */
+      takes: Rec;
+      skips: Rec;
     };
+
+type Rec = TrackRecordPayload | null | undefined;
 
 const reason = (err: unknown) =>
   (err instanceof Error ? err.message : String(err)).replace(/^MCP tool error: /, "");
 
-/** The list, and the record's totals for takes and for skips under the filters. */
+/**
+ * The newest setups and every open one (an open take older than the newest `PAGE_LIMIT`
+ * is still in the figures and the open risk), and the record's totals for takes and for
+ * skips under the filters.
+ */
 export async function loadSetupsPage(session: McpSession, filters: Filters = NO_FILTERS): Promise<PageLoad> {
   let list: SetupRowsPayload;
   try {
-    list = await session.callListSetupRows({ limit: PAGE_LIMIT });
+    const [newest, open] = await Promise.all([
+      session.callListSetupRows({ limit: PAGE_LIMIT }),
+      session.callListSetupRows({ status: "open", limit: PAGE_LIMIT }),
+    ]);
+    list = { ...newest, setups: withOpen(newest.setups, open.setups) };
   } catch (err) {
     return { kind: "error", message: reason(err) };
   }
   if (!list.enabled) return { kind: "off" };
-  const record = (decision: "take" | "skip") =>
-    session.callGetTrackRecord({ ...recordArgs(filters), decision }).catch(() => null);
+  const record = (decision: "take" | "skip"): Promise<Rec> =>
+    filters.decision === "all" || filters.decision === decision
+      ? session.callGetTrackRecord({ ...recordArgs(filters), decision }).catch(() => null)
+      : Promise.resolve(undefined);
   const [takes, skips] = await Promise.all([record("take"), record("skip")]);
   return { kind: "ready", list, takes, skips };
 }
@@ -96,16 +110,27 @@ export function SetupsPage(props: { session: McpSession; first: Exclude<PageLoad
   const [filters, setFilters] = createSignal<Filters>(NO_FILTERS);
   const [selected, setSelected] = createSignal<string | null>(null);
   const [now, setNow] = createSignal(Date.now());
-  if (props.first.kind === "ready") enterSetupsPage();
+  /** Why the last refresh failed, while what an earlier one read stays shown. */
+  const [stale, setStale] = createSignal<string | null>(null);
+  // The address says /setups and the flag is spent, also when the first read failed:
+  // Refresh tries again, and leaving is the app.
+  enterSetupsPage();
 
+  // Only the refresh started last is shown: an earlier one may answer for other filters.
+  let refreshes = 0;
   const refresh = async () => {
+    const mine = ++refreshes;
     const next = await loadSetupsPage(props.session, filters());
+    if (mine !== refreshes) return;
     setNow(Date.now());
-    if (next.kind === "ready") enterSetupsPage();
-    // A failed refresh keeps what is shown; a server that stopped keeping setups shows nothing.
-    if (next.kind !== "error" || load().kind !== "ready") {
-      setLoad(next.kind === "off" ? { kind: "error", message: "This server keeps no setups." } : next);
+    // A failed refresh keeps what is shown, and says so; a server that stopped keeping
+    // setups shows nothing.
+    if (next.kind === "error" && load().kind === "ready") {
+      setStale(next.message);
+      return;
     }
+    setStale(null);
+    setLoad(next.kind === "off" ? { kind: "error", message: "This server keeps no setups." } : next);
   };
   const setFilter = <K extends keyof Filters>(key: K, value: Filters[K]) => {
     setFilters({ ...filters(), [key]: value });
@@ -146,6 +171,13 @@ export function SetupsPage(props: { session: McpSession; first: Exclude<PageLoad
           Back to the chart
         </a>
       </header>
+      <Show when={stale()}>
+        {(message) => (
+          <p role="status" data-role="setups-stale" class="text-[color:var(--color-danger)]">
+            Could not refresh: {message()}. This is what the server said before.
+          </p>
+        )}
+      </Show>
       <Show when={(() => { const l = load(); return l.kind === "error" ? l : null; })()}>
         {(l) => (
           <p role="status" data-role="setups-error" class="text-[color:var(--color-danger)]">
@@ -176,7 +208,7 @@ export function SetupsPage(props: { session: McpSession; first: Exclude<PageLoad
               </button>
               <Show when={(r().list.total ?? 0) > r().list.setups.length}>
                 <span class={muted}>
-                  The newest {r().list.setups.length} of {r().list.total} setups are listed.
+                  The newest {PAGE_LIMIT} of {r().list.total} setups, and every open one, are listed.
                 </span>
               </Show>
             </div>
@@ -198,7 +230,7 @@ export function SetupsPage(props: { session: McpSession; first: Exclude<PageLoad
               <SetupTable
                 name="open"
                 rows={open()}
-                columns={["symbol", "side", "status", "entry", "stop", "target", "mfe", "mae", "made", "expires"]}
+                columns={["symbol", "side", "status", "mfe", "mae", "made", "expires", "entry", "stop", "target"]}
                 initial={{ column: "made", descending: true }}
                 now={now()}
                 selected={selected()}
@@ -210,7 +242,7 @@ export function SetupsPage(props: { session: McpSession; first: Exclude<PageLoad
               <SetupTable
                 name="closed"
                 rows={closed()}
-                columns={["symbol", "side", "status", "entry", "stop", "target", "result", "mfe", "mae", "made", "ended"]}
+                columns={["symbol", "side", "status", "result", "entry", "stop", "target", "mfe", "mae", "made", "ended"]}
                 initial={{ column: "ended", descending: true }}
                 now={now()}
                 selected={selected()}
@@ -250,30 +282,41 @@ function Figure(props: { label: string; role: string; children: JSX.Element; sub
 }
 
 /** The figures on top: what the server counts, as it counts them. */
-function Figures(props: {
-  takes: TrackRecordPayload | null;
-  skips: TrackRecordPayload | null;
-  risk: SetupOpenRisk | undefined;
-}): JSX.Element {
+/** A count of the record's, "–" where the filter leaves it out, never a missing one as 0. */
+const counted = (rec: Rec, n: (r: TrackRecordPayload) => number): string =>
+  rec === undefined ? "–" : rec === null ? "unavailable" : String(n(rec));
+
+/** The sum over the decisions the filter keeps, or "unavailable" when one could not be read. */
+function both(takes: Rec, skips: Rec, n: (r: TrackRecordPayload) => number): string {
+  const kept = [takes, skips].filter((r) => r !== undefined);
+  return kept.some((r) => r === null) ? "unavailable" : String(kept.reduce((a, r) => a + n(r!), 0));
+}
+
+/** The figures on top: what the server counts, as it counts it. */
+function Figures(props: { takes: Rec; skips: Rec; risk: SetupOpenRisk | undefined }): JSX.Element {
   const side = (d: "long" | "short") => (
     <Figure
       label={`Open risk ${d}`}
       role={`risk-${d}`}
-      sub={<>{props.risk?.[d].filled ?? 0} filled, {formatR(props.risk?.[d].filled_at_stop_r ?? 0)} at their stops</>}
+      sub={<>{props.risk?.[d].filled ?? 0} filled, {formatR(props.risk?.[d].filled_at_stop_r ?? 0)} at their stops, all symbols</>}
     >
       {props.risk?.[d].risk_r ?? 0}R
     </Figure>
   );
-  const record = (label: string, role: string, rec: TrackRecordPayload | null) => (
+  const record = (label: string, role: string, rec: Rec) => (
     <Figure
       label={label}
       role={role}
       sub={
-        rec && (
+        rec ? (
           <>
             {rec.total.net_gain} of {rec.total.count} above 0 R after costs ({pct(rec.total.net_gain, rec.total.count)}), mean{" "}
             {formatR(rec.total.mean_r)}
           </>
+        ) : rec === null ? (
+          "unavailable"
+        ) : (
+          "not in the filter"
         )
       }
     >
@@ -284,13 +327,13 @@ function Figures(props: {
   );
   return (
     <div class="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6" data-testid="setups-figures">
-      <Figure label="Open" role="open" sub={<>{props.takes?.open ?? "–"} taken, {props.skips?.open ?? "–"} skipped</>}>
-        {(props.takes?.open ?? 0) + (props.skips?.open ?? 0)}
+      <Figure label="Open" role="open" sub={<>{counted(props.takes, (r) => r.open)} taken, {counted(props.skips, (r) => r.open)} skipped</>}>
+        {both(props.takes, props.skips, (r) => r.open)}
       </Figure>
       {side("long")}
       {side("short")}
-      <Figure label="Closed" role="closed" sub={<>{props.takes?.closed ?? "–"} taken, {props.skips?.closed ?? "–"} skipped</>}>
-        {(props.takes?.closed ?? 0) + (props.skips?.closed ?? 0)}
+      <Figure label="Closed" role="closed" sub={<>{counted(props.takes, (r) => r.closed)} taken, {counted(props.skips, (r) => r.closed)} skipped</>}>
+        {both(props.takes, props.skips, (r) => r.closed)}
       </Figure>
       {record("Taken, R after costs", "taken", props.takes)}
       {record("Skipped, R after costs", "skipped", props.skips)}
@@ -326,6 +369,36 @@ function RiskTable(props: { risk: SetupOpenRisk | undefined }): JSX.Element {
         </tbody>
       </table>
     </Show>
+  );
+}
+
+/**
+ * A table wider than its panel scrolls sideways; a fade at the edge it can scroll
+ * towards says that there is more.
+ */
+function ScrollX(props: { children: JSX.Element }): JSX.Element {
+  const [more, setMore] = createSignal(false);
+  let box!: HTMLDivElement;
+  const measure = () => setMore(box.scrollLeft + box.clientWidth < box.scrollWidth - 1);
+  onMount(() => {
+    const observer = new ResizeObserver(measure);
+    observer.observe(box);
+    if (box.firstElementChild) observer.observe(box.firstElementChild);
+    onCleanup(() => observer.disconnect());
+  });
+  return (
+    <div class="relative">
+      <div ref={box} class="overflow-x-auto" onScroll={measure}>
+        {props.children}
+      </div>
+      <Show when={more()}>
+        <div
+          data-role="scrolls"
+          class="pointer-events-none absolute inset-y-0 right-0 w-8"
+          style={{ background: "linear-gradient(to left, var(--color-surface), transparent)" }}
+        />
+      </Show>
+    </div>
   );
 }
 
@@ -397,7 +470,7 @@ function SetupTable(props: {
   const sorted = createMemo(() => sortRows(props.rows, sort()));
   return (
     <Show when={props.rows.length > 0} fallback={<p class={`text-xs ${muted}`}>None.</p>}>
-      <div class="overflow-x-auto">
+      <ScrollX>
         <table class="w-full text-xs tabular-nums whitespace-nowrap" data-testid={`setups-${props.name}`}>
           <thead>
             <tr>
@@ -440,7 +513,7 @@ function SetupTable(props: {
             </For>
           </tbody>
         </table>
-      </div>
+      </ScrollX>
     </Show>
   );
 }
@@ -488,14 +561,15 @@ function Breakdown(props: { session: McpSession; filters: Filters; rows: SetupRo
       <Show when={record.error}>
         <p class="text-xs text-[color:var(--color-danger)]">The track record could not be read: {reason(record.error)}</p>
       </Show>
-      <Show when={args() !== null && record()}>
+      <Show when={args() !== null && !record.error && record()}>
         {(rec) => (
-          <div class="overflow-x-auto">
+          <div>
+            <ScrollX>
             <table class="w-full text-xs tabular-nums whitespace-nowrap" data-testid="setups-record">
               <thead>
                 <tr class={muted}>
-                  <For each={["", "Closed", "Won", "Above 0 R", "Below 0 R", "Total R", "", "Mean R", "Entered", "Mean R entered", "Gaps"]}>
-                    {(h, i) => <th class={`font-normal px-1.5 ${i() === 0 || i() === 6 ? "text-left" : "text-right"}`}>{h}</th>}
+                  <For each={["", "Closed", "Total R", "Mean R", "", "Won", "Above 0 R", "Below 0 R", "Entered", "Mean R entered", "Gaps"]}>
+                    {(h, i) => <th class={`font-normal px-1.5 ${i() === 0 || i() === 4 ? "text-left" : "text-right"}`}>{h}</th>}
                   </For>
                 </tr>
               </thead>
@@ -505,10 +579,8 @@ function Breakdown(props: { session: McpSession; filters: Filters; rows: SetupRo
                     <tr data-group={g.label} class={g.label === "All" ? "font-semibold" : ""}>
                       <td class="px-1.5 py-0.5">{g.label}</td>
                       <td class="px-1.5 text-right">{g.count}</td>
-                      <td class="px-1.5 text-right">{g.won}</td>
-                      <td class="px-1.5 text-right">{g.net_gain}</td>
-                      <td class="px-1.5 text-right">{g.net_loss}</td>
                       <td class={`px-1.5 text-right ${tone(g.total_r)}`} data-role="total-r">{formatR(g.total_r)}</td>
+                      <td class={`px-1.5 text-right ${tone(g.mean_r)}`}>{formatR(g.mean_r)}</td>
                       <td class="px-1.5 w-24">
                         <Show when={g.label !== "All"}>
                           <div
@@ -520,7 +592,9 @@ function Breakdown(props: { session: McpSession; filters: Filters; rows: SetupRo
                           />
                         </Show>
                       </td>
-                      <td class={`px-1.5 text-right ${tone(g.mean_r)}`}>{formatR(g.mean_r)}</td>
+                      <td class="px-1.5 text-right">{g.won}</td>
+                      <td class="px-1.5 text-right">{g.net_gain}</td>
+                      <td class="px-1.5 text-right">{g.net_loss}</td>
                       <td class="px-1.5 text-right">{g.entered}</td>
                       <td class={`px-1.5 text-right ${tone(g.mean_r_entered)}`}>{formatR(g.mean_r_entered)}</td>
                       <td class="px-1.5 text-right">{g.gaps}</td>
@@ -529,6 +603,7 @@ function Breakdown(props: { session: McpSession; filters: Filters; rows: SetupRo
                 </For>
               </tbody>
             </table>
+            </ScrollX>
             <p class={`text-xs ${muted} mt-1`}>
               {by() === "tag" ? "A setup is in the group of each prefix one of its tags starts with: groups can overlap. " : ""}
               Counts and sums from the server, over {rec().closed} closed setups{rec().truncated ? " (the newest; older ones were left out)" : ""}. A group of a few setups says little.
@@ -564,7 +639,7 @@ function Detail(props: { session: McpSession; id: string; onClose: () => void })
       <Show when={setup.error}>
         <p class="text-xs text-[color:var(--color-danger)]">The setup could not be read: {reason(setup.error)}</p>
       </Show>
-      <Show when={setup()}>
+      <Show when={!setup.error && setup()}>
         {(s) => (
           <>
             <h2 class="text-base font-semibold">

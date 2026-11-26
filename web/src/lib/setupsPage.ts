@@ -38,6 +38,12 @@ const dayStart = (day: string, days = 0): number | null => {
 /** `from` and `to` as the record takes them: made at or after, and before the day after `to`. */
 const range = (f: Filters) => ({ from: dayStart(f.from), to: dayStart(f.to, 1) });
 
+/** The newest setups, and the open ones that are older than those: each once. */
+export function withOpen<T extends { id: string }>(newest: readonly T[], open: readonly T[]): T[] {
+  const listed = new Set(newest.map((s) => s.id));
+  return [...newest, ...open.filter((s) => !listed.has(s.id))];
+}
+
 /** The setups the filters let through. A day range is about when a setup was made. */
 export function filterRows<T extends SetupRow>(rows: readonly T[], f: Filters): T[] {
   const { from, to } = range(f);

@@ -81,7 +81,7 @@ daily results and a breakdown, in panels of a grid). Its look is the app's own. 
 setups are made and changed by the agent's tools.
 
 - **Figures** on top. Open setups, taken and skipped. Open risk long and short, filled, and what
-  the filled ones would end at at their stops, from `list_setups`' `open_risk`. Closed setups,
+  the filled ones would end at at their stops, from `list_setups`' `open_risk`, over all open takes whatever the filters. Closed setups,
   taken and skipped. For takes and for skips: the total R after costs, how many ended above 0 R
   after costs of how many (`net_gain` of `count`), and the mean R. These figures come from
   `get_track_record` with `decision: take` and `skip`.
@@ -89,10 +89,14 @@ setups are made and changed by the agent's tools.
   in. The tables and the chart follow all of them. The figures and the breakdown follow the ones
   `get_track_record` takes (symbol, side, decision, `from`, `to`); status and tag are not among
   them, since the record counts closed setups and groups by tag instead.
-- **Open** and **closed** setups as two tables with sortable columns: symbol and interval, side
-  and `skip`, status, entry (the fill once filled), stop, T1, MFE and MAE in R, the result with a
-  warning on a win below 0 R and a mark on a result with a gap (closed), when it was made, when
-  it ended (closed) or expires (open).
+- **Open** and **closed** setups as two tables with sortable columns, what a trader scans first
+  on the left, so that it shows on a phone before the table scrolls sideways (a fade at the edge
+  says it does):
+  - closed: symbol and interval, side and `skip`, status, the result (with a warning on a win
+    below 0 R and a mark on a result with a gap), then entry (the fill once filled), stop, T1,
+    MFE and MAE in R, when it was made and when it ended;
+  - open: symbol, side, status, MFE and MAE, when it was made and when it expires, then the
+    levels.
 - **Results per day:** each closed setup listed, at its own result as the server scored it, on
   the day it ended, as bars, with their running sum as a line. It plots results and is no total:
   it covers the listed setups (the newest 500, and the page says so when there are more), and the
@@ -101,8 +105,8 @@ setups are made and changed by the agent's tools.
 - **Open risk by symbol:** `open_risk.by_symbol`, as the server sends it.
 - **Track record by** symbol, direction, playbook version, skip reason, tag, feature, probability
   or bracket anchor: one `get_track_record` call with `group_by`, showing per group the closed
-  count, won, above and below 0 R after costs, total R with a bar, mean R, entered, mean R
-  entered and gaps, and the total. Tags group by the prefixes the page offers from the listed
+  count, total R, mean R, a bar of the total, then won, above and below 0 R after costs, entered,
+  mean R entered and gaps, and the total. Tags group by the prefixes the page offers from the listed
   setups: the families (the part of a tag up to its first `:`) or one family's tags, the most
   used first, at most 10, which is what the tool takes. Features group by a name the listed
   setups carry.
@@ -120,7 +124,11 @@ setups are made and changed by the agent's tools.
   only what the tables, figures and filters show. The thesis, drawings, shadow results and log
   come with `get_setup` for the one setup opened. Measured on a server with made-up setups, see
   the pull request.
+- `list_setups` again with `status: open` and the same fields, merged by id: an open take older
+  than the newest 500 is in the figures and the open risk, so it is in the open table too.
 - `get_track_record` three times: takes, skips, and the chosen grouping.
+- A read that fails shows why, with Refresh to try again; the tab is at `/setups` then, and
+  leaving it is the app. A later refresh that fails keeps what an earlier one read, and says so.
 - No current price: an "R now" for an open setup would score it a second time, and against a
   stop the agent may have moved since the fill, where the server keeps the risk at the fill. MFE
   and MAE are the server's.

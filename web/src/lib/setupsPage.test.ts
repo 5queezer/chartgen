@@ -12,6 +12,7 @@ import {
   resultsByDay,
   sortRows,
   tagGroupings,
+  withOpen,
 } from "./setupsPage";
 
 // The server's own answers: a cancelled take, a skip that won and a take that was stopped.
@@ -50,6 +51,13 @@ describe("the page's filters (ADR-0091)", () => {
     expect(
       recordArgs({ ...NO_FILTERS, symbol: "BTCUSDT", direction: "long", decision: "take", status: "won", tag: "x", from: "2026-03-01", to: "2026-03-03" }),
     ).toEqual({ symbol: "BTCUSDT", direction: "long", decision: "take", from: day("2026-03-01", 0), to: day("2026-03-04", 0) });
+  });
+});
+
+describe("the setups listed", () => {
+  it("adds the open setups older than the newest, each once", () => {
+    const old = row("old", { status: "triggered", created_at: day("2026-01-01") });
+    expect(ids(withOpen(rows, [rows[2]!, old]))).toEqual(["a", "b", "c", "d", "old"]);
   });
 });
 

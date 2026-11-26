@@ -85,7 +85,10 @@ export function SetupsPanel(props: { session: McpSession; enabled: boolean }): J
       <Show when={(() => { const s = setupsState(); return s.kind === "error" ? s : null; })()}>
         {(s) => (
           <p data-role="setups-error" class="px-3 py-3 text-xs text-[color:var(--color-danger)]">
-            Setups could not be read: {s().message}
+            Setups could not be read: {s().message}{" "}
+            <button type="button" class="underline cursor-pointer" onClick={refresh}>
+              Try again
+            </button>
           </p>
         )}
       </Show>

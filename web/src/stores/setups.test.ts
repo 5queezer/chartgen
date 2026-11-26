@@ -72,6 +72,19 @@ describe("refreshing the setups (ADR-0071)", () => {
     if (state.kind === "ready") expect(state.setups.map((s) => s.status)).toEqual(["won", "won", "won"]);
   });
 
+  it("keeps a symbol's setups when its refresh fails, and says so when another symbol's does", async () => {
+    let fail = false;
+    const session = {
+      callListSetups: () => (fail ? Promise.reject(new Error("MCP tool error: busy")) : Promise.resolve(list)),
+    } as unknown as McpSession;
+    await refreshSetups(session, "ETHUSDT");
+    fail = true;
+    await refreshSetups(session, "ETHUSDT");
+    expect(setupsState()).toEqual(expect.objectContaining({ kind: "ready", symbol: "ETHUSDT" }));
+    await refreshSetups(session, "BTCUSDT");
+    expect(setupsState()).toEqual({ kind: "error", message: "busy" });
+  });
+
   it("drops an older refresh's off and error too", async () => {
     const older = later<SetupsPayload>();
     const older2 = later<SetupsPayload>();

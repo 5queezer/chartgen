@@ -42,8 +42,8 @@ let refreshes = 0;
 let opens = 0;
 
 /**
- * Ask the server for the caller's setups on `on`. What was shown stays while a refresh
- * fails. A refresh that answers after a later one is dropped: its statuses would be
+ * Ask the server for the caller's setups on `on`. What was shown of `on` stays while a
+ * refresh fails; another symbol's gives way to the error. A refresh that answers after a later one is dropped: its statuses would be
  * older, or its symbol not the chart's any more.
  */
 export async function refreshSetups(session: McpSession, on: string): Promise<void> {
@@ -58,7 +58,9 @@ export async function refreshSetups(session: McpSession, on: string): Promise<vo
     }
     setState({ kind: "ready", symbol: on, setups: list.setups, total: list.total ?? list.setups.length });
   } catch (err) {
-    if (latest() && state().kind !== "ready") {
+    // What was shown stays only when it is this symbol's.
+    const s = state();
+    if (latest() && !(s.kind === "ready" && s.symbol === on)) {
       setState({ kind: "error", message: reason(err) });
     }
   }

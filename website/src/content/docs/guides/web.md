@@ -1017,11 +1017,12 @@ The **Setups** tab lists the [setups](/chartgen/guides/setups/) your agent made 
 on the chart's symbol, the ones the server scores on paper
 ([ADR-0071](/chartgen/decisions/0071-setups-panel/),
 [ADR-0091](/chartgen/decisions/0091-a-setups-page/)). It reads them with the same tools the agent
-uses, so it shows yours only. The whole list, the track record and the open risk are on the
+uses, so it shows yours only. The longer list, the track record and the open risk are on the
 [Setups page](#the-setups-page); **All setups** in the tab's header opens it.
 
-- **Order.** The open setups (watching or triggered), newest first, then the five closed ones that
-  ended last. A line under them says how many more the symbol has, and links to the page.
+- **Order.** The tab reads the symbol's newest 50 setups. Of those, the open ones (watching or
+  triggered) come first, newest first, then the five closed ones that ended last. A line under
+  them says how many more the symbol has, and links to the page.
 - **A row:**
   - symbol, interval, direction, `skip` for a decision not to trade, the status, and the result in
     R once closed;
@@ -1048,19 +1049,26 @@ address. On a server with sign-in you sign in first, as anywhere in the app; the
 the setups of your account only, read with the same tools the agent uses. On a server without
 setups the address is the app. It is read only: your agent makes and changes setups.
 
+- **What it lists:** your newest 500 setups, and every open one, however old. It says so when you
+  have more.
 - **Figures** on top: open setups, taken and skipped; the open risk long and short (each open take
   risks 1 R), how many of them are filled and what those would end at at their stops; the closed
   setups; and for takes and for skips the total R after costs, how many ended above 0 R after costs
-  of how many, and the mean R. They are what `get_track_record` and `list_setups` answer.
+  of how many, and the mean R. They are what `get_track_record` and `list_setups` answer. A count
+  the server could not give reads *unavailable*, never 0.
 - **Filters:** status, take or skip, side, symbol, tag, and the days the setups were made in. The
   tables and the chart follow all of them; the figures and the track record follow those the
-  record takes (symbol, side, decision and days).
-- **Open** and **closed** setups as two tables: symbol, side, status, entry (or fill), stop, T1,
-  MFE and MAE in R, and when each was made, ended or expires; the closed one with the result. Click
-  a column's header to sort by it, again to turn the order round. A ⚠ marks a win below 0 R, and
+  record takes (symbol, side, decision and days). The open risk does not: it is always over all
+  your open takes, on every symbol.
+- **Open** and **closed** setups as two tables. The closed one starts with symbol, side, status and
+  the result, the open one with symbol, side, status, MFE and MAE in R, made and expires; then
+  come the entry (or fill), stop, T1, and the rest. On a narrow screen a table scrolls sideways,
+  and a fade at its edge shows there is more. Click a column's header to sort by it, again to turn
+  the order round. A ⚠ marks a win below 0 R, and
   `gap` a result that does not cover bars the server missed.
-- **Results per day:** each closed setup listed, at its own result, on the day it ended, as bars,
-  and their running sum as a line. It covers the newest 500 setups; the figures cover the record.
+- **Results per day:** one bar per day, the sum of the results of the closed setups listed that
+  ended that day (hover a bar for its count), and the running sum as a line. It covers the setups
+  listed; the figures cover the record.
 - **Open risk by symbol:** the open takes per symbol and side.
 - **Track record by** symbol, direction, playbook version, skip reason, tag, feature, probability
   or bracket anchor: per group, the closed setups, won, above and below 0 R after costs, total and

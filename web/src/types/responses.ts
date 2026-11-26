@@ -1276,6 +1276,7 @@ export const SETUP_ROW_FIELDS = [
   "skip_reason",
 ] as const;
 
+// `list_setups` keeps `id` whatever `fields` say (ADR-0078).
 export const SetupRowSchema = SetupSchema.pick({
   id: true,
   ...(Object.fromEntries(SETUP_ROW_FIELDS.map((f) => [f, true])) as Record<

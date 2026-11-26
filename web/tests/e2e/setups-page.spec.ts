@@ -172,7 +172,10 @@ test.describe("the Setups page", () => {
       tags: ["trigger:example-a"],
       created_at: 1767441600000,
     };
-    const list = { ...base, total: 5, setups: [open, won, ...base.setups] };
+    // Past the newest the page lists, an open take made long ago: only the open list has it.
+    const olderOpen = { ...structuredClone(open), id: "setup-000010", status: "triggered", created_at: 1767100000000 };
+    const list = { ...base, total: 600, setups: [open, won, ...base.setups] };
+    const openList = { ...base, total: 2, setups: [open, olderOpen] };
     const skips = { ...structuredClone(record.get_track_record), total: { ...(record.get_track_record as { total: Json }).total, total_r: -0.5 } };
     const trackCalls: Json[] = [];
     await page.route("**/mcp", async (route) => {
@@ -182,7 +185,9 @@ test.describe("the Setups page", () => {
       if (name === "get_track_record") trackCalls.push(args);
       const payload =
         name === "list_setups"
-          ? list
+          ? args.status === "open"
+            ? openList
+            : list
           : name === "get_track_record"
             ? args.group_by === "skip_reason"
               ? record.get_track_record_by_skip_reason
@@ -206,7 +211,8 @@ test.describe("the Setups page", () => {
     await expect(page.locator("[data-role=skipped] [data-role=total-r]")).toHaveText("−0.50R");
 
     // Open and closed apart; closed ones by when they ended, the latest first.
-    expect(await ids(page, "open")).toEqual([open.id]);
+    expect(await ids(page, "open")).toEqual([open.id, olderOpen.id]);
+    await expect(page.getByRole("group", { name: "Filters" })).toContainText("The newest 500 of 600 setups, and every open one, are listed.");
     expect(await ids(page, "closed")).toEqual([won.id, stopped.id, cancelled.id, skipWon.id]);
     const result = table(page, "closed").getByRole("button", { name: /^Result/ });
     await result.click();
@@ -221,8 +227,13 @@ test.describe("the Setups page", () => {
     await expect.poll(() => ids(page, "closed")).toEqual([cancelled.id, skipWon.id]); // still by result, rising
     await expect(table(page, "open")).toHaveCount(0);
     await expect.poll(() => trackCalls.some((a) => a.symbol === "ETHUSDT" && a.decision === "take")).toBe(true);
+    const asked = trackCalls.length;
     await filters.getByLabel("Decision").selectOption("skip");
     await expect.poll(() => ids(page, "closed")).toEqual([skipWon.id]);
+    // The figures follow the decision: takes are not asked for, nor counted.
+    await expect(page.locator("[data-role=taken]")).toContainText("not in the filter");
+    await expect.poll(() => trackCalls.slice(asked).some((a) => a.decision === "skip")).toBe(true);
+    expect(trackCalls.slice(asked).some((a) => a.decision === "take")).toBe(false);
     await filters.getByLabel("Tag").selectOption("trigger:example-b");
     await expect(table(page, "closed")).toHaveCount(0);
     await filters.getByRole("button", { name: "Clear" }).click();
@@ -247,5 +258,52 @@ test.describe("the Setups page", () => {
       .poll(() => trackCalls.at(-1))
       .toEqual({ group_by: "tag", tag_prefixes: ["trigger:example-a", "trigger:example-b"] });
     await expect(breakdown.locator('[data-group="trigger:example-b"]')).toBeVisible();
+
+    // On a phone what a trader scans first is on screen, and a fade says the table scrolls.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const closedTable = table(page, "closed");
+    await expect(closedTable.locator("th").nth(3)).toHaveText(/^Result/);
+    const within = async (cell: ReturnType<Page["locator"]>) => {
+      const box = await cell.boundingBox();
+      return box !== null && box.x >= 0 && box.x + box.width <= 390;
+    };
+    expect(await within(closedTable.locator("th").nth(3))).toBe(true);
+    await expect(page.locator("[data-role=scrolls]").first()).toBeVisible();
+    await expect(breakdown.locator("th").nth(3)).toHaveText("Mean R");
+    expect(await within(breakdown.locator("th").nth(3))).toBe(true);
+  });
+
+  test("a read that fails says so, offers to try again, and does not keep the tab", async ({ page }) => {
+    let failures = 2;
+    await page.route("**/mcp", async (route) => {
+      const body = route.request().postDataJSON() as { id?: unknown; params?: { name?: string } } | null;
+      const name = body?.params?.name;
+      // The record never answers here; the list fails `failures` times.
+      if (name !== "get_track_record" && (name !== "list_setups" || failures <= 0)) return route.fallback();
+      if (name === "list_setups") failures -= 1;
+      await route.fulfill({
+        json: { jsonrpc: "2.0", id: body.id, result: { isError: true, content: [{ type: "text", text: "the store is busy" }] } },
+      });
+    });
+    // Both first reads fail: the page says why, at /setups.
+    await gotoSetupsPage(page);
+    await expect(page.locator("[data-role=setups-error]")).toContainText("the store is busy");
+    // Refresh tries again.
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(page.getByTestId("setups-figures")).toBeVisible();
+    await expect(page.locator("[data-role=setups-error]")).toHaveCount(0);
+    // Counts the record could not give are unavailable, never 0; the breakdown says so too.
+    await expect(page.locator("[data-role=open]")).toContainText("unavailable");
+    await expect(page.locator("[data-role=closed]")).toContainText("unavailable");
+    await expect(page.getByText("The track record could not be read")).toBeVisible();
+    // A later failure keeps what is shown, and says so.
+    failures = 1;
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(page.locator("[data-role=setups-stale]")).toContainText("the store is busy");
+    await expect(page.getByTestId("setups-figures")).toBeVisible();
+    // Leaving is the app at `/`, and stays the app.
+    await bootApp(page, () => page.getByRole("link", { name: "Back to the chart" }).click());
+    await expect(page).toHaveURL((url) => url.pathname === "/");
+    await expect(page.getByTestId("setups-page")).toHaveCount(0);
   });
 });
