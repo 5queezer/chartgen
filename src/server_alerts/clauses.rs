@@ -12,16 +12,16 @@ use serde_json::{json, Value};
 use super::{fires, indicator, Condition};
 
 /// Most clauses an alert takes besides its own condition.
-pub(super) const MAX_CLAUSES: usize = 3;
+pub(crate) const MAX_CLAUSES: usize = 3;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Clause {
-    pub condition: Condition,
+pub(crate) struct Clause {
+    pub(super) condition: Condition,
     /// The price level, or an indicator's level with `compare: level`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub level: Option<f64>,
+    pub(super) level: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indicator: Option<indicator::Spec>,
+    pub(super) indicator: Option<indicator::Spec>,
 }
 
 /// The `and` clauses of `args`: none when absent.
@@ -42,7 +42,7 @@ pub(super) fn parse(args: &Value) -> Result<Vec<Clause>, String> {
         .collect()
 }
 
-fn clause(v: &Value) -> Result<Clause, String> {
+pub(crate) fn clause(v: &Value) -> Result<Clause, String> {
     let fields = v.as_object().ok_or("a condition must be an object")?;
     const TAKES: [&str; 6] = [
         "condition",
@@ -106,7 +106,7 @@ impl Clause {
 
     /// Whether it holds at the close of the last of `bars`, and its value there.
     /// A clause that cannot be read does not hold.
-    pub(super) fn holds(&self, bars: &[Bar]) -> (bool, Option<f64>) {
+    pub(crate) fn holds(&self, bars: &[Bar]) -> (bool, Option<f64>) {
         match self.reading(bars) {
             Some((prev, d, value)) => (fires(self.condition, prev, d), Some(value)),
             None => (false, None),

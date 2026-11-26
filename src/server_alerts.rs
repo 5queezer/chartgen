@@ -3382,7 +3382,7 @@ async fn run_upkeep(alerts: Weak<ServerAlerts>) {
     }
 }
 
-mod indicator;
+pub(crate) mod indicator;
 
 /// What an alert's `and` clauses read at a close: whether all of them hold, and what
 /// each read.
@@ -3402,7 +3402,7 @@ fn and_view(a: &Record, values: Option<&Vec<Option<f64>>>) -> Option<Value> {
     })
 }
 
-mod clauses;
+pub(crate) mod clauses;
 
 /// The futures read of `indicator::read_futures`. Unit tests put their own in its
 /// place: a test sends no request to Binance.

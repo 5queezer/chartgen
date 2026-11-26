@@ -109,7 +109,7 @@ one and link both ways.
 | [0080](/chartgen/decisions/0080-futures-data-on-server-alerts/) | Server alerts on futures data: funding | Accepted; amended by [0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/) | 2026-11-24 |
 | [0081](/chartgen/decisions/0081-alerts-on-a-setups-drawing/) | Server alerts on a drawing of a setup | Accepted | 2026-11-24 |
 | [0082](/chartgen/decisions/0082-recording-open-interest-history/) | Recording open interest beyond the 30 days Binance keeps | Accepted | 2026-11-25 |
-| [0083](/chartgen/decisions/0083-a-rule-based-strategy-tester/) | A rule-based strategy tester over replay fixtures | Proposed | 2026-11-24 |
+| [0083](/chartgen/decisions/0083-a-rule-based-strategy-tester/) | A rule-based strategy tester over replay fixtures | Accepted | 2026-11-24 |
 | [0084](/chartgen/decisions/0084-conditions-joined-by-and/) | Server alert conditions joined by AND | Accepted | 2026-11-24 |
 | [0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/) | Server alerts on open interest's change over N bars | Accepted; amended by [0082](/chartgen/decisions/0082-recording-open-interest-history/) | 2026-11-25 |
 | [0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/) | News per symbol from public RSS feeds | Accepted; amended by [0088](/chartgen/decisions/0088-recording-the-news/) | 2026-11-25 |

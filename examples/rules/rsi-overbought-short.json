@@ -1,0 +1,12 @@
+{
+  "name": "rsi-overbought-short",
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "BCHUSDT"],
+  "interval": "1h",
+  "direction": "short",
+  "when": [
+    { "indicator": "rsi", "params": { "length": 14 }, "condition": "crossing_up", "level": 70 }
+  ],
+  "stop": { "atr": 1 },
+  "targets_r": [1.5],
+  "expiry": "24h"
+}
