@@ -41,6 +41,12 @@ fn days() -> Result<i64, String> {
     }
 }
 
+/// Whether the news is recorded (`CHARTGEN_NEWS_RECORD_DAYS` is not 0, nor bad). A record
+/// left from before it was turned off is not answered from.
+pub fn enabled() -> bool {
+    days().is_ok_and(|d| d > 0)
+}
+
 /// Start recording into `store`, unless turned off.
 pub fn start(store: &'static dyn Store) {
     let days = match days() {
@@ -119,10 +125,8 @@ fn round(
         if state.url != feed.url {
             state = Default::default();
         }
-        // A feed is read at another point of the next round, when the feeds before it
-        // took longer or shorter: due within half a round.
         let now = clock();
-        if state.next_attempt > now + ROUND_S / 2 {
+        if state.next_attempt > now {
             continue;
         }
         let got = fetch(
@@ -132,29 +136,33 @@ fn round(
         );
         pace();
         let now = clock();
+        // What is new is recorded before the source counts as read: its validators move
+        // on, and it is current, only once the headlines are in the store. A store that
+        // fails is a failure to try again, never a "not modified" later.
         let read = got.and_then(|got| match got {
             Got::NotModified => Ok(None),
             Got::Feed {
                 xml,
                 etag,
                 last_modified,
-            } => parse(&xml, &feed.url)
-                .map(|items| Some((items, etag, last_modified)))
-                .map_err(Failed::from),
+            } => {
+                let items = parse(&xml, &feed.url).map_err(Failed::from)?;
+                let rows = rows(feed, &items, now - days * DAY_S, now);
+                let saved = store
+                    .save_items(&rows)
+                    .map_err(|e| Failed::from(format!("cannot record: {e}")))?;
+                new += saved;
+                Ok(Some((etag, last_modified)))
+            }
         });
         state.id.clone_from(&feed.id);
         state.url.clone_from(&feed.url);
         state.name.clone_from(&feed.name);
         match read {
             Ok(read) => {
-                if let Some((items, etag, last_modified)) = read {
-                    let rows = rows(feed, &items, now - days * DAY_S, now);
-                    match store.save_items(&rows) {
-                        Ok(n) => new += n,
-                        Err(e) => eprintln!("[news-record] cannot record {}: {e}", feed.name),
-                    }
-                    // Only from a feed that was read: a page that is not one must not
-                    // be asked for with its validators and answer "not modified".
+                // Only from a feed that was read and recorded: a page that is not one must
+                // not be asked for with its validators and answer "not modified".
+                if let Some((etag, last_modified)) = read {
                     (state.etag, state.last_modified) = (etag, last_modified);
                 }
                 if state.failures > 0 {
@@ -172,9 +180,12 @@ fn round(
                 if state.failures == 1 {
                     eprintln!("[news-record] {} failed: {error}", feed.name);
                 }
+                // The backoff less half a round, as the source is read at another point of a
+                // later round when the sources before it took longer or shorter; what the
+                // source asked for (`Retry-After`), never early.
                 let backoff = (ROUND_S << (state.failures - 1).min(10)).min(MAX_BACKOFF_S);
                 let asked = retry_after.unwrap_or(0).clamp(0, MAX_RETRY_AFTER_S);
-                state.next_attempt = now + backoff.max(asked);
+                state.next_attempt = (now + backoff - ROUND_S / 2).max(now + asked);
                 state.failing_since.get_or_insert(now);
                 state.last_error = Some(error);
             }
@@ -199,6 +210,7 @@ fn rows(source: &Source, items: &[Item], oldest: i64, now: i64) -> Vec<Recorded>
         .map(|i| Recorded {
             url: i.url.clone(),
             source: source.id.clone(),
+            carried_by: Vec::new(),
             outlet: source.name.clone(),
             kind: source.kind.as_str().into(),
             language: source.language.clone(),
@@ -241,9 +253,14 @@ pub(super) fn answer(
     let items: Vec<(&Source, Item)> = rows
         .iter()
         .filter_map(|r| {
-            let source = feeds
-                .iter()
-                .find(|s| s.id == r.source && s.language == r.language)?;
+            // The source it was first read from, if asked for; else the first of the others
+            // that carried it and are.
+            let picked = |id: &String| {
+                feeds
+                    .iter()
+                    .find(|s| &s.id == id && s.language == r.language)
+            };
+            let source = picked(&r.source).or_else(|| r.carried_by.iter().find_map(picked))?;
             let item = Item {
                 title: r.title.clone(),
                 url: r.url.clone(),

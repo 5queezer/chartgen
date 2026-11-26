@@ -1,8 +1,17 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
 
 use super::*;
 
-static DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
+/// How often each URL was downloaded: per URL, so tests reading other feeds at the same
+/// time do not count.
+static DOWNLOADS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Mutex::default);
+
+fn downloads(urls: &[&str]) -> usize {
+    let held = lock(&DOWNLOADS);
+    urls.iter()
+        .map(|u| held.get(*u).copied().unwrap_or(0))
+        .sum()
+}
 
 pub(super) fn fixture(name: &str) -> String {
     let path = format!("{}/tests/fixtures/{name}.xml", env!("CARGO_MANIFEST_DIR"));
@@ -53,7 +62,7 @@ pub(super) fn sources() -> Vec<Source> {
 
 /// The test's feeds, served from fixtures: no test reaches an outlet. Decrypt is down.
 pub(super) fn download(url: &str) -> Result<String, String> {
-    DOWNLOADS.fetch_add(1, Ordering::SeqCst);
+    *lock(&DOWNLOADS).entry(url.to_string()).or_default() += 1;
     let name = match url {
         u if u.contains("coindesk") => "coindesk",
         u if u.contains("cointelegraph") => "cointelegraph",
@@ -298,7 +307,7 @@ fn the_answer_is_the_newest_headlines_about_the_symbol_in_the_window() {
     assert_eq!(v["more"], 2);
     // Pinned in a file the web app's types are tested against
     // (`web/src/types/responses.test.ts`). To write it again after a deliberate change:
-    // `CHARTGEN_WRITE_FIXTURES=1 cargo test news::`.
+    // `CHARTGEN_WRITE_FIXTURES=1 cargo test -p chartgen-news the_answer_is_the_newest_headlines`.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/news_response.json");
     let text = serde_json::to_string_pretty(&v).unwrap() + "\n";
@@ -319,8 +328,10 @@ fn the_answer_is_the_newest_headlines_about_the_symbol_in_the_window() {
 #[test]
 fn feeds_are_read_once_in_ten_minutes_and_a_failed_one_is_named() {
     let call = || read(None, "SOLUSDT", 168, 10, &Pick::Default, "en").unwrap();
+    let all = sources();
+    let urls: Vec<&str> = all[..5].iter().map(|s| s.url.as_str()).collect();
     let v = call();
-    let read = DOWNLOADS.load(Ordering::SeqCst);
+    let read = downloads(&urls);
     assert_eq!(v["symbol"], "SOLUSDT");
     assert_eq!(
         v["sources"],
@@ -332,7 +343,7 @@ fn feeds_are_read_once_in_ten_minutes_and_a_failed_one_is_named() {
     );
     call();
     // Held: the second call read nothing, the failed feed included (within its minute).
-    assert_eq!(DOWNLOADS.load(Ordering::SeqCst), read);
+    assert_eq!(downloads(&urls), read);
 }
 
 #[test]
@@ -382,6 +393,29 @@ fn a_source_about_certain_coins_answers_for_those_only() {
     // A subreddit's author is its user's name, not the link to them.
     let Ok(posts) = &reads[0].1 else { panic!() };
     assert_eq!(posts[0].author, "/u/example_one");
+}
+
+#[test]
+fn an_ordinary_word_in_a_title_case_title_needs_the_ticker_too() {
+    // Seen in the record of the 34 sources over 168 hours; none is about Maker or Flow.
+    assert!(!is_about("MKRUSDT", "Market Maker Rules"));
+    assert!(!is_about("MKRUSDT", "Yacht Maker"));
+    assert!(!is_about("FLOWUSDT", "Cash Flow"));
+    assert!(!is_about("FLOWUSDT", "SHIB Flow Onto Exchanges"));
+    // With the ticker, or in a sentence-case title, or as a category, it is.
+    assert!(is_about("MKRUSDT", "Maker DAO Votes on MKR Buyback"));
+    assert!(is_about(
+        "MKRUSDT",
+        "Maker votes to raise the stability fee"
+    ));
+    assert!(is_about("FLOWUSDT", "Flow Blockchain Upgrade Lifts $FLOW"));
+    assert!(is_about("FLOWUSDT", "Flow network halts after an exploit"));
+    assert!(about(
+        &headline("Validators Upgrade Tonight", &["Flow"]),
+        &terms_of("FLOWUSDT")
+    ));
+    // A name that is no ordinary word counts in Title Case alone.
+    assert!(is_about("TIAUSDT", "Celestia Rollups Grow Fast"));
 }
 
 #[test]

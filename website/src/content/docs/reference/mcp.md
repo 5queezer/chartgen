@@ -1104,7 +1104,7 @@ the tool.
 
 Recent crypto headlines about one symbol, from public RSS and Atom feeds, so an agent needs no
 web search for them ([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)).
-By default from four large crypto outlets; 34 sources can be named. A server with a store
+By default from four large crypto outlets; 29 more sources can be named. A server with a store
 records every source every 5 minutes and answers from that record
 ([ADR-0088](/chartgen/decisions/0088-recording-the-news/)).
 
@@ -1113,7 +1113,7 @@ records every source every 5 minutes and answers from that record
 | `symbol` | required | Ticker symbol, e.g. `BTCUSDT`. |
 | `hours` | 24 | How far back, 1 to 168. |
 | `limit` | 10 | Most headlines returned, 1 to 50. |
-| `sources` | the default set | Source ids to answer from, such as `["coindesk", "bloomberg"]`, or `["all"]` for every enabled source. An id that is not a source, or is switched off, is an error that lists the ids. |
+| `sources` | the default set | Source ids to answer from, such as `["coindesk", "cryptoslate"]`, or `["all"]` for every enabled source; an id named twice counts once. An id that is not a source, or is switched off, is an error that lists the ids. |
 | `language` | `en` | Only sources of this language. |
 
 ```json
@@ -1158,8 +1158,11 @@ scale (`1000PEPEUSDT` is PEPE). A headline is about the coin when its title, or 
 outlet's categories for it, holds the ticker in capitals (`BTC`, `$BTC`) or one of the coin's
 names in any case (`Bitcoin`, `bitcoin's`), as a whole word: `Etherscan` is not Ether, `link`
 is not LINK. A name that is also an ordinary word (Ripple, Avalanche, Optimism, Harmony, Saga,
-Render, Jupiter, Compound, Flow and others) is matched only as written, so "crypto optimism" is
-not Optimism; a title in title case still matches it. Descriptions are not matched. About 130
+Render, Jupiter, Maker, Compound, Flow and others) is matched only as written, so "crypto
+optimism" is not Optimism; and in a title in Title Case ("Market Maker Rules", "Cash Flow")
+only with the ticker or its cashtag in the title too, since there every word is capitalised.
+Alone it counts in a sentence-case title ("Maker votes to raise the stability fee") or as a
+category. Descriptions are not matched. About 130
 coins have names: the large ones and those an agent is most often asked about, from BTC
 (Bitcoin) and ETH (Ethereum, Ether) to TIA (Celestia), ONE (Harmony), SAGA (Saga) and FET
 (Fetch.ai, Artificial Superintelligence Alliance); the table is `NAMES` in
@@ -1180,7 +1183,8 @@ Cointelegraph (`cointelegraph`), Decrypt (`decrypt`) and The Block (`the-block`)
 `cryptonews`, `crypto-briefing`, `beincrypto`, `the-daily-hodl`, `coingape`, `bitcoin-com`,
 `coinpedia`, `coinjournal`, `unchained`, `protos`, `crypto-news`, `blockonomi`, `zycrypto`,
 `coincu`, `crypto-daily`, `finbold`, `coincentral`, `cryptopolitan`, `coinspeaker`, `fxstreet`,
-`thestreet`, `cnbc`, `marketwatch`, `wsj`, `bloomberg` and `ft`. An operator changes them in a
+`thestreet`; and, switched off unless an operator turns them on (their feed terms allow
+personal, non-commercial use only), `cnbc`, `marketwatch`, `wsj`, `bloomberg` and `ft`. An operator changes them in a
 file ([the news recorded](/chartgen/guides/deploy/#the-news-recorded)). A source about certain
 coins only (a coin's subreddit) answers for those coins, whatever its titles say. A relative link is
 read against the feed's URL (`xml:base` is not read), and an item whose link is not `http` or

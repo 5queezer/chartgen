@@ -224,12 +224,18 @@ fn from_feeds(list: &str) -> Result<Vec<Source>, String> {
             .map(str::to_string)
             .or_else(|| parsed.host_str().map(str::to_string))
             .unwrap_or_else(|| url.to_string());
-        let id = name
+        let base = name
             .to_lowercase()
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|w| !w.is_empty())
             .collect::<Vec<_>>()
             .join("-");
+        // Two names of one id ("Desk A", "Desk-A"): the second is `desk-a-2`.
+        let taken = |id: &str| sources.iter().any(|s: &Source| s.id == id);
+        let id = std::iter::once(base.clone())
+            .chain((2..).map(|n| format!("{base}-{n}")))
+            .find(|id| !taken(id))
+            .unwrap_or(base);
         sources.push(Source {
             id,
             name,
@@ -259,7 +265,10 @@ pub fn select<'a>(
         }
         Pick::Ids(ids) => ids
             .iter()
-            .map(|id| match all.iter().find(|s| &s.id == id) {
+            .enumerate()
+            // An id named twice is one source.
+            .filter(|(at, id)| !ids[..*at].contains(id))
+            .map(|(_, id)| match all.iter().find(|s| &s.id == id) {
                 Some(s) if s.enabled => Ok(s),
                 Some(_) => Err(format!("source {id:?} is switched off")),
                 None => Err(format!(
@@ -290,7 +299,14 @@ mod tests {
         let names: Vec<&str> = default.iter().map(|s| s.name.as_str()).collect();
         // Bitcoin Magazine refuses some servers (ADR-0088): recorded, not in the default.
         assert_eq!(names, ["CoinDesk", "Cointelegraph", "Decrypt", "The Block"]);
-        assert_eq!(select(&all, &Pick::All, "en").unwrap().len(), 34);
+        // Publishers whose feed terms are personal and non-commercial are opt-in (ADR-0088).
+        assert_eq!(select(&all, &Pick::All, "en").unwrap().len(), 29);
+        let off: Vec<&str> = all
+            .iter()
+            .filter(|s| !s.enabled)
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(off, ["cnbc", "marketwatch", "wsj", "bloomberg", "ft"]);
         assert!(select(&all, &Pick::All, "de").unwrap().is_empty());
         assert!(all.iter().all(|s| s.url.starts_with("https://")));
     }
@@ -347,6 +363,8 @@ mod tests {
             ids(Pick::Ids(vec!["b".into(), "a".into()]), "en").unwrap(),
             ["b", "a"]
         );
+        let twice = Pick::Ids(vec!["b".into(), "a".into(), "b".into()]);
+        assert_eq!(ids(twice, "en").unwrap(), ["b", "a"]);
         assert!(ids(Pick::Ids(vec!["c".into()]), "en")
             .unwrap_err()
             .contains("switched off"));
@@ -380,6 +398,20 @@ mod tests {
             ]
         );
         assert_eq!(from_feeds("").unwrap(), []);
+        let ids: Vec<String> =
+            from_feeds("Desk A=https://a.example/rss,Desk-A=https://b.example/rss")
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+        assert_eq!(ids, ["desk-a", "desk-a-2"]);
+        let ids: Vec<String> =
+            from_feeds("Desk A=https://a.example/rss,Desk-A=https://b.example/rss")
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+        assert_eq!(ids, ["desk-a", "desk-a-2"]);
         assert!(from_feeds("Old=ftp://a.example/rss").is_err());
     }
 

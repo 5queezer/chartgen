@@ -17,11 +17,14 @@ fn integer(args: &Value, key: &str, default: u64, max: u64) -> Result<u64, Strin
     }
 }
 
-/// The store the news is recorded in, if this process has one.
+/// The store the news is recorded in, if this process has one and recording is on: a
+/// record left from before it was turned off is not answered from (its rows stay).
 fn store() -> Option<&'static dyn chartgen_news::Store> {
     #[cfg(feature = "scripting")]
     if let Some(store) = chartgen::scripting::persistence::global() {
-        return Some(store);
+        if chartgen_news::record::enabled() {
+            return Some(store);
+        }
     }
     None
 }

@@ -8,16 +8,28 @@ use std::sync::{Arc, Mutex};
 struct Memory {
     items: Mutex<Vec<Recorded>>,
     feeds: Mutex<Vec<FeedState>>,
+    /// Every save fails, as a full disk would.
+    broken: Mutex<bool>,
 }
 
 impl Store for Memory {
     fn save_items(&self, items: &[Recorded]) -> Result<usize, String> {
+        if *self.broken.lock().unwrap() {
+            return Err("disk full".into());
+        }
         let mut held = self.items.lock().unwrap();
         let mut new = 0;
         for i in items {
-            if !held.iter().any(|h| h.url == i.url) {
-                held.push(i.clone());
-                new += 1;
+            match held.iter_mut().find(|h| h.url == i.url) {
+                Some(h) if !h.carried_by.contains(&i.source) => h.carried_by.push(i.source.clone()),
+                Some(_) => {}
+                None => {
+                    held.push(Recorded {
+                        carried_by: vec![i.source.clone()],
+                        ..i.clone()
+                    });
+                    new += 1;
+                }
             }
         }
         Ok(new)
@@ -149,6 +161,7 @@ fn a_round_records_each_headline_once_with_when_it_was_first_read() {
         Recorded {
             url: "https://www.coindesk.com/markets/2026/11/25/btc-slips-example".into(),
             source: "coindesk".into(),
+            carried_by: vec!["coindesk".into()],
             outlet: "CoinDesk".into(),
             kind: "rss".into(),
             language: "en".into(),
@@ -310,6 +323,7 @@ fn headlines_older_than_the_retention_are_dropped_and_not_recorded_again() {
     let old = Recorded {
         url: "https://old.example/a".into(),
         source: "old".into(),
+        carried_by: vec![],
         outlet: "Old".into(),
         kind: "rss".into(),
         language: "en".into(),
@@ -380,7 +394,7 @@ fn get_news_answers_from_the_record_as_from_the_feeds_while_it_is_current() {
         json!([{ "source": "CoinDesk", "error": "HTTP 503", "since": "2026-11-25T08:05:00Z" }])
     );
     // Pinned for the web app's types, as `news_response.json` is; written again with
-    // `CHARTGEN_WRITE_FIXTURES=1 cargo test news::`.
+    // `CHARTGEN_WRITE_FIXTURES=1 cargo test -p chartgen-news get_news_answers_from_the_record`.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/news_recorded_response.json");
     let text = serde_json::to_string_pretty(&v).unwrap() + "\n";
@@ -400,4 +414,94 @@ fn get_news_answers_from_the_record_as_from_the_feeds_while_it_is_current() {
     .is_none());
     // A store that never recorded: the feeds are read.
     assert!(answer(&Memory::default(), &refs(&feeds), "SOLUSDT", 24, 10, NOW).is_none());
+}
+
+#[test]
+fn a_store_that_fails_leaves_the_source_to_be_read_again_in_full() {
+    let store = Memory::default();
+    let feeds = two();
+    *store.broken.lock().unwrap() = true;
+    let mut asked = Vec::new();
+    let new = round(
+        &store,
+        &feeds,
+        365,
+        &mut at(NOW),
+        &mut outlets(&mut asked, &[]),
+        &mut || {},
+    );
+    assert_eq!(new, 0);
+    let s = state(&store, &feeds[0].url);
+    // Neither current nor holding what the feed sent, so it is not told "not modified".
+    assert_eq!((s.etag, s.last_success), (None, None));
+    assert!(s.last_error.unwrap().contains("disk full"));
+    // The store is back: the next try reads the feed whole and records it.
+    *store.broken.lock().unwrap() = false;
+    let mut asked = Vec::new();
+    let new = round(
+        &store,
+        &feeds,
+        365,
+        &mut at(NOW + 300),
+        &mut outlets(&mut asked, &[]),
+        &mut || {},
+    );
+    assert_eq!((new, asked[0].1.clone()), (7, None));
+}
+
+#[test]
+fn a_retry_after_that_is_no_multiple_of_a_round_is_kept_to_the_second() {
+    let store = Memory::default();
+    let feeds = vec![feed("Slow", "https://slow.example/rss")];
+    let mut asked = 0;
+    for t in [NOW, NOW + 300, NOW + 600] {
+        round(
+            &store,
+            &feeds,
+            365,
+            &mut at(t),
+            &mut |_: &str, _: Option<&str>, _: Option<&str>| {
+                asked += 1;
+                Err(Failed {
+                    error: "HTTP 429".into(),
+                    retry_after: Some(400),
+                })
+            },
+            &mut || {},
+        );
+    }
+    // Asked at 0, not at 300 (100 s early), again at 600.
+    assert_eq!(asked, 2);
+}
+
+#[test]
+fn a_headline_two_sources_carry_is_one_row_and_answers_for_either() {
+    let store = Memory::default();
+    let a = feed("Desk A", "https://a.example/rss");
+    let b = feed("Desk B", "https://b.example/rss");
+    let item = Item {
+        title: "Solana validators vote".into(),
+        url: "https://news.example.com/solana".into(),
+        published: NOW - 600,
+        ..Item::default()
+    };
+    store
+        .save_items(&rows(&a, std::slice::from_ref(&item), 0, NOW - 300))
+        .unwrap();
+    assert_eq!(store.save_items(&rows(&b, &[item], 0, NOW)).unwrap(), 0);
+    store
+        .save_feed(&FeedState {
+            id: b.id.clone(),
+            url: b.url.clone(),
+            last_success: Some(NOW),
+            ..FeedState::default()
+        })
+        .unwrap();
+    // Asked for B alone, the headline is B's.
+    let v = answer(&store, &[&b], "SOLUSDT", 24, 10, NOW).unwrap();
+    assert_eq!(v["items"][0]["source"], "Desk B");
+    // Asked for both, it is shown once, as the first that read it.
+    let v = answer(&store, &[&a, &b], "SOLUSDT", 24, 10, NOW).unwrap();
+    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    assert_eq!(v["items"][0]["source"], "Desk A");
 }

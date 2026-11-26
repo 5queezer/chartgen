@@ -28,9 +28,9 @@
   {"id": "coinspeaker", "name": "Coinspeaker", "url": "https://www.coinspeaker.com/feed/", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
   {"id": "fxstreet", "name": "FXStreet", "url": "https://www.fxstreet.com/rss/crypto", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
   {"id": "thestreet", "name": "TheStreet", "url": "https://www.thestreet.com/crypto/.rss/full/", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
-  {"id": "cnbc", "name": "CNBC", "url": "https://www.cnbc.com/id/10000664/device/rss/rss.html", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
-  {"id": "marketwatch", "name": "MarketWatch", "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
-  {"id": "wsj", "name": "The Wall Street Journal", "url": "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
-  {"id": "bloomberg", "name": "Bloomberg", "url": "https://feeds.bloomberg.com/crypto/news.rss", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
-  {"id": "ft", "name": "Financial Times", "url": "https://www.ft.com/cryptocurrencies?format=rss", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false}
+  {"id": "cnbc", "name": "CNBC", "url": "https://www.cnbc.com/id/10000664/device/rss/rss.html", "kind": "rss", "language": "en", "enabled": false, "syndicates": false, "default": false},
+  {"id": "marketwatch", "name": "MarketWatch", "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories", "kind": "rss", "language": "en", "enabled": false, "syndicates": false, "default": false},
+  {"id": "wsj", "name": "The Wall Street Journal", "url": "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain", "kind": "rss", "language": "en", "enabled": false, "syndicates": false, "default": false},
+  {"id": "bloomberg", "name": "Bloomberg", "url": "https://feeds.bloomberg.com/crypto/news.rss", "kind": "rss", "language": "en", "enabled": false, "syndicates": false, "default": false},
+  {"id": "ft", "name": "Financial Times", "url": "https://www.ft.com/cryptocurrencies?format=rss", "kind": "rss", "language": "en", "enabled": false, "syndicates": false, "default": false}
 ]

@@ -198,6 +198,12 @@ pub(super) const MIGRATIONS: &[&str] = &[
         author        TEXT
     ) WITHOUT ROWID;
     CREATE INDEX news_items_published ON news_items (published);
+    CREATE TABLE news_item_sources (
+        url         TEXT    NOT NULL,
+        source      TEXT    NOT NULL,
+        first_seen  INTEGER NOT NULL,
+        PRIMARY KEY (url, source)
+    ) WITHOUT ROWID;
     CREATE TABLE news_feeds (
         id             TEXT    PRIMARY KEY,
         url            TEXT    NOT NULL,
@@ -1804,6 +1810,11 @@ impl chartgen_news::Store for Store {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )?;
                 for i in items {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO news_item_sources (url, source, first_seen)
+                         VALUES (?1, ?2, ?3)",
+                        params![i.url, i.source, i.first_seen],
+                    )?;
                     new += stmt.execute(params![
                         i.url,
                         i.source,
@@ -1831,7 +1842,10 @@ impl chartgen_news::Store for Store {
         let read = (|| {
             let mut stmt = conn.prepare_cached(
                 "SELECT url, source, outlet, kind, language, title, published, from_updated,
-                        first_seen, categories, coins, author
+                        first_seen, categories, coins, author,
+                        (SELECT json_group_array(source) FROM (
+                            SELECT source FROM news_item_sources s WHERE s.url = news_items.url
+                            ORDER BY first_seen, source))
                  FROM news_items WHERE published BETWEEN ?1 AND ?2 ORDER BY published DESC",
             )?;
             let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -1839,6 +1853,7 @@ impl chartgen_news::Store for Store {
                 Ok(chartgen_news::Recorded {
                     url: r.get(0)?,
                     source: r.get(1)?,
+                    carried_by: list(r.get(12)?),
                     outlet: r.get(2)?,
                     kind: r.get(3)?,
                     language: r.get(4)?,
@@ -1857,12 +1872,22 @@ impl chartgen_news::Store for Store {
     }
 
     fn forget_items(&self, before: i64) -> Result<usize, String> {
-        self.conn()
-            .execute(
+        let mut conn = self.conn();
+        let gone = (|| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM news_item_sources WHERE url IN
+                     (SELECT url FROM news_items WHERE published < ?1)",
+                params![before],
+            )?;
+            let gone = tx.execute(
                 "DELETE FROM news_items WHERE published < ?1",
                 params![before],
-            )
-            .map_err(|e| e.to_string())
+            )?;
+            tx.commit()?;
+            Ok::<_, rusqlite::Error>(gone)
+        })();
+        gone.map_err(|e| e.to_string())
     }
 
     fn feeds(&self) -> Result<Vec<chartgen_news::FeedState>, String> {
@@ -1926,6 +1951,7 @@ mod news_tests {
         Recorded {
             url: url.into(),
             source: "outlet".into(),
+            carried_by: vec!["outlet".into()],
             outlet: "Outlet".into(),
             kind: "rss".into(),
             language: "en".into(),
@@ -1962,19 +1988,20 @@ mod news_tests {
                 headline("https://a.example/2", 201),
             ];
             assert_eq!(store.save_items(&items).unwrap(), 2);
-            // A link recorded already is left as it was.
+            // A link recorded already is left as it was, and gains the source that carried
+            // it too.
             let mut again = headline("https://a.example/1", 300);
             again.title = "Edited".into();
+            again.source = "other".into();
             assert_eq!(store.save_items(&[again]).unwrap(), 0);
             store.save_feed(&feed).unwrap();
         }
         let store = Store::open(&path).unwrap();
+        let mut first = headline("https://a.example/1", 100);
+        first.carried_by.push("other".into());
         assert_eq!(
             store.items(0, 1_000).unwrap(),
-            [
-                headline("https://a.example/2", 201),
-                headline("https://a.example/1", 100)
-            ]
+            [headline("https://a.example/2", 201), first]
         );
         assert_eq!(store.items(150, 1_000).unwrap().len(), 1);
         assert_eq!(store.feeds().unwrap(), [feed]);

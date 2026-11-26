@@ -78,7 +78,7 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_OI_RECORD_SYMBOLS` | `src/indicators/external/record.rs` | Comma-separated Binance futures symbols to record besides those of the setups and server alerts, such as `BTCUSDT,ETHUSDT`. |
 | `CHARTGEN_SETUPS` | `src/setup_service.rs` | `1` enables [setups](/chartgen/guides/setups/): five MCP tools for trading setups the server scores on paper. Off when unset; setups already stored wait in `chartgen.db`. Needs a build with the `scripting` feature and the store. It does not need `CHARTGEN_SERVER_ALERTS`. Read [before turning it on](#setups). |
 | `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` | `src/setup_service.rs` | Symbols one owner may have open setups on. Default 5. |
-| `CHARTGEN_NEWS_SOURCES` | `crates/news/src/sources.rs` | A JSON file of the [news sources](#the-news-recorded) that [`get_news`](/chartgen/reference/mcp/#get_news) reads and the server records, read again when it changes. Unset: `CHARTGEN_NEWS_FEEDS`, else the 34 of [ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds). |
+| `CHARTGEN_NEWS_SOURCES` | `crates/news/src/sources.rs` | A JSON file of the [news sources](#the-news-recorded) that [`get_news`](/chartgen/reference/mcp/#get_news) reads and the server records, read again when it changes. Unset: `CHARTGEN_NEWS_FEEDS`, else the 34 (29 enabled) of [ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds). |
 | `CHARTGEN_NEWS_FEEDS` | `crates/news/src/sources.rs` | ADR-0086's shorter form, used when `CHARTGEN_NEWS_SOURCES` is unset: entries separated by commas, each `Name=https://…` or a bare URL, then named by its host; each an English RSS or Atom source in the default set, its id its name in lower case with `-` (`The Block` is `the-block`). Empty: no source, nothing is recorded, and `get_news` answers an error. A URL that is not `http` or `https` makes every `get_news` call an error naming it. |
 | `CHARTGEN_NEWS_RECORD_DAYS` | `crates/news/src/record.rs` | How many days a [recorded headline](#the-news-recorded) is kept after it was published. Default 365; `0` records nothing. Needs the store. |
 | `CHARTGEN_BIND` | `src/server.rs` | The IP address `--serve` and `--trade` listen on, such as `127.0.0.1` or a VPN overlay address in the CGNAT range `100.64.0.0/10`. Default `0.0.0.0`, every interface, which a container needs. A replay server warns when it is neither loopback nor such an overlay address ([private replay](/chartgen/guides/replay/#run-a-private-replay-server)). |
@@ -164,7 +164,10 @@ first read, the categories, the author and the coins matched then. Each source's
 source was read within the last 30 minutes, from the default set unless a call names sources.
 
 - **The sources** are the list built in (`crates/news/sources.json`: 34 crypto outlets and
-  markets desks; CoinDesk, Cointelegraph, Decrypt and The Block are the default set) unless `CHARTGEN_NEWS_SOURCES` names a
+  markets desks; CoinDesk, Cointelegraph, Decrypt and The Block are the default set; The Wall
+  Street Journal, MarketWatch, Bloomberg, the Financial Times and CNBC ship switched off, as
+  their feed terms allow personal, non-commercial use only, so check them before you switch them
+  on) unless `CHARTGEN_NEWS_SOURCES` names a
   file of your own, in the same form:
 
   ```json
@@ -187,8 +190,8 @@ source was read within the last 30 minutes, from the default set unless a call n
 - **Politely:** each request sends the feed's last `ETag` and `Last-Modified`, so an unchanged
   feed answers `304` without a body. A feed that fails is tried again after 5 minutes, then 10,
   20, 40, up to 6 hours between tries, or after its `Retry-After` if longer.
-- **What it costs:** about 870 headlines and 420 kB a day, 150 MB a year at the default
-  365 days (measured on the 34 sources built in, [ADR-0088](/chartgen/decisions/0088-recording-the-news/#cost));
+- **What it costs:** about 820 headlines and 390 kB a day, 140 MB a year at the default
+  365 days (measured on the sources built in, [ADR-0088](/chartgen/decisions/0088-recording-the-news/#cost));
   one request per source every 5 minutes, most of them answered `304` without a body.
 - **The log** says when a feed starts failing (`[news-record] CryptoSlate failed: HTTP 429`) and
   when it is read again, and once an hour how many headlines came in. `get_news` names a failing
@@ -196,10 +199,11 @@ source was read within the last 30 minutes, from the default set unless a call n
   `SELECT name, failures, last_error, datetime(failing_since, 'unixepoch') FROM news_feeds WHERE failures > 0`.
 - **Restarts:** the record and each feed's state are in the store, so a restart continues where
   it stopped. Headlines a feed published and dropped again while the server was stopped are lost.
-- **Off** with `CHARTGEN_NEWS_RECORD_DAYS=0`, without a store, on a replay server, and in a build
+- **Off** with `CHARTGEN_NEWS_RECORD_DAYS=0` (`get_news` then reads the feeds, not the rows
+  left), without a store, on a replay server, and in a build
   without the `news` feature (which has no `get_news`). One source: `"enabled": false` in the
   file.
-- **After a rollback:** a build from before this ignores both tables and reads the feeds when
+- **After a rollback:** a build from before this ignores the three tables and reads the feeds when
   asked. No step is needed on the file in either direction.
 
 ## Sign-in through GitHub and Google

@@ -595,21 +595,61 @@ fn has_word(text: &str, word: &str, exact: bool) -> bool {
     })
 }
 
-/// Whether a headline is about the coin: its title or a category names a term. A ticker (a
-/// term in capitals) in capitals only, so LINK is not "link"; one of under 3 letters (AI, S)
-/// only as `$AI` in the title, since "AI" and "U.S." are everyday words, and outlets file
-/// stories about artificial intelligence under an "AI" category. A name in any case, except an ordinary word, which only as written.
+/// Whether a headline is about the coin: its title or a category names a term (`terms_of`,
+/// the ticker first). A ticker (a term in capitals) in capitals only, so LINK is not "link";
+/// one of under 3 letters (AI, S) only as `$AI` in the title, since "AI" and "U.S." are
+/// everyday words, and outlets file stories about artificial intelligence under an "AI"
+/// category. A name in any case, except an ordinary word, which only as written; and in a
+/// title in Title Case, where every word is capitalised ("Market Maker Rules", "Cash
+/// Flow"), only with the ticker in the title too.
 fn about(item: &Item, terms: &[String]) -> bool {
+    let title = &item.title;
+    let ticker_in_title = terms.first().is_some_and(|coin| match coin.len() < 3 {
+        true => has_word(title, &format!("${coin}"), true),
+        false => has_word(title, coin, true),
+    });
     terms.iter().any(|t| {
         let ticker = !t.chars().any(char::is_lowercase);
         if ticker && t.len() < 3 {
-            return has_word(&item.title, &format!("${t}"), true);
+            return has_word(title, &format!("${t}"), true);
         }
-        let exact = ticker || ORDINARY.contains(&t.as_str());
-        std::iter::once(&item.title)
-            .chain(&item.categories)
-            .any(|text| has_word(text, t, exact))
+        let ordinary = !ticker && ORDINARY.contains(&t.as_str());
+        if item
+            .categories
+            .iter()
+            .any(|c| has_word(c, t, ticker || ordinary))
+        {
+            return true;
+        }
+        has_word(title, t, ticker || ordinary)
+            && (!ordinary || ticker_in_title || !title_case(title, t))
     })
+}
+
+/// Whether a title is in Title Case: of its words after the first, other than short ones
+/// (of, in, onto) and those of `name`, at least half are capitalised. One with no such word
+/// ("Cash Flow") counts as Title Case, as it cannot tell.
+fn title_case(title: &str, name: &str) -> bool {
+    const SHORT: [&str; 22] = [
+        "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into", "is", "its", "of",
+        "on", "onto", "or", "over", "the", "to", "vs", "with",
+    ];
+    let name: Vec<String> = name.split_whitespace().map(str::to_lowercase).collect();
+    let words: Vec<&str> = title
+        .split_whitespace()
+        .skip(1)
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.starts_with(char::is_alphabetic))
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            !SHORT.contains(&lower.as_str()) && !name.contains(&lower)
+        })
+        .collect();
+    let capitalised = words
+        .iter()
+        .filter(|w| w.starts_with(char::is_uppercase))
+        .count();
+    words.is_empty() || capitalised * 2 >= words.len()
 }
 
 /// The coins a headline is about, as their tickers: those of `NAMES` that `about` finds in
@@ -753,18 +793,24 @@ pub fn read(
     {
         return Ok(v);
     }
-    // At once, so a call waits for the slowest feed rather than for all of them in turn.
-    let reads: Vec<(&Source, Fetched)> = std::thread::scope(|s| {
-        let handles: Vec<_> = picked
-            .iter()
-            .map(|f| s.spawn(move || read_feed(f)))
-            .collect();
-        picked
-            .iter()
-            .zip(handles)
-            .map(|(f, h)| (*f, h.join().unwrap_or_else(|_| Err("failed".into()))))
-            .collect()
-    });
+    // Several at once, so a call waits for the slowest of a group rather than for every
+    // feed in turn; at most `AT_ONCE` threads for a call that names many.
+    const AT_ONCE: usize = 12;
+    let mut reads: Vec<(&Source, Fetched)> = Vec::with_capacity(picked.len());
+    for group in picked.chunks(AT_ONCE) {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = group
+                .iter()
+                .map(|f| s.spawn(move || read_feed(f)))
+                .collect();
+            reads.extend(
+                group
+                    .iter()
+                    .zip(handles)
+                    .map(|(f, h)| (*f, h.join().unwrap_or_else(|_| Err("failed".into())))),
+            );
+        });
+    }
     Ok(answer(symbol, hours, limit, now, &reads))
 }
 
@@ -773,8 +819,11 @@ pub fn read(
 pub struct Recorded {
     /// The link, as the feed gave it less its `utm_` parameters: what makes a headline one.
     pub url: String,
-    /// The source's id.
+    /// The id of the source it was first read from.
     pub source: String,
+    /// Read back: every source that carried it, that one first. Ignored when saved: each
+    /// save adds `source`.
+    pub carried_by: Vec<String>,
     /// The source's name.
     pub outlet: String,
     /// The source's kind (`rss`, `atom`, `reddit`, `youtube`).
@@ -820,8 +869,8 @@ pub struct FeedState {
 
 /// Where the record is kept: the host's store (in chartgen, its SQLite file).
 pub trait Store: Sync {
-    /// Record headlines; one whose link is recorded already is left as it was. How many
-    /// were new.
+    /// Record headlines; one whose link is recorded already is left as it was, and only
+    /// gains its `source` among the sources that carried it. How many were new.
     fn save_items(&self, items: &[Recorded]) -> Result<usize, String>;
     /// The headlines published from `from` to `to`, both inclusive, the newest first.
     fn items(&self, from: i64, to: i64) -> Result<Vec<Recorded>, String>;

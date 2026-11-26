@@ -156,12 +156,13 @@ minutes, without a restart. A file that does not parse (bad JSON, an unknown fie
 a URL that is not `http(s)`) keeps the sources read before, and the log says why once; a file
 that never parsed makes `get_news` an error naming it. Without the variable the server uses
 `CHARTGEN_NEWS_FEEDS` (ADR-0086's form, each entry an English RSS source, all in the default
-set), and without that the list built in (`crates/news/sources.json`), the 34 below with
+set), and without that the list built in (`crates/news/sources.json`), the 34 below (29
+enabled, five opt-in) with
 CoinDesk, Cointelegraph, Decrypt and The Block as the default set.
 
 ### What is recorded
 
-Two tables in the store:
+Three tables in the store:
 
 ```sql
 CREATE TABLE news_items (
@@ -179,15 +180,25 @@ CREATE TABLE news_items (
     author       TEXT               -- dc:creator, author, an Atom author's name
 ) WITHOUT ROWID;
 CREATE INDEX news_items_published ON news_items (published);
+-- Every source that carried a link, and when it first did.
+CREATE TABLE news_item_sources (url TEXT NOT NULL, source TEXT NOT NULL,
+    first_seen INTEGER NOT NULL, PRIMARY KEY (url, source)) WITHOUT ROWID;
 CREATE TABLE news_feeds (id TEXT PRIMARY KEY, url TEXT NOT NULL, name TEXT NOT NULL, etag TEXT,
     last_modified TEXT, last_success INTEGER, last_error TEXT, failing_since INTEGER,
     failures INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0);
 ```
 
-- **Each headline once**, by its link: a link read again (a later round, another feed carrying
-  it, an edited title) leaves the row as it was first read. Every recorded headline has a link,
-  since an item without one is not read (ADR-0086), so the outlet and title are never needed as
-  the key.
+- **Each headline once**, by its link: a link read again (a later round, an edited title)
+  leaves the row as it was first read. Every recorded headline has a link, since an item without
+  one is not read (ADR-0086), so the outlet and title are never needed as the key. A link that a
+  second source carries too (two feeds of one outlet, an aggregator) keeps its one row and adds
+  that source to `news_item_sources`, with when it first carried it, so a call that names only
+  the second source still finds it, and grouping (ADR-0089) can count who carried a story and
+  when.
+- **Recorded before it counts as read:** a source's `ETag`, `Last-Modified` and last success
+  move on only once its new headlines are in the store. A store that fails is a failure of that
+  source, tried again with the backoff, and the next try reads the feed whole, rather than being
+  told "not modified" about headlines that were never kept.
 - **The coins** are ADR-0086's heuristic applied when the headline is read: each coin of its
   table of about 30 that the title or a category names, then each cashtag in the title
   (`$PEPE`); for a source about certain coins, those. They are kept so a later change to the table does not rewrite what was matched
@@ -196,6 +207,27 @@ CREATE TABLE news_feeds (id TEXT PRIMARY KEY, url TEXT NOT NULL, name TEXT NOT N
   apart, and they show there (`Chainwire`, `Advertorial`) more often than in a category; see the
   feed list below.
 - **Not kept:** descriptions and article text, as in ADR-0086.
+
+### What is kept, for whom, and the publishers' terms
+
+ADR-0086 argued that chartgen used the feeds as a feed reader does: it showed the headline, the
+outlet and a link, and kept each feed's last read in memory for ten minutes. Recording keeps a
+year, so that argument no longer covers it, and it is restated here:
+
+- **What is kept** is what a feed publishes for readers to see in a list: the headline, its
+  link, its time, the outlet, the outlet's categories and author line. No description, no
+  article text, no images.
+- **For whom:** the server's own operator and the operator's own agent client, to decide what
+  to read and whether a coin is in the news. `get_news` answers with headlines and links, as
+  before; chartgen neither publishes the record nor serves it to others, and an operator who
+  republishes it is bound by each outlet's terms, as ADR-0086 said.
+- **The publishers whose feed terms allow personal, non-commercial use only**, and are big
+  enough to enforce it, are **opt-in**: Dow Jones (The Wall Street Journal, MarketWatch),
+  Bloomberg, the Financial Times and CNBC ship with `"enabled": false` in the built-in list, so
+  nothing is read or kept from them until an operator who has checked their terms for their own
+  use switches them on in the sources file. The crypto outlets' feeds carry no such terms that
+  this vetting found; it did not read every outlet's terms of use, and an operator who adds or
+  enables a source owns that check.
 
 ### How
 
@@ -213,9 +245,9 @@ feeds share a host). Each request:
 - records the items published within the retention, each new one with the time of the read as its
   first seen.
 
-**A feed that fails** (an HTTP error, a time-out, a page that is not a feed) is tried again after
-5 minutes, then 10, 20, 40, and so on up to 6 hours between tries, or after its `Retry-After` if
-that is longer (up to a day). Its state says why it last failed and since when; the log says when
+**A feed that fails** (an HTTP error, a time-out, a page that is not a feed, a store that cannot
+record) is tried again after 5 minutes, then 10, 20, 40, and so on up to 6 hours between tries,
+or after its `Retry-After` if that is longer (up to a day), never before it. Its state says why it last failed and since when; the log says when
 a feed starts failing and when it is read again, and once an hour how many headlines came in.
 
 **Retention:** `CHARTGEN_NEWS_RECORD_DAYS`, default 365; a headline published longer ago is
@@ -227,7 +259,8 @@ and the feeds as before otherwise (no store, recording off, or a server stopped 
 The answer from the record is what the feeds would give for the same headlines: the same
 matching, on the stored title and categories, the same order, the same fields. Its defaults do
 not change: **without `sources` it answers from the default set, ADR-0086's outlets less
-Bitcoin Magazine** (CoinDesk, Cointelegraph, Decrypt, The Block), though all 34 are recorded.
+Bitcoin Magazine** (CoinDesk, Cointelegraph, Decrypt, The Block), though all enabled sources
+are recorded.
 Bitcoin Magazine's site refuses some servers: it answered a server running chartgen `403` at
 every call while answering this vetting's client, so it is recorded where it answers and left out
 of the default set, where it would be a failure in every answer. The wide list is for grouping and scoring (ADR-0089, ADR-0090); as a list of
@@ -285,11 +318,11 @@ of the last 24 hours, or for a feed that holds less than a day, its items spread
 | Coinspeaker | `https://www.coinspeaker.com/feed/` | 3 | 4 h | allows | 0 of 10 |
 | FXStreet | `https://www.fxstreet.com/rss/crypto` | 11 | 2 h | allows | 0 of 30 |
 | TheStreet | `https://www.thestreet.com/crypto/.rss/full/` | 13 | 30 min | allows | 0 of 50 |
-| CNBC | `https://www.cnbc.com/id/10000664/device/rss/rss.html` | 5 | 3 h | allows | 0 of 30 |
-| MarketWatch | `https://feeds.content.dowjones.io/public/rss/mw_topstories` | 97 | 12 min | allows (403) | 0 of 10 |
-| The Wall Street Journal | `https://feeds.content.dowjones.io/public/rss/RSSMarketsMain` | 28 | 24 min | allows (403) | 0 of 61 |
-| Bloomberg | `https://feeds.bloomberg.com/crypto/news.rss` | 2 | 15 h | allows (none) | 0 of 3 |
-| Financial Times | `https://www.ft.com/cryptocurrencies?format=rss` | under 1 | 5 days | allows | 0 of 25 |
+| CNBC (opt-in) | `https://www.cnbc.com/id/10000664/device/rss/rss.html` | 5 | 3 h | allows | 0 of 30 |
+| MarketWatch (opt-in) | `https://feeds.content.dowjones.io/public/rss/mw_topstories` | 97 | 12 min | allows (403) | 0 of 10 |
+| The Wall Street Journal (opt-in) | `https://feeds.content.dowjones.io/public/rss/RSSMarketsMain` | 28 | 24 min | allows (403) | 0 of 61 |
+| Bloomberg (opt-in) | `https://feeds.bloomberg.com/crypto/news.rss` | 2 | 15 h | allows (none) | 0 of 3 |
+| Financial Times (opt-in) | `https://www.ft.com/cryptocurrencies?format=rss` | under 1 | 5 days | allows | 0 of 25 |
 
 Reddit and YouTube were vetted the same way, with two or three feeds each, and **neither is in
 the list**: both sites' `robots.txt` refuse them.
@@ -301,6 +334,9 @@ the list**: both sites' `robots.txt` refuse them.
 
 The kinds stay in the source model, so an operator with Reddit's permission (its API terms) or
 a source that serves such feeds elsewhere can add one in the file.
+
+The five marked opt-in ship switched off (above): their terms are for personal,
+non-commercial use.
 
 Left out:
 
@@ -339,8 +375,14 @@ USDT perpetuals most traded on Binance, each with the names outlets use (Celesti
 Saga; Fetch.ai and Artificial Superintelligence Alliance). It is kept by hand, not derived: a
 coin registry such as CoinGecko's list maps one ticker to many coins (dozens share `ONE`), so a
 name taken from it would match the wrong coin's news, and its names are often not what headlines
-say. A name that is also a word (Harmony, Saga, Render, Jupiter, Compound, Flow) is matched only
-as written, as ADR-0086 did for Optimism.
+say. A name that is also a word (Harmony, Saga, Render, Jupiter, Maker, Compound, Flow) is
+matched only as written, as ADR-0086 did for Optimism. That was not enough: many outlets write
+titles in Title Case, and over 168 hours of the record every title that matched MKR or FLOW by
+name alone was about something else ("Market Maker Rules", "Yacht Maker", "Cash Flow", "SHIB Flow
+Onto Exchanges"). So in a Title Case title (at least half the words after the first, short ones
+and the name aside, capitalised; or none left to tell by) such a name counts only together with
+the ticker or its cashtag; alone it counts in a sentence-case title ("Maker votes to raise the
+stability fee") or as a category.
 
 For a coin the table does not name, the answer has `note`: "No name is known for … headlines
 are found by the ticker alone", so an empty list is not read as "no news". A ticker of under 3
@@ -353,21 +395,27 @@ with this table.
 Measured with SQLite 3.50 on a branch build reading the 34 sources from a desktop, on
 2026-11-25 and 26:
 
-- **Headlines a day: about 870.** The record was stopped for 24 hours (the machine slept) and the
-  first round after it recorded 406 new headlines, 403 of them published in those 24 hours. That
-  is a lower bound: 24 of the 34 feeds hold less than a day, so the headlines they dropped are
-  missing; spread over the hours each of those feeds still held, the 34 come to about 870 a day.
+- **Headlines a day: about 870 from the 34, about 820 from the 29 enabled by default.** The
+  record was stopped for 24 hours (the machine slept) and the first round after it recorded 406
+  new headlines, 403 of them published in those 24 hours. That is a lower bound: 24 of the 34
+  feeds hold less than a day, so the headlines they dropped are missing; spread over the hours
+  each of those feeds still held, the 34 come to about 870 a day, of which the five opt-in
+  publishers about 56.
   The busiest: Crypto Briefing (about 185), crypto.news (65), Coinpedia (63), Blockonomi (56),
   Bitcoin.com News (43). Over 31 minutes of an evening (20:38 to 21:09 UTC) 9 came in; the rate
   follows the American working day.
 - **Bytes:** a row is about 250 bytes of data; with its key, the index on `published` and the
-  free space of SQLite's pages, 1282 rows took 618 kB, about 480 bytes a row. **About 420 kB a
-  day, 150 MB a year** at the default retention of 365 days; 90 days would be about 38 MB.
-- **Requests:** one per source a round, 34 every 5 minutes, about 9,800 a day, 288 to each host
-  a day (576 to the one that serves two feeds). 32 of the 34 send an `ETag` or `Last-Modified`,
-  so an unchanged feed answers `304` without a body; CoinDesk and CNBC send neither and are read
-  whole each round (30 kB and 20 kB). The largest feed (Crypto Daily, 1.4 MB, 200 items) is read
-  whole only when it changed. The bandwidth was not measured.
+  free space of SQLite's pages, 1282 rows took 618 kB, about 480 bytes a row (a source that
+  carries a link another already did adds a row of about 60 bytes to `news_item_sources`). With
+  the 29 enabled sources **about 390 kB a day, 140 MB a year** at the default retention of 365
+  days; 90 days would be about 35 MB.
+- **Requests:** one per enabled source a round, 29 every 5 minutes, about 8,400 a day, 288 to
+  each host a day. All but CoinDesk send an `ETag` or `Last-Modified`, so an unchanged feed
+  answers `304` without a body; CoinDesk is read whole each round (30 kB). The largest feed
+  (Crypto Daily, 1.4 MB, 200 items) is read whole only when it changed. The bandwidth was not
+  measured. A feed's `Cache-Control: max-age` or RSS `<ttl>` is not read: the conditional
+  request already costs an unchanged feed no body, and reading them is left until a feed asks
+  for more than 5 minutes.
 - **A restart** lost nothing and recorded nothing twice: 872 rows before it, 872 after the first
   round after it, which asked each source with what it had sent before.
 - **Failures seen:** CryptoSlate and CryptoPotato answered `429` once each in the first 15
@@ -385,16 +433,18 @@ Measured with SQLite 3.50 on a branch build reading the 34 sources from a deskto
   first round what they still hold (hours to days back), from then on each new one within about 5
   minutes of its publication, with when it was first read.
 - `get_news` without `sources` answers from ADR-0086's outlets less Bitcoin Magazine, which
-  failed there on the server anyway, now from the record; `sources: ["all"]` answers from all 34.
+  failed there on the server anyway, now from the record; `sources: ["all"]` answers from all
+  enabled ones (29 built in).
 - A server stopped for a while records nothing meanwhile; what the feeds still carry at the next
   start is recorded then, with that start as its first seen, so a stop of more than a few hours
   loses headlines of the busiest feeds and the first-seen times of the rest.
 - A replay server neither records nor answers `get_news`, as before.
-- **Off:** `CHARTGEN_NEWS_RECORD_DAYS=0`, a build without the store, or one without the feature
-  `news`, which has no `get_news` at all. A source is switched off in the file.
-- **After a rollback**, a build from before this ignores both tables and reads the feeds on
+- **Off:** `CHARTGEN_NEWS_RECORD_DAYS=0` (the record is then not answered from either; its
+  rows stay), a build without the store, or one without the feature `news`, which has no
+  `get_news` at all. A source is switched off in the file.
+- **After a rollback**, a build from before this ignores the three tables and reads the feeds on
   demand, and nothing is recorded while it runs. Rolling forward again needs no step; the rows
-  stay until the retention drops them, and dropping the two tables removes the record.
+  stay until the retention drops them, and dropping the three tables removes the record.
 
 ## More Information
 
