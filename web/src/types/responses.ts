@@ -674,6 +674,8 @@ export const NewsPayloadSchema = z.object({
   items: z.array(NewsItemSchema),
   more: z.number().int().optional(),
   sources: z.array(z.string()),
+  /** Present when no name is known for the coin: it is found by its ticker alone (ADR-0088). */
+  note: z.string().optional(),
   sources_failed: z.array(
     z.object({
       source: z.string(),

@@ -36,8 +36,10 @@ pub const MAX_HOURS: u64 = 168;
 pub const MAX_LIMIT: u64 = 50;
 /// The quote assets a symbol's coin is read off: BTCUSDT is BTC.
 const QUOTES: [&str; 6] = ["FDUSD", "USDT", "USDC", "BUSD", "-USD", "USD"];
-/// Names a headline may call a coin by, besides its ticker. Matched in any case, except
-/// those in `ORDINARY`.
+/// Names a headline may call a coin by, besides its ticker: the large coins and those an
+/// agent client is most often asked about, kept by hand (ADR-0088), since a list derived from
+/// a coin registry maps one ticker to many coins. Matched in any case, except those in
+/// `ORDINARY`. A coin with no name here is matched by its ticker only, and an answer says so.
 const NAMES: &[(&str, &[&str])] = &[
     ("BTC", &["Bitcoin"]),
     ("ETH", &["Ethereum", "Ether"]),
@@ -73,11 +75,112 @@ const NAMES: &[(&str, &[&str])] = &[
     ("WLD", &["Worldcoin"]),
     ("INJ", &["Injective"]),
     ("NEAR", &["NEAR Protocol"]),
+    ("TIA", &["Celestia"]),
+    ("ONE", &["Harmony"]),
+    ("SAGA", &["Saga"]),
+    (
+        "FET",
+        &["Fetch.ai", "Artificial Superintelligence Alliance"],
+    ),
+    ("RENDER", &["Render"]),
+    ("SEI", &["Sei"]),
+    ("STX", &["Stacks"]),
+    ("IMX", &["Immutable"]),
+    ("GRT", &["The Graph"]),
+    ("ALGO", &["Algorand"]),
+    ("VET", &["VeChain"]),
+    ("ICP", &["Internet Computer"]),
+    ("EGLD", &["MultiversX"]),
+    ("SAND", &["The Sandbox"]),
+    ("MANA", &["Decentraland"]),
+    ("AXS", &["Axie Infinity"]),
+    ("GALA", &["Gala"]),
+    ("CHZ", &["Chiliz"]),
+    ("KAS", &["Kaspa"]),
+    ("PYTH", &["Pyth Network"]),
+    ("JUP", &["Jupiter"]),
+    ("BONK", &["Bonk"]),
+    ("PEPE", &["Pepe"]),
+    ("WIF", &["dogwifhat"]),
+    ("FLOKI", &["Floki"]),
+    ("ONDO", &["Ondo"]),
+    ("PENDLE", &["Pendle"]),
+    ("JTO", &["Jito"]),
+    ("STRK", &["Starknet"]),
+    ("ZK", &["ZKsync"]),
+    ("MNT", &["Mantle"]),
+    ("BLUR", &["Blur"]),
+    ("MKR", &["Maker"]),
+    ("LDO", &["Lido"]),
+    ("CRV", &["Curve Finance"]),
+    ("COMP", &["Compound"]),
+    ("SNX", &["Synthetix"]),
+    ("1INCH", &["1inch"]),
+    ("SUSHI", &["SushiSwap"]),
+    ("RAY", &["Raydium"]),
+    ("THETA", &["Theta Network"]),
+    ("FLOW", &["Flow"]),
+    ("NEO", &["Neo"]),
+    ("XTZ", &["Tezos"]),
+    ("IOTA", &["IOTA"]),
+    ("ZEC", &["Zcash"]),
+    ("DASH", &["Dash"]),
+    ("KSM", &["Kusama"]),
+    ("ROSE", &["Oasis Network"]),
+    ("QNT", &["Quant"]),
+    ("RUNE", &["THORChain"]),
+    ("KAVA", &["Kava"]),
+    ("CFX", &["Conflux"]),
+    ("AR", &["Arweave"]),
+    ("DYDX", &["dYdX"]),
+    ("APE", &["ApeCoin"]),
+    ("ENS", &["Ethereum Name Service"]),
+    ("LRC", &["Loopring"]),
+    ("CELO", &["Celo"]),
+    ("MINA", &["Mina Protocol"]),
+    ("ZRO", &["LayerZero"]),
+    ("W", &["Wormhole"]),
+    ("ETHFI", &["ether.fi"]),
+    ("EIGEN", &["EigenLayer", "EigenCloud"]),
+    ("NOT", &["Notcoin"]),
+    ("ARKM", &["Arkham"]),
+    ("ALT", &["AltLayer"]),
+    ("MANTA", &["Manta Network"]),
+    ("DYM", &["Dymension"]),
+    ("AXL", &["Axelar"]),
+    ("VIRTUAL", &["Virtuals Protocol"]),
+    ("FARTCOIN", &["Fartcoin"]),
+    ("MOVE", &["Movement"]),
+    ("BERA", &["Berachain"]),
+    ("IP", &["Story Protocol"]),
+    ("KAITO", &["Kaito"]),
+    ("S", &["Sonic"]),
+    ("PENGU", &["Pudgy Penguins"]),
+    ("JASMY", &["JasmyCoin"]),
+    ("HNT", &["Helium"]),
+    ("AKT", &["Akash Network"]),
+    ("POPCAT", &["Popcat"]),
+    ("PNUT", &["Peanut the Squirrel"]),
+    ("WAL", &["Walrus"]),
+    ("CAKE", &["PancakeSwap"]),
+    ("OM", &["MANTRA"]),
+    ("LPT", &["Livepeer"]),
+    ("BAT", &["Basic Attention Token"]),
+    ("ZIL", &["Zilliqa"]),
+    ("QTUM", &["Qtum"]),
+    ("RVN", &["Ravencoin"]),
+    ("CKB", &["Nervos"]),
+    ("GMT", &["STEPN"]),
+    ("PAXG", &["PAX Gold"]),
+    ("TRB", &["Tellor"]),
+    ("AEVO", &["Aevo"]),
+    ("PIXEL", &["Pixels"]),
+    ("NEIRO", &["Neiro"]),
 ];
 
-/// Names that are also ordinary words ("crypto optimism", "a ripple effect"): matched only
-/// as written, capitalised.
-const ORDINARY: [&str; 7] = [
+/// Names that are also ordinary words ("crypto optimism", "a ripple effect", "harmony"):
+/// matched only as written.
+const ORDINARY: [&str; 33] = [
     "Ripple",
     "Avalanche",
     "Optimism",
@@ -85,6 +188,32 @@ const ORDINARY: [&str; 7] = [
     "Cosmos",
     "Stellar",
     "Sui",
+    "Harmony",
+    "Saga",
+    "Render",
+    "Sei",
+    "Stacks",
+    "Immutable",
+    "Gala",
+    "Jupiter",
+    "Bonk",
+    "Pepe",
+    "Mantle",
+    "Blur",
+    "Maker",
+    "Compound",
+    "Flow",
+    "Neo",
+    "Dash",
+    "Quant",
+    "Kava",
+    "Movement",
+    "Sonic",
+    "Helium",
+    "Walrus",
+    "Pixels",
+    "MANTRA",
+    "IOTA",
 ];
 
 /// One headline of a feed.
@@ -420,18 +549,14 @@ fn clean_url(link: &str, base: &url::Url) -> Option<String> {
 }
 
 /// The words a headline about `symbol` is found by: its coin's ticker and the names in
-/// `NAMES`. A ticker of under 3 letters that has a name (OP) is left to its name; one without
-/// (AI) is kept, and `about` matches it only as `$AI`.
+/// `NAMES`. `about` matches a ticker of under 3 letters (OP, AI) only as `$OP`.
 fn terms_of(symbol: &str) -> Vec<String> {
     let coin = coin_of(symbol);
     let names = NAMES
         .iter()
         .find(|(ticker, _)| *ticker == coin)
         .map_or(&[][..], |(_, names)| *names);
-    let mut terms = Vec::new();
-    if coin.len() >= 3 || names.is_empty() {
-        terms.push(coin.to_string());
-    }
+    let mut terms = vec![coin.to_string()];
     terms.extend(names.iter().map(|n| n.to_string()));
     terms
 }
@@ -585,6 +710,13 @@ fn compose(
     });
     if more > 0 {
         v["more"] = json!(more);
+    }
+    // So an empty list is not read as "no news": a story that names the coin only by its
+    // name is not found.
+    if !NAMES.iter().any(|(ticker, _)| *ticker == coin) {
+        v["note"] = json!(format!(
+            "No name is known for {coin}: headlines are found by the ticker alone, so a story that names the coin only by its name is missed"
+        ));
     }
     v
 }

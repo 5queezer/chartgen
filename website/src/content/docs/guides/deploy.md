@@ -164,7 +164,7 @@ first read, the categories, the author and the coins matched then. Each source's
 source was read within the last 30 minutes, from the default set unless a call names sources.
 
 - **The sources** are the list built in (`crates/news/sources.json`: 34 crypto outlets and
-  markets desks, ADR-0086's five as the default set) unless `CHARTGEN_NEWS_SOURCES` names a
+  markets desks; CoinDesk, Cointelegraph, Decrypt and The Block are the default set) unless `CHARTGEN_NEWS_SOURCES` names a
   file of your own, in the same form:
 
   ```json
@@ -187,7 +187,9 @@ source was read within the last 30 minutes, from the default set unless a call n
 - **Politely:** each request sends the feed's last `ETag` and `Last-Modified`, so an unchanged
   feed answers `304` without a body. A feed that fails is tried again after 5 minutes, then 10,
   20, 40, up to 6 hours between tries, or after its `Retry-After` if longer.
-- **What it costs:** TBD-DEPLOY-COST
+- **What it costs:** about 870 headlines and 420 kB a day, 150 MB a year at the default
+  365 days (measured on the 34 sources built in, [ADR-0088](/chartgen/decisions/0088-recording-the-news/#cost));
+  one request per source every 5 minutes, most of them answered `304` without a body.
 - **The log** says when a feed starts failing (`[news-record] CryptoSlate failed: HTTP 429`) and
   when it is read again, and once an hour how many headlines came in. `get_news` names a failing
   feed under `sources_failed`, with `since`. In the store:

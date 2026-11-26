@@ -614,7 +614,7 @@ export interface GetNewsInput {
    */
   limit?: number;
   /**
-   * Source ids to answer from, e.g. ["coindesk", "the-block"], or ["all"] for every enabled source. Default: the default set (CoinDesk, Cointelegraph, Decrypt, The Block, Bitcoin Magazine unless configured otherwise).
+   * Source ids to answer from, e.g. ["coindesk", "the-block"], or ["all"] for every enabled source. Default: the default set (CoinDesk, Cointelegraph, Decrypt, The Block, unless configured otherwise).
    */
   sources?: string[];
   /**

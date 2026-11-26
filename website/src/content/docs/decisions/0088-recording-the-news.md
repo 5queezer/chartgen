@@ -1,6 +1,6 @@
 ---
 title: "0088 — Recording the news"
-description: "A server with a store reads 34 public crypto and finance feeds every 5 minutes, conditionally, and keeps every headline once, by its link, with its source, kind and language, when it was first read, its categories, author and the coins matched then, for a year by default. The sources are a JSON file read again when it changes. get_news answers from that record while it is current, from the same five outlets by default. The news lives in a crate of its own behind a Cargo feature."
+description: "A server with a store reads 34 public crypto and finance feeds every 5 minutes, conditionally, and keeps every headline once, by its link, with its source, kind and language, when it was first read, its categories, author and the coins matched then, for a year by default. The sources are a JSON file read again when it changes. get_news answers from that record while it is current, from four of ADR-0086's five outlets by default, and names about 130 coins. The news lives in a crate of its own behind a Cargo feature."
 sidebar:
   order: 88
 ---
@@ -157,7 +157,7 @@ a URL that is not `http(s)`) keeps the sources read before, and the log says why
 that never parsed makes `get_news` an error naming it. Without the variable the server uses
 `CHARTGEN_NEWS_FEEDS` (ADR-0086's form, each entry an English RSS source, all in the default
 set), and without that the list built in (`crates/news/sources.json`), the 34 below with
-ADR-0086's five as the default set.
+CoinDesk, Cointelegraph, Decrypt and The Block as the default set.
 
 ### What is recorded
 
@@ -226,10 +226,13 @@ taken over many weeks and leaves the record small (below).
 and the feeds as before otherwise (no store, recording off, or a server stopped for a while).
 The answer from the record is what the feeds would give for the same headlines: the same
 matching, on the stored title and categories, the same order, the same fields. Its defaults do
-not change: **without `sources` it answers from the default set, ADR-0086's five**, though all
-34 are recorded. The wide list is for grouping and scoring (ADR-0089, ADR-0090); as a list of
-headlines it is noisier, and at `limit` 10 it covered about the last hour where the five covered
-about three (measured below). Added, all optional:
+not change: **without `sources` it answers from the default set, ADR-0086's outlets less
+Bitcoin Magazine** (CoinDesk, Cointelegraph, Decrypt, The Block), though all 34 are recorded.
+Bitcoin Magazine's site refuses some servers: it answered a server running chartgen `403` at
+every call while answering this vetting's client, so it is recorded where it answers and left out
+of the default set, where it would be a failure in every answer. The wide list is for grouping and scoring (ADR-0089, ADR-0090); as a list of
+headlines it is noisier, and at `limit` 10 it covered about the last hour where ADR-0086's five
+covered about four (measured below). Added, all optional:
 
 - `sources`: source ids to answer from, or `["all"]` for every enabled source. An id that is
   not a source, or is switched off, is an error that lists the ids.
@@ -257,7 +260,7 @@ of the last 24 hours, or for a feed that holds less than a day, its items spread
 | Cointelegraph | `https://cointelegraph.com/rss` | 23 | 1 h | allows | 0 of 30 |
 | Decrypt | `https://decrypt.co/feed` | 15 | 30 min | allows | 0 of 38 |
 | The Block | `https://www.theblock.co/rss.xml` | 22 | 18 min | allows | 0 of 20 |
-| Bitcoin Magazine | `https://bitcoinmagazine.com/.rss/full/` | 48 | 6 min | allows | 0 of 10 |
+| Bitcoin Magazine | `https://bitcoinmagazine.com/feed` | 48 | 6 min | allows | 0 of 10 |
 | CryptoSlate | `https://cryptoslate.com/feed/` | 25 | 1 h | allows | 0 of 10 |
 | CryptoPotato | `https://cryptopotato.com/feed/` | 15 | 1 h | allows | 1 of 36 |
 | NewsBTC | `https://www.newsbtc.com/feed/` | 3 | 7 h | allows | 3 of 10 |
@@ -323,20 +326,66 @@ Left out:
 Press-release copies are spread instead: the same release appears under several outlets with the same title
 (in that read, two releases each under two outlets), and they are up to a third of some outlets' items.
 They are one voice, not several, and the record keeps what tells them apart (the author, the
-categories, the identical title), so grouping (ADR-0089) can count them once, the flag or not. ADR-0086's five are the
-default set.
+categories, the identical title), so grouping (ADR-0089) can count them once, the flag or not. The default set is ADR-0086's outlets less Bitcoin Magazine (above). Bitcoin Magazine's old feed
+URL (`/.rss/full/`) now redirects to `http://bitcoinmagazine.com/feed`; the list has the `https`
+one.
+
+### The coins' names
+
+`get_news TIAUSDT` answered `terms: ["TIA"]` and no headlines: ADR-0086's table named about 30
+large coins, so a headline that calls the coin Celestia was not found, and the coins an agent client is woken for
+are often others (TIA, ONE, SAGA, FET). The table now names about 130: the large coins and the
+USDT perpetuals most traded on Binance, each with the names outlets use (Celestia; Harmony;
+Saga; Fetch.ai and Artificial Superintelligence Alliance). It is kept by hand, not derived: a
+coin registry such as CoinGecko's list maps one ticker to many coins (dozens share `ONE`), so a
+name taken from it would match the wrong coin's news, and its names are often not what headlines
+say. A name that is also a word (Harmony, Saga, Render, Jupiter, Compound, Flow) is matched only
+as written, as ADR-0086 did for Optimism.
+
+For a coin the table does not name, the answer has `note`: "No name is known for … headlines
+are found by the ticker alone", so an empty list is not read as "no news". A ticker of under 3
+letters with a name (OP, ZK, S) is now also found as a cashtag (`$OP`), as one without a name
+already was; `terms` then lists the ticker too. The coins recorded with a headline are matched
+with this table.
 
 ### Cost
 
-TBD-COST
+Measured with SQLite 3.50 on a branch build reading the 34 sources from a desktop, on
+2026-11-25 and 26:
+
+- **Headlines a day: about 870.** The record was stopped for 24 hours (the machine slept) and the
+  first round after it recorded 406 new headlines, 403 of them published in those 24 hours. That
+  is a lower bound: 24 of the 34 feeds hold less than a day, so the headlines they dropped are
+  missing; spread over the hours each of those feeds still held, the 34 come to about 870 a day.
+  The busiest: Crypto Briefing (about 185), crypto.news (65), Coinpedia (63), Blockonomi (56),
+  Bitcoin.com News (43). Over 31 minutes of an evening (20:38 to 21:09 UTC) 9 came in; the rate
+  follows the American working day.
+- **Bytes:** a row is about 250 bytes of data; with its key, the index on `published` and the
+  free space of SQLite's pages, 1282 rows took 618 kB, about 480 bytes a row. **About 420 kB a
+  day, 150 MB a year** at the default retention of 365 days; 90 days would be about 38 MB.
+- **Requests:** one per source a round, 34 every 5 minutes, about 9,800 a day, 288 to each host
+  a day (576 to the one that serves two feeds). 32 of the 34 send an `ETag` or `Last-Modified`,
+  so an unchanged feed answers `304` without a body; CoinDesk and CNBC send neither and are read
+  whole each round (30 kB and 20 kB). The largest feed (Crypto Daily, 1.4 MB, 200 items) is read
+  whole only when it changed. The bandwidth was not measured.
+- **A restart** lost nothing and recorded nothing twice: 872 rows before it, 872 after the first
+  round after it, which asked each source with what it had sent before.
+- **Failures seen:** CryptoSlate and CryptoPotato answered `429` once each in the first 15
+  minutes and were read again 5 minutes later; none since. Investing.com could not be read (its
+  dates) and is left out.
+- **`get_news BTCUSDT`** on 2026-11-25 at 20:40 UTC, on the record and on the feeds read now:
+  the same answer, 2,707 bytes (10 headlines of the last 3.7 hours, `more` 21) from ADR-0086's
+  five; from all 34, 2,982 bytes (10 headlines of the last hour, `more` 93). On 2026-11-26 at
+  21:10 UTC from the default set of four, 2,649 bytes (10 headlines of the last 9 hours, `more`
+  9); from all 34, 2,815 bytes (the last 1.8 hours, `more` 99).
 
 ### Consequences
 
 - From the first start of this build the store holds every headline the feeds carry: on its
   first round what they still hold (hours to days back), from then on each new one within about 5
   minutes of its publication, with when it was first read.
-- `get_news` without `sources` answers as before, from the same five outlets, now from the
-  record; `sources: ["all"]` answers from all 34.
+- `get_news` without `sources` answers from ADR-0086's outlets less Bitcoin Magazine, which
+  failed there on the server anyway, now from the record; `sources: ["all"]` answers from all 34.
 - A server stopped for a while records nothing meanwhile; what the feeds still carry at the next
   start is recorded then, with that start as its first seen, so a stop of more than a few hours
   loses headlines of the busiest feeds and the first-seen times of the rest.

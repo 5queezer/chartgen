@@ -151,10 +151,13 @@ fn a_symbol_is_found_by_its_coins_ticker_and_names() {
     assert_eq!(terms("ETHUSDC"), ["ETH", "Ethereum", "Ether"]);
     assert_eq!(terms("SOLUSDT"), ["SOL", "Solana"]);
     assert_eq!(terms("BTC-USD"), ["BTC", "Bitcoin"]);
-    assert_eq!(terms("1000PEPEUSDT"), ["PEPE"]);
-    // A two-letter ticker with a name is found by its name only.
-    assert_eq!(terms("OPUSDT"), ["Optimism"]);
-    assert_eq!(terms("WIFUSDT"), ["WIF"]);
+    assert_eq!(terms("1000PEPEUSDT"), ["PEPE", "Pepe"]);
+    // A two-letter ticker is found by its name, and as a cashtag.
+    assert_eq!(terms("OPUSDT"), ["OP", "Optimism"]);
+    assert!(is_about("OPUSDT", "$OP unlock this week"));
+    assert!(!is_about("OPUSDT", "OP ed: markets"));
+    assert_eq!(terms("WIFUSDT"), ["WIF", "dogwifhat"]);
+    assert_eq!(terms("ZZZUSDT"), ["ZZZ"]);
 }
 
 fn headline(title: &str, categories: &[&str]) -> Item {
@@ -379,6 +382,32 @@ fn a_source_about_certain_coins_answers_for_those_only() {
     // A subreddit's author is its user's name, not the link to them.
     let Ok(posts) = &reads[0].1 else { panic!() };
     assert_eq!(posts[0].author, "/u/example_one");
+}
+
+#[test]
+fn a_coin_without_a_name_is_said_to_be_found_by_its_ticker_alone() {
+    let feed = source("Outlet", "https://outlet.example/rss");
+    let read = |symbol: &str| answer(symbol, 24, 10, NOW, &[(&feed, Ok(Arc::new(Vec::new())))]);
+    assert!(read("BTCUSDT").get("note").is_none());
+    assert_eq!(read("TIAUSDT")["terms"], json!(["TIA", "Celestia"]));
+    assert!(read("TIAUSDT").get("note").is_none());
+    let v = read("ZZZUSDT");
+    assert_eq!(v["terms"], json!(["ZZZ"]));
+    assert!(v["note"]
+        .as_str()
+        .unwrap()
+        .contains("No name is known for ZZZ"));
+}
+
+#[test]
+fn the_coins_an_agent_is_woken_for_have_names() {
+    assert!(is_about("ONEUSDT", "Harmony bridge reopens"));
+    assert!(!is_about("ONEUSDT", "Markets in harmony after the Fed"));
+    assert!(is_about("FETUSDT", "Fetch.ai token jumps on listing"));
+    assert!(is_about("SAGAUSDT", "Saga launches a gaming chain"));
+    assert!(is_about("TIAUSDT", "celestia rollups grow"));
+    // A two-letter ticker is found by its name, and as a cashtag.
+    assert_eq!(terms_of("ZKUSDT"), ["ZK", "ZKsync"]);
 }
 
 #[test]

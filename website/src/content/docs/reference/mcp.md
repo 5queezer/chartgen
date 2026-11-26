@@ -1104,7 +1104,7 @@ the tool.
 
 Recent crypto headlines about one symbol, from public RSS and Atom feeds, so an agent needs no
 web search for them ([ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/)).
-By default from five large crypto outlets; 34 sources can be named. A server with a store
+By default from four large crypto outlets; 34 sources can be named. A server with a store
 records every source every 5 minutes and answers from that record
 ([ADR-0088](/chartgen/decisions/0088-recording-the-news/)).
 
@@ -1149,42 +1149,34 @@ records every source every 5 minutes and answers from that record
   that fails never fails the call. From the record, an entry also has `since`: when the feed's
   failures in a row began (ISO 8601 UTC), and the headlines recorded from it before still count.
 - `terms`: the words a headline was matched by.
+- `note`: present when no name is known for the coin, so headlines are found by its ticker
+  alone.
 
 **How a headline is matched, a heuristic.** The coin is read off the symbol: the quote
 (`USDT`, `USDC`, `FDUSD`, `BUSD`, `USD`, `-USD`) is dropped, and so is Binance's `1000` or `1M`
 scale (`1000PEPEUSDT` is PEPE). A headline is about the coin when its title, or one of the
 outlet's categories for it, holds the ticker in capitals (`BTC`, `$BTC`) or one of the coin's
 names in any case (`Bitcoin`, `bitcoin's`), as a whole word: `Etherscan` is not Ether, `link`
-is not LINK. A name that is also an ordinary word (Ripple, Avalanche, Optimism, Polygon,
-Cosmos, Stellar, Sui) is matched only capitalised, so "crypto optimism" is not Optimism; a
-title in title case still matches it. Descriptions are not matched. About 30 large coins have
-names:
+is not LINK. A name that is also an ordinary word (Ripple, Avalanche, Optimism, Harmony, Saga,
+Render, Jupiter, Compound, Flow and others) is matched only as written, so "crypto optimism" is
+not Optimism; a title in title case still matches it. Descriptions are not matched. About 130
+coins have names: the large ones and those an agent is most often asked about, from BTC
+(Bitcoin) and ETH (Ethereum, Ether) to TIA (Celestia), ONE (Harmony), SAGA (Saga) and FET
+(Fetch.ai, Artificial Superintelligence Alliance); the table is `NAMES` in
+`crates/news/src/lib.rs`.
 
-| Ticker | Names |
-|--------|-------|
-| BTC | Bitcoin |
-| ETH | Ethereum, Ether |
-| SOL | Solana |
-| XRP | Ripple |
-| BNB | BNB Chain |
-| DOGE, ADA, AVAX, LINK, DOT | Dogecoin, Cardano, Avalanche, Chainlink, Polkadot |
-| TRX, TON, LTC, BCH, SHIB | Tron, Toncoin, Litecoin, Bitcoin Cash, Shiba Inu |
-| SUI, APT, ARB, OP, POL | Sui, Aptos, Arbitrum, Optimism, Polygon |
-| ATOM, UNI, AAVE, XLM, HBAR | Cosmos, Uniswap, Aave, Stellar, Hedera |
-| XMR, ETC, FIL, HYPE, ENA | Monero, Ethereum Classic, Filecoin, Hyperliquid, Ethena |
-| TAO, WLD, INJ, NEAR | Bittensor, Worldcoin, Injective, NEAR Protocol |
-
-Any other coin is found by its ticker alone. A two-letter ticker with a name (`OP`) is found by
-its name only. A ticker of under 3 letters without a name (`AIUSDT`, `SUSDT`) is found only as a
-cashtag in the title (`$AI`): as a word it is everyday text ("AI agents", "U.S."), and outlets
-file stories about artificial intelligence under an `AI` category. It can miss a story whose title names neither, and take one that names the coin
+Any other coin is found by its ticker alone, and the answer then has `note` saying so: an empty
+`items` for it is not proof that there is no news. A ticker of under 3 letters (`OPUSDT`,
+`AIUSDT`, `SUSDT`) is found as a cashtag in the title (`$OP`), and by its name if it has one
+(Optimism): as a word it is everyday text ("AI agents", "U.S."), and outlets file stories about
+artificial intelligence under an `AI` category. It can miss a story whose title names neither, and take one that names the coin
 in passing: read the titles as leads.
 
 **The sources** are 34 crypto outlets and markets desks, none of which needs a key; the list and
 how each was checked are in [ADR-0088](/chartgen/decisions/0088-recording-the-news/#the-feeds).
 The default set, answered when a call names no `sources`, is CoinDesk (`coindesk`),
-Cointelegraph (`cointelegraph`), Decrypt (`decrypt`), The Block (`the-block`) and Bitcoin
-Magazine (`bitcoin-magazine`). The others: `cryptoslate`, `cryptopotato`, `newsbtc`,
+Cointelegraph (`cointelegraph`), Decrypt (`decrypt`) and The Block (`the-block`). The others:
+`bitcoin-magazine` (it refuses some servers, so it is not in the default set), `cryptoslate`, `cryptopotato`, `newsbtc`,
 `cryptonews`, `crypto-briefing`, `beincrypto`, `the-daily-hodl`, `coingape`, `bitcoin-com`,
 `coinpedia`, `coinjournal`, `unchained`, `protos`, `crypto-news`, `blockonomi`, `zycrypto`,
 `coincu`, `crypto-daily`, `finbold`, `coincentral`, `cryptopolitan`, `coinspeaker`, `fxstreet`,

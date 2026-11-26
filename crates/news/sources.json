@@ -3,7 +3,7 @@
   {"id": "cointelegraph", "name": "Cointelegraph", "url": "https://cointelegraph.com/rss", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": true},
   {"id": "decrypt", "name": "Decrypt", "url": "https://decrypt.co/feed", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": true},
   {"id": "the-block", "name": "The Block", "url": "https://www.theblock.co/rss.xml", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": true},
-  {"id": "bitcoin-magazine", "name": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/.rss/full/", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": true},
+  {"id": "bitcoin-magazine", "name": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/feed", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
   {"id": "cryptoslate", "name": "CryptoSlate", "url": "https://cryptoslate.com/feed/", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
   {"id": "cryptopotato", "name": "CryptoPotato", "url": "https://cryptopotato.com/feed/", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},
   {"id": "newsbtc", "name": "NewsBTC", "url": "https://www.newsbtc.com/feed/", "kind": "rss", "language": "en", "enabled": true, "syndicates": false, "default": false},

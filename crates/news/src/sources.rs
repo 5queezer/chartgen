@@ -283,21 +283,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_built_in_sources_are_valid_and_adr_0086s_five_are_the_default() {
+    fn the_built_in_sources_are_valid_and_adr_0086s_outlets_but_one_are_the_default() {
         let all = parse(BUILT_IN).unwrap();
         assert_eq!(all.len(), 34);
         let default = select(&all, &Pick::Default, "en").unwrap();
         let names: Vec<&str> = default.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "CoinDesk",
-                "Cointelegraph",
-                "Decrypt",
-                "The Block",
-                "Bitcoin Magazine"
-            ]
-        );
+        // Bitcoin Magazine refuses some servers (ADR-0088): recorded, not in the default.
+        assert_eq!(names, ["CoinDesk", "Cointelegraph", "Decrypt", "The Block"]);
         assert_eq!(select(&all, &Pick::All, "en").unwrap().len(), 34);
         assert!(select(&all, &Pick::All, "de").unwrap().is_empty());
         assert!(all.iter().all(|s| s.url.starts_with("https://")));
