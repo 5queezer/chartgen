@@ -5,7 +5,7 @@ sidebar:
   order: 71
 ---
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by [ADR-0091](/chartgen/decisions/0091-a-setups-page/) (the whole list, its filter and the totals are on the Setups page; the tab lists the chart symbol's setups)
 *Edited 2026-11-15 to remove deployment details.*
 **Date:** 2026-11-14
 **Amends:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (the web app shows setups)

@@ -1,41 +1,22 @@
-// Setups tab of the right sidebar (ADR-0071): the signed-in owner's setups the server
-// scores on paper (ADR-0059), open ones first, with an open/closed filter and the track
-// record's totals for takes and skips. Clicking a row opens its chart with its drawings,
-// and a skip's bracket. Read only: setups are made and changed by the agent's tools.
+// Setups tab of the right sidebar (ADR-0071, ADR-0091): the signed-in owner's setups on
+// the chart's symbol, open ones first and the last few closed, each opening its chart with
+// its drawings and a skip's bracket. The whole list and the track record are on the
+// Setups page at /setups. Read only: setups are made and changed by the agent's tools.
 
-import {
-  For,
-  Show,
-  createEffect,
-  createMemo,
-  createSignal,
-  on,
-  onCleanup,
-  onMount,
-  type JSX,
-} from "solid-js";
+import { For, Show, createEffect, createMemo, on, onCleanup, onMount, type JSX } from "solid-js";
 
-import {
-  SETUP_FILTERS,
-  WON_AT_A_LOSS,
-  entryText,
-  filterSetups,
-  formatR,
-  isOpen,
-  sortSetups,
-  wonAtALoss,
-  type SetupFilter,
-} from "../lib/setups";
+import { WON_AT_A_LOSS, entryText, formatR, isOpen, sortSetups, wonAtALoss } from "../lib/setups";
 import { formatPrice } from "../lib/quote";
 import { formatDateTime, resolveTimeZone } from "../lib/timezone";
 import type { McpSession } from "../mcp";
-import { timeZone } from "../stores/layout";
-import { LIST_LIMIT, openSetup, refreshSetups, setupsState } from "../stores/setups";
-import type { Setup, TrackRecordPayload } from "../types/responses";
+import { symbol, timeZone } from "../stores/layout";
+import { openSetup, refreshSetups, setupsState } from "../stores/setups";
+import type { Setup } from "../types/responses";
 
 /** How often the open tab asks again: setups move on closed 1m bars. */
 const REFRESH_MS = 60_000;
-const FILTER_KEY = "chartgen.setups.filter";
+/** Closed setups the tab shows, the most recently ended; the rest are on the page. */
+export const CLOSED_SHOWN = 5;
 
 const STATUS_CLASS: Record<Setup["status"], string> = {
   watching: "text-[color:var(--color-fg-muted)]",
@@ -45,17 +26,6 @@ const STATUS_CLASS: Record<Setup["status"], string> = {
   expired: "text-[color:var(--color-fg-muted)]",
   cancelled: "text-[color:var(--color-fg-muted)]",
 };
-
-const FILTER_LABELS: Record<SetupFilter, string> = { open: "Open", closed: "Closed", all: "All" };
-
-function loadFilter(): SetupFilter {
-  try {
-    const v = localStorage.getItem(FILTER_KEY);
-    return SETUP_FILTERS.find((f) => f === v) ?? "open";
-  } catch {
-    return "open";
-  }
-}
 
 /** "MM-DD HH:mm", with the year only when it is not this one's. */
 function shortTime(ms: number, tz: string): string {
@@ -71,53 +41,41 @@ const rClass = (r: number | null | undefined): string =>
       : "text-[color:var(--color-bear)]";
 
 export function SetupsPanel(props: { session: McpSession; enabled: boolean }): JSX.Element {
-  const [filter, setFilterSignal] = createSignal<SetupFilter>(loadFilter());
-  const setFilter = (next: SetupFilter) => {
-    setFilterSignal(next);
-    try {
-      localStorage.setItem(FILTER_KEY, next);
-    } catch {
-      // Best-effort only.
-    }
-  };
   const refresh = () => {
-    if (props.enabled) void refreshSetups(props.session);
+    if (props.enabled) void refreshSetups(props.session, symbol());
   };
-  // As soon as the session is ready: the tab may be open, remembered, before it is.
-  createEffect(on(() => props.enabled, (enabled) => enabled && refresh()));
+  // As soon as the session is ready (the tab may be open, remembered, before it is), and
+  // for each symbol the chart switches to.
+  createEffect(on([() => props.enabled, symbol], ([enabled]) => enabled && refresh()));
   onMount(() => {
     const timer = window.setInterval(refresh, REFRESH_MS);
     onCleanup(() => window.clearInterval(timer));
   });
 
+  // Only an answer about the chart's symbol: one about the last is not shown.
   const ready = createMemo(() => {
     const s = setupsState();
-    return s.kind === "ready" ? s : null;
+    return s.kind === "ready" && s.symbol === symbol() ? s : null;
   });
-  const shown = createMemo(() => sortSetups(filterSetups(ready()?.setups ?? [], filter())));
-  const count = (f: SetupFilter) => filterSetups(ready()?.setups ?? [], f).length;
+  const sorted = createMemo(() => sortSetups(ready()?.setups ?? []));
+  const shown = createMemo(() => [
+    ...sorted().filter(isOpen),
+    ...sorted().filter((s) => !isOpen(s)).slice(0, CLOSED_SHOWN),
+  ]);
+  const more = () => (ready()?.total ?? 0) - shown().length;
 
   return (
     <div class="flex flex-col flex-1 min-h-0" aria-label="Setups" role="region">
       <div class="flex items-center gap-2 px-3 py-2 border-b border-[color:var(--color-border)]">
-        <h2 class="text-sm font-semibold flex-1">Setups</h2>
-        <div role="group" aria-label="Show setups" class="flex text-xs rounded-md border border-[color:var(--color-border)] overflow-hidden">
-          <For each={SETUP_FILTERS}>
-            {(f) => (
-              <button
-                type="button"
-                aria-pressed={filter() === f}
-                class="px-2 py-0.5 cursor-pointer text-[color:var(--color-fg-muted)] aria-pressed:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-bg-elev)]"
-                onClick={() => setFilter(f)}
-              >
-                {FILTER_LABELS[f]}
-                <Show when={ready()}>
-                  <span class="ml-1 tabular-nums">{count(f)}</span>
-                </Show>
-              </button>
-            )}
-          </For>
-        </div>
+        <h2 class="text-sm font-semibold flex-1 truncate">Setups on {symbol()}</h2>
+        <a
+          href="/setups"
+          data-role="setups-page-link"
+          class="text-xs text-[color:var(--color-accent)] no-underline hover:underline whitespace-nowrap"
+          title="Every setup, sortable and filtered, with the track record and open risk"
+        >
+          All setups
+        </a>
       </div>
       <Show when={setupsState().kind === "off"}>
         <p data-role="setups-off" class="px-3 py-3 text-xs text-[color:var(--color-fg-muted)]">
@@ -127,31 +85,11 @@ export function SetupsPanel(props: { session: McpSession; enabled: boolean }): J
       <Show when={(() => { const s = setupsState(); return s.kind === "error" ? s : null; })()}>
         {(s) => (
           <p data-role="setups-error" class="px-3 py-3 text-xs text-[color:var(--color-danger)]">
-            Setups could not be read: {s().message}
+            Setups could not be read: {s().message}{" "}
+            <button type="button" class="underline cursor-pointer" onClick={refresh}>
+              Try again
+            </button>
           </p>
-        )}
-      </Show>
-      <Show when={ready()}>
-        {(r) => (
-          <>
-            <div
-              data-role="setups-totals"
-              class="grid grid-cols-[auto_repeat(5,minmax(0,1fr))] gap-x-2 gap-y-0.5 px-3 py-1.5 text-xs tabular-nums border-b border-[color:var(--color-border)]"
-              title="Closed setups, as the server's track record counts them; open ones are not in it"
-            >
-              <span />
-              <For each={["closed", "won", "total", "mean", "open"]}>
-                {(h) => <span class="text-right text-[color:var(--color-fg-muted)]">{h}</span>}
-              </For>
-              <Totals label="Taken" decision="take" record={r().takes} />
-              <Totals label="Skipped" decision="skip" record={r().skips} />
-            </div>
-            <Show when={r().total > r().setups.length}>
-              <p class="px-3 py-1 text-xs text-[color:var(--color-fg-muted)]">
-                The newest {LIST_LIMIT} of {r().total} setups.
-              </p>
-            </Show>
-          </>
         )}
       </Show>
       <div class="flex-1 min-h-0 overflow-y-auto">
@@ -160,7 +98,7 @@ export function SetupsPanel(props: { session: McpSession; enabled: boolean }): J
           fallback={
             <Show when={ready()}>
               <p data-role="setups-empty" class="px-3 py-3 text-xs text-[color:var(--color-fg-muted)]">
-                {filter() === "closed" ? "No closed setups yet." : filter() === "open" ? "No open setups." : "No setups yet. Your agent makes them with create_setup."}
+                No setups on {symbol()}.
               </p>
             </Show>
           }
@@ -169,49 +107,16 @@ export function SetupsPanel(props: { session: McpSession; enabled: boolean }): J
             {(s) => <SetupRow setup={s} onOpen={() => void openSetup(props.session, s.id)} />}
           </For>
         </Show>
+        <Show when={more() > 0}>
+          <a
+            href="/setups"
+            data-role="setups-more"
+            class="block px-3 py-2 text-xs text-[color:var(--color-fg-muted)] no-underline hover:underline"
+          >
+            {more()} more on {symbol()} on the Setups page
+          </a>
+        </Show>
       </div>
-    </div>
-  );
-}
-
-/** One row of the totals grid: what `get_track_record` counts, as it counts it. */
-function Totals(props: {
-  label: string;
-  decision: "take" | "skip";
-  record: TrackRecordPayload | null;
-}): JSX.Element {
-  const cell = "text-right";
-  return (
-    <div data-role={`totals-${props.decision}`} class="contents">
-      <span class="text-[color:var(--color-fg-muted)]">{props.label}</span>
-      <Show
-        when={props.record}
-        fallback={
-          <For each={[0, 1, 2, 3, 4]}>
-            {() => <span class={`${cell} text-[color:var(--color-fg-muted)]`}>–</span>}
-          </For>
-        }
-      >
-        {(rec) => (
-          <>
-            <span data-role="count" class={cell}>
-              {rec().total.count}
-            </span>
-            <span data-role="won" class={cell}>
-              {rec().total.won}
-            </span>
-            <span data-role="total-r" class={`${cell} ${rClass(rec().total.total_r)}`}>
-              {formatR(rec().total.total_r)}
-            </span>
-            <span data-role="mean-r" class={`${cell} ${rClass(rec().total.mean_r)}`}>
-              {formatR(rec().total.mean_r)}
-            </span>
-            <span data-role="open" class={cell}>
-              {rec().open}
-            </span>
-          </>
-        )}
-      </Show>
     </div>
   );
 }

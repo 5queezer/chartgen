@@ -8,6 +8,7 @@ import {
   noteOperatorPath,
   wantsOperatorPage,
 } from "./services/operatorPage";
+import { forgetSetupsPage, noteSetupsPath, wantsSetupsPage } from "./services/setupsPage";
 import { bootWorkspace } from "./services/workspace";
 import "./styles/globals.css";
 
@@ -32,6 +33,7 @@ async function start(root: HTMLElement): Promise<void> {
   root.textContent = "Signing in...";
   // Before sign-in, which leaves this address and comes back to `/` (ADR-0063).
   noteOperatorPath();
+  noteSetupsPath();
   const boot = await bootWorkspace();
   if (wantsOperatorPage()) {
     const answer = boot.user ? await fetchOverview() : ({ kind: "refused" } as const);
@@ -48,6 +50,23 @@ async function start(root: HTMLElement): Promise<void> {
     }
     // Not for this tab, or no such page here: the app, as at any other address.
     forgetOperatorPage();
+  }
+  if (wantsSetupsPage()) {
+    // The server decides, with this tab's token: its own setups, or none here (ADR-0091).
+    if (boot.authError === null) {
+      const [{ createMcpSession }, { SetupsPage, loadSetupsPage }] = await Promise.all([
+        import("./mcp"),
+        import("./components/SetupsPage"),
+      ]);
+      const session = createMcpSession();
+      const first = await loadSetupsPage(session);
+      if (first.kind !== "off") {
+        root.textContent = "";
+        render(() => <SetupsPage session={session} first={first} />, root);
+        return;
+      }
+    }
+    forgetSetupsPage();
   }
   const [{ App }, { applyShareLink }] = await Promise.all([
     import("./App"),

@@ -97,7 +97,7 @@ one and link both ways.
 | [0068](/chartgen/decisions/0068-replay-over-real-history/) | Replay over real Binance history | Accepted (phase 1); phases 2 and 3 proposed | 2026-11-12 |
 | [0069](/chartgen/decisions/0069-an-alert-at-a-bars-close/) | An alert at a bar's close | Accepted | 2026-11-13 |
 | [0070](/chartgen/decisions/0070-stock-setups/) | Setups on US stocks, scored on Yahoo's 1m bars | Accepted | 2026-11-14 |
-| [0071](/chartgen/decisions/0071-setups-panel/) | A Setups panel in the web app | Accepted | 2026-11-14 |
+| [0071](/chartgen/decisions/0071-setups-panel/) | A Setups panel in the web app | Accepted; superseded in part by [0091](/chartgen/decisions/0091-a-setups-page/) | 2026-11-14 |
 | [0072](/chartgen/decisions/0072-wake-up-context-and-near-stop/) | A wake-up carries the market around it, and a take near its stop wakes the agent | Accepted; amended by [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | 2026-11-14 |
 | [0073](/chartgen/decisions/0073-no-context-for-a-symbol-not-trading/) | A symbol that is not trading has no market context | Accepted | 2026-11-14 |
 | [0074](/chartgen/decisions/0074-tools-list-changed-after-a-restart/) | After a restart, a client hears that the tools may have changed | Accepted | 2026-11-15 |
@@ -114,3 +114,4 @@ one and link both ways.
 | [0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/) | Server alerts on open interest's change over N bars | Accepted; amended by [0082](/chartgen/decisions/0082-recording-open-interest-history/) | 2026-11-25 |
 | [0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/) | News per symbol from public RSS feeds | Accepted | 2026-11-25 |
 | [0087](/chartgen/decisions/0087-a-skips-bracket-from-its-fill/) | A skip's bracket is measured from its fill; skips scored before are marked, not rescored | Accepted | 2026-11-25 |
+| [0091](/chartgen/decisions/0091-a-setups-page/) | A Setups page at /setups, and a Setups tab for the chart's symbol | Accepted | 2026-11-25 |
