@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
+COPY crates/ crates/
 COPY tests/ tests/
 # Serialize with the web stage: BuildKit would otherwise run Vite and the LTO
 # Rust build in parallel and risk OOM on a 4 GB arm64 host.

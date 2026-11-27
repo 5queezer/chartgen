@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The structure of a subreddit's Atom feed (/r/<name>/.rss); the posts are made up. -->
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+  <category term="solana" label="r/solana"/>
+  <updated>2026-11-25T07:40:00+00:00</updated>
+  <id>/r/solana/.rss</id>
+  <link rel="self" href="https://www.reddit.com/r/solana/.rss" type="application/atom+xml"/>
+  <link rel="alternate" href="https://www.reddit.com/r/solana/" type="text/html"/>
+  <title>Solana</title>
+  <entry>
+    <author><name>/u/example_one</name><uri>https://www.reddit.com/user/example_one</uri></author>
+    <category term="solana" label="r/solana"/>
+    <content type="html">&lt;div&gt;Made-up post body.&lt;/div&gt;</content>
+    <id>t3_example1</id>
+    <link href="https://www.reddit.com/r/solana/comments/example1/validators_are_upgrading_tonight/"/>
+    <updated>2026-11-25T07:30:00+00:00</updated>
+    <published>2026-11-25T07:30:00+00:00</published>
+    <title>Validators are upgrading tonight</title>
+  </entry>
+  <entry>
+    <author><name>/u/example_two</name><uri>https://www.reddit.com/user/example_two</uri></author>
+    <category term="solana" label="r/solana"/>
+    <content type="html">&lt;div&gt;Made-up post body.&lt;/div&gt;</content>
+    <id>t3_example2</id>
+    <link href="https://www.reddit.com/r/solana/comments/example2/bridging_bitcoin/"/>
+    <updated>2026-11-25T05:10:00+00:00</updated>
+    <published>2026-11-25T05:10:00+00:00</published>
+    <title>Bridging Bitcoin over, any tips?</title>
+  </entry>
+  <entry>
+    <author><name>/u/example_three</name><uri>https://www.reddit.com/user/example_three</uri></author>
+    <category term="solana" label="r/solana"/>
+    <content type="html">&lt;div&gt;Made-up post body.&lt;/div&gt;</content>
+    <id>t3_example3</id>
+    <link href="https://www.reddit.com/r/solana/comments/example3/is_staking_worth_it/"/>
+    <updated>2026-11-25T03:00:00+00:00</updated>
+    <published>2026-11-25T03:00:00+00:00</published>
+    <title>Is staking worth it?</title>
+  </entry>
+</feed>

@@ -5,7 +5,9 @@ sidebar:
   order: 86
 ---
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by
+[ADR-0088](/chartgen/decisions/0088-recording-the-news/) (the feed list, nothing kept, the table
+of names)
 **Date:** 2026-11-25
 
 ## Context and Problem Statement

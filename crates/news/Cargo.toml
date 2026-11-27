@@ -1,0 +1,16 @@
+[package]
+name = "chartgen-news"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The news of chartgen's get_news: public feeds read, recorded and answered per symbol (ADR-0086, ADR-0088)."
+
+[dependencies]
+chrono = "0.4"
+# RSS and Atom feeds (ADR-0086).
+quick-xml = "0.42"
+reqwest = { version = "0.12", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"

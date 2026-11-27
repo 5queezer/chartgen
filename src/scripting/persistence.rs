@@ -181,6 +181,45 @@ pub(super) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (kind, symbol, period, ts)
     ) WITHOUT ROWID;
 ",
+    // Headlines of the news sources, each once, and each source's last read (ADR-0088).
+    "
+    CREATE TABLE news_items (
+        url           TEXT    PRIMARY KEY,
+        source        TEXT    NOT NULL,
+        outlet        TEXT    NOT NULL,
+        kind          TEXT    NOT NULL,
+        language      TEXT    NOT NULL,
+        title         TEXT    NOT NULL,
+        published     INTEGER NOT NULL,
+        from_updated  INTEGER NOT NULL,
+        first_seen    INTEGER NOT NULL,
+        categories    TEXT    NOT NULL,
+        coins         TEXT    NOT NULL,
+        author        TEXT
+    ) WITHOUT ROWID;
+    CREATE INDEX news_items_published ON news_items (published);
+    CREATE TABLE news_item_sources (
+        url         TEXT    NOT NULL,
+        source      TEXT    NOT NULL,
+        first_seen  INTEGER NOT NULL,
+        language    TEXT    NOT NULL,
+        categories  TEXT    NOT NULL,
+        PRIMARY KEY (url, source)
+    ) WITHOUT ROWID;
+    CREATE TABLE news_feeds (
+        id             TEXT    PRIMARY KEY,
+        url            TEXT    NOT NULL,
+        name           TEXT    NOT NULL,
+        etag           TEXT,
+        last_modified  TEXT,
+        last_success   INTEGER,
+        last_error     TEXT,
+        failing_since  INTEGER,
+        failures       INTEGER NOT NULL DEFAULT 0,
+        next_attempt   INTEGER NOT NULL DEFAULT 0,
+        kept_days      INTEGER NOT NULL DEFAULT 0
+    );
+",
 ];
 
 /// Whether an owner is a signed-in account (ADR-0044).
@@ -1756,6 +1795,309 @@ pub fn db_path() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".chartgen").join("chartgen.db")
+}
+
+/// The record of the news (ADR-0088), in the store's `news_items` and `news_feeds`.
+#[cfg(feature = "news")]
+impl chartgen_news::Store for Store {
+    fn save_items(&self, items: &[chartgen_news::Recorded]) -> Result<usize, String> {
+        let mut conn = self.conn();
+        let saved = (|| {
+            let tx = conn.transaction()?;
+            let mut new = 0;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT OR IGNORE INTO news_items
+                         (url, source, outlet, kind, language, title, published, from_updated,
+                          first_seen, categories, coins, author)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                )?;
+                for i in items {
+                    let categories = serde_json::to_string(&i.categories).unwrap_or_default();
+                    tx.execute(
+                        "INSERT OR IGNORE INTO news_item_sources
+                             (url, source, first_seen, language, categories)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![i.url, i.source, i.first_seen, i.language, categories],
+                    )?;
+                    new += stmt.execute(params![
+                        i.url,
+                        i.source,
+                        i.outlet,
+                        i.kind,
+                        i.language,
+                        i.title,
+                        i.published,
+                        i.from_updated,
+                        i.first_seen,
+                        serde_json::to_string(&i.categories).unwrap_or_default(),
+                        serde_json::to_string(&i.coins).unwrap_or_default(),
+                        i.author,
+                    ])?;
+                }
+            }
+            tx.commit()?;
+            Ok::<_, rusqlite::Error>(new)
+        })();
+        saved.map_err(|e| e.to_string())
+    }
+
+    fn items(
+        &self,
+        from: i64,
+        to: i64,
+        sources: Option<&[String]>,
+    ) -> Result<Vec<chartgen_news::Recorded>, String> {
+        // The ids as one JSON parameter; none, every source.
+        let sources = sources.map(|s| serde_json::to_string(s).unwrap_or_default());
+        let conn = self.conn();
+        let read = (|| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT url, source, outlet, kind, language, title, published, from_updated,
+                        first_seen, categories, coins, author,
+                        (SELECT json_group_array(json_object('source', source,
+                                    'language', language, 'categories', json(categories),
+                                    'first_seen', first_seen))
+                         FROM (SELECT * FROM news_item_sources s WHERE s.url = news_items.url
+                               ORDER BY first_seen, source))
+                 FROM news_items WHERE published BETWEEN ?1 AND ?2
+                   AND (?3 IS NULL OR url IN (SELECT url FROM news_item_sources
+                        WHERE source IN (SELECT value FROM json_each(?3))))
+                 ORDER BY published DESC",
+            )?;
+            let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
+            let rows = stmt.query_map(params![from, to, sources], |r| {
+                Ok(chartgen_news::Recorded {
+                    url: r.get(0)?,
+                    source: r.get(1)?,
+                    carriers: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+                    outlet: r.get(2)?,
+                    kind: r.get(3)?,
+                    language: r.get(4)?,
+                    title: r.get(5)?,
+                    published: r.get(6)?,
+                    from_updated: r.get(7)?,
+                    first_seen: r.get(8)?,
+                    categories: list(r.get(9)?),
+                    coins: list(r.get(10)?),
+                    author: r.get(11)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })();
+        read.map_err(|e| e.to_string())
+    }
+
+    fn forget_items(&self, before: i64) -> Result<usize, String> {
+        let mut conn = self.conn();
+        let gone = (|| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM news_item_sources WHERE url IN
+                     (SELECT url FROM news_items WHERE published < ?1)",
+                params![before],
+            )?;
+            let gone = tx.execute(
+                "DELETE FROM news_items WHERE published < ?1",
+                params![before],
+            )?;
+            tx.commit()?;
+            Ok::<_, rusqlite::Error>(gone)
+        })();
+        gone.map_err(|e| e.to_string())
+    }
+
+    fn feeds(&self) -> Result<Vec<chartgen_news::FeedState>, String> {
+        let conn = self.conn();
+        let read = (|| {
+            let mut stmt = conn.prepare(
+                "SELECT id, url, name, etag, last_modified, last_success, last_error,
+                        failing_since, failures, next_attempt, kept_days
+                 FROM news_feeds ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(chartgen_news::FeedState {
+                    id: r.get(0)?,
+                    url: r.get(1)?,
+                    name: r.get(2)?,
+                    etag: r.get(3)?,
+                    last_modified: r.get(4)?,
+                    last_success: r.get(5)?,
+                    last_error: r.get(6)?,
+                    failing_since: r.get(7)?,
+                    failures: r.get(8)?,
+                    next_attempt: r.get(9)?,
+                    kept_days: r.get(10)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })();
+        read.map_err(|e| e.to_string())
+    }
+
+    fn save_feed(&self, f: &chartgen_news::FeedState) -> Result<(), String> {
+        self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO news_feeds
+                     (id, url, name, etag, last_modified, last_success, last_error,
+                      failing_since, failures, next_attempt, kept_days)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    f.id,
+                    f.url,
+                    f.name,
+                    f.etag,
+                    f.last_modified,
+                    f.last_success,
+                    f.last_error,
+                    f.failing_since,
+                    f.failures,
+                    f.next_attempt,
+                    f.kept_days
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(all(test, feature = "news"))]
+mod news_tests {
+    use super::*;
+    use chartgen_news::{Carrier, FeedState, Recorded, Store as _};
+
+    fn headline(url: &str, published: i64) -> Recorded {
+        Recorded {
+            url: url.into(),
+            source: "outlet".into(),
+            carriers: vec![Carrier {
+                source: "outlet".into(),
+                language: "en".into(),
+                categories: vec!["Markets".into()],
+                first_seen: published + 60,
+            }],
+            outlet: "Outlet".into(),
+            kind: "rss".into(),
+            language: "en".into(),
+            title: "Bitcoin and Ether slide".into(),
+            published,
+            from_updated: published % 2 == 1,
+            first_seen: published + 60,
+            categories: vec!["Markets".into()],
+            coins: vec!["BTC".into(), "ETH".into()],
+            author: (published % 2 == 0).then(|| "Example Wire".into()),
+        }
+    }
+
+    #[test]
+    fn the_news_is_recorded_once_and_survives_a_restart() {
+        let dir = crate::test_dir::new("news_store");
+        let path = dir.join("chartgen.db");
+        let feed = FeedState {
+            id: "outlet".into(),
+            url: "https://outlet.example/rss".into(),
+            name: "Outlet".into(),
+            etag: Some("\"v1\"".into()),
+            last_success: Some(1_000),
+            failures: 2,
+            failing_since: Some(900),
+            last_error: Some("HTTP 503".into()),
+            next_attempt: 1_600,
+            kept_days: 365,
+            ..FeedState::default()
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            let items = [
+                headline("https://a.example/1", 100),
+                headline("https://a.example/2", 201),
+            ];
+            assert_eq!(store.save_items(&items).unwrap(), 2);
+            // A link recorded already is left as it was, and gains the source that carried
+            // it too.
+            let mut again = headline("https://a.example/1", 300);
+            again.title = "Edited".into();
+            again.source = "other".into();
+            again.categories = vec!["Solana".into()];
+            assert_eq!(store.save_items(&[again]).unwrap(), 0);
+            store.save_feed(&feed).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let mut first = headline("https://a.example/1", 100);
+        // The other source, with its own categories for it.
+        first.carriers.push(Carrier {
+            source: "other".into(),
+            language: "en".into(),
+            categories: vec!["Solana".into()],
+            first_seen: 360,
+        });
+        assert_eq!(
+            store.items(0, 1_000, None).unwrap(),
+            [headline("https://a.example/2", 201), first]
+        );
+        assert_eq!(store.items(150, 1_000, None).unwrap().len(), 1);
+        assert_eq!(store.feeds().unwrap(), [feed]);
+        assert_eq!(store.forget_items(150).unwrap(), 1);
+        assert_eq!(store.items(0, 1_000, None).unwrap().len(), 1);
+    }
+
+    /// How long a week's read (`get_news` with `hours: 168`) holds the store's lock, on a
+    /// week of about 820 headlines a day, a tenth of them carried by a second source.
+    /// `cargo test --release --lib -- --ignored a_weeks_read --nocapture`
+    #[test]
+    #[ignore]
+    fn a_weeks_read_of_the_record_is_quick() {
+        let dir = crate::test_dir::new("news_week");
+        let store = Store::open(&dir.join("chartgen.db")).unwrap();
+        let now = 1_800_000_000;
+        let rows: Vec<Recorded> = (0..5_740)
+            .map(|i| {
+                let mut r = headline(
+                    &format!("https://outlet{}.example/news/{i}", i % 29),
+                    now - i * 105,
+                );
+                r.source = format!("source-{}", i % 29);
+                r.title = format!("A headline of about the usual length, number {i}");
+                r
+            })
+            .collect();
+        store.save_items(&rows).unwrap();
+        let again: Vec<Recorded> = rows
+            .iter()
+            .step_by(10)
+            .map(|r| Recorded {
+                source: "second".into(),
+                ..r.clone()
+            })
+            .collect();
+        store.save_items(&again).unwrap();
+        let one = ["source-3".to_string()];
+        let four: Vec<String> = (0..4).map(|i| format!("source-{i}")).collect();
+        for (what, sources, rows) in [
+            ("every source", None, 5_740),
+            ("four sources", Some(&four[..]), 792),
+            ("one source", Some(&one[..]), 198),
+        ] {
+            let mut times = Vec::new();
+            for _ in 0..20 {
+                let at = std::time::Instant::now();
+                let got = store.items(now - 168 * 3600, now, sources).unwrap();
+                times.push(at.elapsed());
+                assert_eq!(got.len(), rows, "{what}");
+            }
+            times.sort();
+            eprintln!(
+                "a week's read of {what}: median {:?}, slowest {:?}",
+                times[times.len() / 2],
+                times[times.len() - 1]
+            );
+        }
+        // A recorder's write of one feed's 30 items, for comparison.
+        let batch: Vec<Recorded> = rows.iter().take(30).cloned().collect();
+        let at = std::time::Instant::now();
+        store.save_items(&batch).unwrap();
+        eprintln!("a feed's write of 30 known headlines: {:?}", at.elapsed());
+    }
 }
 
 static STORE: OnceLock<Option<Store>> = OnceLock::new();

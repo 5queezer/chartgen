@@ -649,10 +649,11 @@ export const MarketContextPayloadSchema = z.object({
 export type MarketContextPayload = z.infer<typeof MarketContextPayloadSchema>;
 
 // ---------------------------------------------------------------------------
-// get_news (ADR-0086)
-//   Produced by `answer` in `src/news.rs`. Headlines only, newest first. A feed that
-//   could not be read is in `sources_failed`; `more` is present only when more
-//   headlines matched than `limit`.
+// get_news (ADR-0086, ADR-0088)
+//   Produced by `compose` in `crates/news/src/lib.rs`, from the feeds or from the server's
+//   record. Headlines only, newest first. A feed that could not be read is in
+//   `sources_failed`; `more` is present only when more headlines matched than
+//   `limit`.
 // ---------------------------------------------------------------------------
 
 export const NewsItemSchema = z.object({
@@ -673,7 +674,16 @@ export const NewsPayloadSchema = z.object({
   items: z.array(NewsItemSchema),
   more: z.number().int().optional(),
   sources: z.array(z.string()),
-  sources_failed: z.array(z.object({ source: z.string(), error: z.string() })),
+  /** Present when no name is known for the coin: it is found by its ticker alone (ADR-0088). */
+  note: z.string().optional(),
+  sources_failed: z.array(
+    z.object({
+      source: z.string(),
+      error: z.string(),
+      /** From the server's record (ADR-0088): when the feed's failures in a row began. */
+      since: z.string().optional(),
+    }),
+  ),
 });
 export type NewsPayload = z.infer<typeof NewsPayloadSchema>;
 

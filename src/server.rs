@@ -2236,6 +2236,9 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     #[cfg(feature = "scripting")]
     if crate::replay::global().is_none() {
         chartgen::indicators::external::record::start();
+        // The news, recorded every 5 minutes (ADR-0088).
+        #[cfg(feature = "news")]
+        crate::news::start_recording();
     }
     refresh::sweep_now_and_then(state.clone());
 

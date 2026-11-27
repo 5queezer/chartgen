@@ -12,7 +12,7 @@
     <link href="https://news.example.com/solana-validators"/>
     <updated>2026-11-25T07:00:00.000Z</updated>
     <published>2026-11-25T06:00:00.000Z</published>
-    <author><name>Example Author</name></author>
+    <author><name>Example Author</name><email>author@news.example.com</email></author>
     <category label="Markets" term="Markets"/>
   </entry>
   <entry>
