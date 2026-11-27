@@ -112,7 +112,7 @@ one and link both ways.
 | [0083](/chartgen/decisions/0083-a-rule-based-strategy-tester/) | A rule-based strategy tester over replay fixtures | Accepted | 2026-11-24 |
 | [0084](/chartgen/decisions/0084-conditions-joined-by-and/) | Server alert conditions joined by AND | Accepted | 2026-11-24 |
 | [0085](/chartgen/decisions/0085-open-interests-change-on-server-alerts/) | Server alerts on open interest's change over N bars | Accepted; amended by [0082](/chartgen/decisions/0082-recording-open-interest-history/) | 2026-11-25 |
-| [0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/) | News per symbol from public RSS feeds | Accepted; amended by [0088](/chartgen/decisions/0088-recording-the-news/) | 2026-11-25 |
+| [0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/) | News per symbol from public RSS feeds | Accepted; superseded in part by [0088](/chartgen/decisions/0088-recording-the-news/) | 2026-11-25 |
 | [0087](/chartgen/decisions/0087-a-skips-bracket-from-its-fill/) | A skip's bracket is measured from its fill; skips scored before are marked, not rescored | Accepted | 2026-11-25 |
-| [0088](/chartgen/decisions/0088-recording-the-news/) | Recording the news | Accepted | 2026-11-25 |
+| [0088](/chartgen/decisions/0088-recording-the-news/) | Recording the news | Accepted; supersedes [0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/) in part | 2026-11-25 |
 | [0091](/chartgen/decisions/0091-a-setups-page/) | A Setups page at /setups, and a Setups tab for the chart's symbol | Accepted | 2026-11-25 |

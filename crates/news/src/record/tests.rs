@@ -1,7 +1,16 @@
 use super::super::tests::{fixture, NOW};
 use super::*;
-use crate::FeedState;
+use crate::{Carrier, FeedState};
 use std::sync::{Arc, Mutex};
+
+fn carrier(r: &Recorded) -> Carrier {
+    Carrier {
+        source: r.source.clone(),
+        language: r.language.clone(),
+        categories: r.categories.clone(),
+        first_seen: r.first_seen,
+    }
+}
 
 /// A store in memory, as chartgen's SQLite store keeps the record.
 #[derive(Default)]
@@ -21,11 +30,13 @@ impl Store for Memory {
         let mut new = 0;
         for i in items {
             match held.iter_mut().find(|h| h.url == i.url) {
-                Some(h) if !h.carried_by.contains(&i.source) => h.carried_by.push(i.source.clone()),
+                Some(h) if !h.carriers.iter().any(|c| c.source == i.source) => {
+                    h.carriers.push(carrier(i))
+                }
                 Some(_) => {}
                 None => {
                     held.push(Recorded {
-                        carried_by: vec![i.source.clone()],
+                        carriers: vec![carrier(i)],
                         ..i.clone()
                     });
                     new += 1;
@@ -35,9 +46,15 @@ impl Store for Memory {
         Ok(new)
     }
 
-    fn items(&self, from: i64, to: i64) -> Result<Vec<Recorded>, String> {
+    fn items(
+        &self,
+        from: i64,
+        to: i64,
+        sources: Option<&[String]>,
+    ) -> Result<Vec<Recorded>, String> {
         let mut found: Vec<Recorded> = (self.items.lock().unwrap().iter())
             .filter(|i| (from..=to).contains(&i.published))
+            .filter(|i| sources.is_none_or(|s| i.carriers.iter().any(|c| s.contains(&c.source))))
             .cloned()
             .collect();
         found.sort_by_key(|i| std::cmp::Reverse(i.published));
@@ -57,7 +74,8 @@ impl Store for Memory {
 
     fn save_feed(&self, feed: &FeedState) -> Result<(), String> {
         let mut held = self.feeds.lock().unwrap();
-        held.retain(|f| f.url != feed.url);
+        // By id, as the SQLite store keys it.
+        held.retain(|f| f.id != feed.id);
         held.push(feed.clone());
         Ok(())
     }
@@ -122,7 +140,7 @@ fn at(t: i64) -> impl FnMut() -> i64 {
 }
 
 fn recorded(store: &dyn Store) -> Vec<Recorded> {
-    store.items(0, i64::MAX).unwrap()
+    store.items(0, i64::MAX, None).unwrap()
 }
 
 fn state(store: &dyn Store, url: &str) -> FeedState {
@@ -161,7 +179,12 @@ fn a_round_records_each_headline_once_with_when_it_was_first_read() {
         Recorded {
             url: "https://www.coindesk.com/markets/2026/11/25/btc-slips-example".into(),
             source: "coindesk".into(),
-            carried_by: vec!["coindesk".into()],
+            carriers: vec![Carrier {
+                source: "coindesk".into(),
+                language: "en".into(),
+                categories: vec!["Markets".into()],
+                first_seen: NOW,
+            }],
             outlet: "CoinDesk".into(),
             kind: "rss".into(),
             language: "en".into(),
@@ -323,7 +346,7 @@ fn headlines_older_than_the_retention_are_dropped_and_not_recorded_again() {
     let old = Recorded {
         url: "https://old.example/a".into(),
         source: "old".into(),
-        carried_by: vec![],
+        carriers: vec![],
         outlet: "Old".into(),
         kind: "rss".into(),
         language: "en".into(),
@@ -474,34 +497,169 @@ fn a_retry_after_that_is_no_multiple_of_a_round_is_kept_to_the_second() {
     assert_eq!(asked, 2);
 }
 
-#[test]
-fn a_headline_two_sources_carry_is_one_row_and_answers_for_either() {
-    let store = Memory::default();
-    let a = feed("Desk A", "https://a.example/rss");
-    let b = feed("Desk B", "https://b.example/rss");
-    let item = Item {
-        title: "Solana validators vote".into(),
-        url: "https://news.example.com/solana".into(),
-        published: NOW - 600,
-        ..Item::default()
-    };
-    store
-        .save_items(&rows(&a, std::slice::from_ref(&item), 0, NOW - 300))
-        .unwrap();
-    assert_eq!(store.save_items(&rows(&b, &[item], 0, NOW)).unwrap(), 0);
+/// A source read just now, as the recorder leaves its state.
+fn read_now(store: &Memory, source: &Source) {
     store
         .save_feed(&FeedState {
-            id: b.id.clone(),
-            url: b.url.clone(),
+            id: source.id.clone(),
+            url: source.url.clone(),
             last_success: Some(NOW),
             ..FeedState::default()
         })
         .unwrap();
-    // Asked for B alone, the headline is B's.
-    let v = answer(&store, &[&b], "SOLUSDT", 24, 10, NOW).unwrap();
+}
+
+#[test]
+fn a_headline_two_sources_carry_is_one_row_and_each_matches_by_what_it_said() {
+    let store = Memory::default();
+    let general = feed("Desk A", "https://a.example/rss");
+    let solana = feed("Desk B", "https://b.example/rss");
+    let item = |categories: &[&str]| Item {
+        title: "Network upgrade ships".into(),
+        url: "https://news.example.com/upgrade".into(),
+        published: NOW - 600,
+        categories: categories.iter().map(|c| c.to_string()).collect(),
+        ..Item::default()
+    };
+    // A first, under Markets; B later, under Solana.
+    let first = rows(&general, &[item(&["Markets"])], 0, NOW - 300);
+    store.save_items(&first).unwrap();
+    let later = rows(&solana, &[item(&["Solana"])], 0, NOW);
+    assert_eq!(store.save_items(&later).unwrap(), 0);
+    assert_eq!(store.items(0, NOW, None).unwrap().len(), 1);
+    read_now(&store, &general);
+    read_now(&store, &solana);
+    // B alone: its own category makes it Solana's.
+    let v = answer(&store, &[&solana], "SOLUSDT", 24, 10, NOW).unwrap();
     assert_eq!(v["items"][0]["source"], "Desk B");
-    // Asked for both, it is shown once, as the first that read it.
-    let v = answer(&store, &[&a, &b], "SOLUSDT", 24, 10, NOW).unwrap();
+    // Both: A, recorded first, does not hide B's match; shown once.
+    let v = answer(&store, &[&general, &solana], "SOLUSDT", 24, 10, NOW).unwrap();
     assert_eq!(v["items"].as_array().unwrap().len(), 1);
-    assert_eq!(v["items"][0]["source"], "Desk A");
+    assert_eq!(v["items"][0]["source"], "Desk B");
+    // A alone: not Solana's.
+    let v = answer(&store, &[&general], "SOLUSDT", 24, 10, NOW).unwrap();
+    assert!(v["items"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_headline_a_source_of_another_language_carries_too_answers_in_that_language() {
+    let store = Memory::default();
+    let english = feed("Desk A", "https://a.example/rss");
+    let german = Source {
+        language: "de".into(),
+        ..feed("Desk De", "https://de.example/rss")
+    };
+    let item = Item {
+        title: "Bitcoin steigt".into(),
+        url: "https://news.example.com/btc".into(),
+        published: NOW - 600,
+        ..Item::default()
+    };
+    store
+        .save_items(&rows(&english, std::slice::from_ref(&item), 0, NOW - 300))
+        .unwrap();
+    store
+        .save_items(&rows(&german, std::slice::from_ref(&item), 0, NOW))
+        .unwrap();
+    read_now(&store, &german);
+    let v = answer(&store, &[&german], "BTCUSDT", 24, 10, NOW).unwrap();
+    assert_eq!(v["items"][0]["source"], "Desk De");
+}
+
+#[test]
+fn a_source_given_another_url_is_not_read_until_that_one_is() {
+    let store = Memory::default();
+    let before = feed("Desk", "https://old.example/rss");
+    let mut asked = Vec::new();
+    round(
+        &store,
+        std::slice::from_ref(&before),
+        365,
+        &mut at(NOW),
+        &mut |url: &str, _: Option<&str>, _: Option<&str>| {
+            asked.push(url.to_string());
+            Ok(Got::Feed {
+                xml: fixture("coindesk"),
+                etag: Some("\"old\"".into()),
+                last_modified: None,
+            })
+        },
+        &mut || {},
+    );
+    let moved = feed("Desk", "https://new.example/rss");
+    // Before the recorder reads the new URL: not current, so the feeds are read.
+    assert!(answer(&store, &[&moved], "BTCUSDT", 24, 10, NOW + 60).is_none());
+    // The new URL is asked for without the old one's ETag, and its state replaces the old.
+    let mut sent = Vec::new();
+    round(
+        &store,
+        std::slice::from_ref(&moved),
+        365,
+        &mut at(NOW + 300),
+        &mut |url: &str, etag: Option<&str>, _: Option<&str>| {
+            sent.push((url.to_string(), etag.map(str::to_string)));
+            Ok(Got::NotModified)
+        },
+        &mut || {},
+    );
+    assert_eq!(sent, [("https://new.example/rss".to_string(), None)]);
+    let states = store.feeds().unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].url, "https://new.example/rss");
+    let v = answer(&store, &[&moved], "BTCUSDT", 24, 10, NOW + 360).unwrap();
+    assert_eq!(v["sources"], json!(["Desk"]));
+}
+
+#[test]
+fn a_longer_retention_reads_a_feed_whole_again() {
+    let store = Memory::default();
+    let feeds = two();
+    let mut asked = Vec::new();
+    // A day kept: CoinDesk's items of two days ago are left out.
+    let later = NOW + 1_800;
+    round(
+        &store,
+        &feeds,
+        1,
+        &mut at(later),
+        &mut outlets(&mut asked, &[]),
+        &mut || {},
+    );
+    let kept = recorded(&store).len();
+    // A week kept, after a restart: asked without the ETag, and the rest is recorded.
+    asked.clear();
+    let new = round(
+        &store,
+        &feeds,
+        7,
+        &mut at(later + 300),
+        &mut outlets(&mut asked, &[]),
+        &mut || {},
+    );
+    assert_eq!(asked[0].1, None);
+    assert!(new > 0 && recorded(&store).len() == kept + new);
+    // The same week again: conditional once more.
+    asked.clear();
+    round(
+        &store,
+        &feeds,
+        7,
+        &mut at(later + 600),
+        &mut outlets(&mut asked, &[]),
+        &mut || {},
+    );
+    assert_eq!(asked[0].1.as_deref(), Some("\"v1\""));
+}
+
+#[test]
+fn retention_is_bounded_and_its_cutoff_never_in_the_future() {
+    assert_eq!(days_from(None), Ok(365));
+    assert_eq!(days_from(Some(" 90 ")), Ok(90));
+    assert_eq!(days_from(Some("0")), Ok(0));
+    assert!(days_from(Some("-1")).is_err());
+    assert!(days_from(Some(&i64::MAX.to_string())).is_err());
+    assert!(days_from(Some("36501")).is_err());
+    assert!(cutoff(NOW, i64::MAX) <= NOW);
+    assert!(cutoff(NOW, 36_500) < NOW);
+    assert_eq!(cutoff(NOW, 1), NOW - DAY_S);
 }

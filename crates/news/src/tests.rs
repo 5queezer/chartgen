@@ -256,10 +256,12 @@ fn an_item_with_an_empty_link_is_left_out() {
     let items = parse(xml, "https://news.example.com/feed").unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].url, "https://news.example.com/three");
-    // An Atom link with an empty href, the same.
+    // An Atom link with an empty href, the same: a feed with no headlines to keep.
     let atom = r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Bitcoin</title>
         <link href=""/><published>2026-11-25T06:00:00Z</published></entry></feed>"#;
-    assert!(parse(atom, "https://news.example.com/feed").is_err());
+    assert!(parse(atom, "https://news.example.com/feed")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -457,4 +459,124 @@ fn a_headlines_coins_are_those_of_the_table_it_names_and_its_cashtags() {
     assert!(coins("Fees fall to $5 as $pepe holders wait", &[]).is_empty());
     assert!(coins("Crypto optimism returns", &[]).is_empty());
     assert_eq!(coins("A$AI is not a cashtag; $AI is", &[]), ["AI"]);
+}
+
+#[test]
+fn a_feed_without_entries_is_read_and_a_page_is_not() {
+    let feed = "https://news.example.com/feed";
+    let empty = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+        <title>Quiet</title><updated>2026-11-25T06:00:00Z</updated></feed>"#;
+    assert_eq!(parse(empty, feed).unwrap(), []);
+    assert_eq!(
+        parse("<rss><channel><title>Quiet</title></channel></rss>", feed).unwrap(),
+        []
+    );
+    assert!(parse("<html><body><p>Just a moment...</p></body></html>", feed).is_err());
+}
+
+#[test]
+fn a_link_keeps_its_query_but_for_tracking() {
+    let base = url::Url::parse("https://news.example.com/feed").unwrap();
+    let clean = |link: &str| clean_url(link, &base).unwrap();
+    assert_eq!(
+        clean("https://a.example/x?preview"),
+        "https://a.example/x?preview"
+    );
+    assert_eq!(
+        clean("https://a.example/x?utm_source=rss&id=7&utm_medium=feed&b"),
+        "https://a.example/x?id=7&b"
+    );
+    assert_eq!(
+        clean("https://a.example/x?utm_source=rss"),
+        "https://a.example/x"
+    );
+}
+
+#[test]
+fn retry_after_is_seconds_or_a_date() {
+    let now = time_of("Wed, 25 Nov 2026 08:00:00 GMT").unwrap();
+    assert_eq!(retry_after_of(" 120 ", now), Some(120));
+    assert_eq!(
+        retry_after_of("Wed, 25 Nov 2026 09:00:00 GMT", now),
+        Some(3600)
+    );
+    assert_eq!(
+        retry_after_of("Wed, 25 Nov 2026 07:00:00 GMT", now),
+        Some(0)
+    );
+    assert_eq!(retry_after_of("soon", now), None);
+}
+
+/// A server on this machine that answers one request with `head`, then `body` in pieces of
+/// `piece` bytes, `gap` apart. Its URL.
+fn serve(body: Vec<u8>, piece: usize, gap: std::time::Duration) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/feed", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let Ok((mut conn, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = [0u8; 4096];
+        let _ = conn.read(&mut request);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/rss+xml\r\nETag: \"v9\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        if conn.write_all(head.as_bytes()).is_err() {
+            return;
+        }
+        for chunk in body.chunks(piece.max(1)) {
+            if conn.write_all(chunk).is_err() {
+                return;
+            }
+            let _ = conn.flush();
+            std::thread::sleep(gap);
+        }
+    });
+    url
+}
+
+fn a_feed_of(bytes: usize) -> Vec<u8> {
+    let head = "<rss><channel><item><title>Bitcoin</title><link>https://a.example/1</link><pubDate>Wed, 25 Nov 2026 06:00:00 +0000</pubDate></item>";
+    let tail = "</channel></rss>";
+    let mut body = head.as_bytes().to_vec();
+    body.resize(bytes - tail.len(), b' ');
+    body.extend_from_slice(tail.as_bytes());
+    body
+}
+
+#[test]
+fn a_feed_sent_slowly_past_the_deadline_fails() {
+    let limit = std::time::Duration::from_millis(800);
+    // Each piece in time, the whole not: one deadline for the whole.
+    let url = serve(a_feed_of(400), 50, std::time::Duration::from_millis(200));
+    let at = Instant::now();
+    let got = request_within(&url, None, None, limit);
+    assert_eq!(got.unwrap_err().error, "timed out");
+    assert!(at.elapsed() < limit * 3, "{:?}", at.elapsed());
+    // The same, sent within it.
+    let url = serve(a_feed_of(400), 50, std::time::Duration::from_millis(10));
+    let Ok(Got::Feed { etag, .. }) = request_within(&url, None, None, limit) else {
+        panic!("a feed sent in time is read")
+    };
+    assert_eq!(etag.as_deref(), Some("\"v9\""));
+}
+
+#[test]
+fn a_feed_larger_than_the_most_read_fails_and_one_of_exactly_it_is_read() {
+    let limit = std::time::Duration::from_secs(20);
+    let url = serve(
+        a_feed_of(MAX_BYTES + 1),
+        64 << 10,
+        std::time::Duration::ZERO,
+    );
+    let err = request_within(&url, None, None, limit).unwrap_err();
+    assert!(err.error.starts_with("larger than"), "{}", err.error);
+    let url = serve(a_feed_of(MAX_BYTES), 64 << 10, std::time::Duration::ZERO);
+    let Ok(Got::Feed { xml, .. }) = request_within(&url, None, None, limit) else {
+        panic!("a feed of the most read is read")
+    };
+    assert_eq!(xml.len(), MAX_BYTES);
+    assert_eq!(parse(&xml, &url).unwrap().len(), 1);
 }

@@ -31,14 +31,30 @@ const DAY_S: i64 = 86_400;
 /// `CHARTGEN_NEWS_RECORD_DAYS`: how long a headline is kept after it was published,
 /// default 365; 0 records nothing.
 fn days() -> Result<i64, String> {
-    match std::env::var("CHARTGEN_NEWS_RECORD_DAYS") {
-        Err(_) => Ok(DEFAULT_DAYS),
-        Ok(v) => {
-            v.trim().parse().ok().filter(|d| *d >= 0).ok_or_else(|| {
-                format!("CHARTGEN_NEWS_RECORD_DAYS must be a number of days, not {v}")
-            })
-        }
+    days_from(std::env::var("CHARTGEN_NEWS_RECORD_DAYS").ok().as_deref())
+}
+
+/// The most days a headline can be kept: a century, far inside what the cutoff's arithmetic
+/// holds, so a cutoff can never land in the future and drop what is current.
+const MAX_DAYS: i64 = 36_500;
+
+fn days_from(value: Option<&str>) -> Result<i64, String> {
+    match value {
+        None => Ok(DEFAULT_DAYS),
+        Some(v) => v
+            .trim()
+            .parse()
+            .ok()
+            .filter(|d| (0..=MAX_DAYS).contains(d))
+            .ok_or_else(|| {
+                format!("CHARTGEN_NEWS_RECORD_DAYS must be a number of days from 0 to {MAX_DAYS}, not {v}")
+            }),
     }
+}
+
+/// The oldest a headline may be published to be kept, `days` before `now`.
+fn cutoff(now: i64, days: i64) -> i64 {
+    now.saturating_sub(days.clamp(0, MAX_DAYS) * DAY_S)
 }
 
 /// Whether the news is recorded (`CHARTGEN_NEWS_RECORD_DAYS` is not 0, nor bad). A record
@@ -129,6 +145,11 @@ fn round(
         if state.next_attempt > now {
             continue;
         }
+        // Kept longer now than when the validators were saved: what the feed left out
+        // then is read again, whole.
+        if days > state.kept_days {
+            (state.etag, state.last_modified) = (None, None);
+        }
         let got = fetch(
             &feed.url,
             state.etag.as_deref(),
@@ -147,7 +168,7 @@ fn round(
                 last_modified,
             } => {
                 let items = parse(&xml, &feed.url).map_err(Failed::from)?;
-                let rows = rows(feed, &items, now - days * DAY_S, now);
+                let rows = rows(feed, &items, cutoff(now, days), now);
                 let saved = store
                     .save_items(&rows)
                     .map_err(|e| Failed::from(format!("cannot record: {e}")))?;
@@ -164,6 +185,7 @@ fn round(
                 // not be asked for with its validators and answer "not modified".
                 if let Some((etag, last_modified)) = read {
                     (state.etag, state.last_modified) = (etag, last_modified);
+                    state.kept_days = days;
                 }
                 if state.failures > 0 {
                     eprintln!(
@@ -195,7 +217,7 @@ fn round(
         }
     }
     let now = clock();
-    if let Err(e) = store.forget_items(now - days * DAY_S) {
+    if let Err(e) = store.forget_items(cutoff(now, days)) {
         eprintln!("[news-record] cannot drop old headlines: {e}");
     }
     new
@@ -210,7 +232,7 @@ fn rows(source: &Source, items: &[Item], oldest: i64, now: i64) -> Vec<Recorded>
         .map(|i| Recorded {
             url: i.url.clone(),
             source: source.id.clone(),
-            carried_by: Vec::new(),
+            carriers: Vec::new(),
             outlet: source.name.clone(),
             kind: source.kind.as_str().into(),
             language: source.language.clone(),
@@ -241,43 +263,52 @@ pub(super) fn answer(
     now: i64,
 ) -> Option<Value> {
     let states = store.feeds().ok()?;
-    if !states
-        .iter()
-        .any(|s| s.last_success.is_some_and(|t| now - t <= CURRENT_S))
-    {
+    // A source's state counts for the URL it is configured with now: one given a new URL
+    // is not read until that one is.
+    let state_of = |f: &Source| states.iter().find(|s| s.id == f.id && s.url == f.url);
+    if !feeds.iter().any(|f| {
+        state_of(f)
+            .and_then(|s| s.last_success)
+            .is_some_and(|t| now - t <= CURRENT_S)
+    }) {
         return None;
     }
+    // Only the asked-for sources' headlines are read, so a call for one source does not
+    // hold the store for all of them.
+    let ids: Vec<String> = feeds.iter().map(|f| f.id.clone()).collect();
     let rows = store
-        .items(now - hours as i64 * 3600, now + super::SKEW_S)
+        .items(now - hours as i64 * 3600, now + super::SKEW_S, Some(&ids))
         .ok()?;
+    // A headline once for each asked-for source that carried it, with that source's own
+    // categories, in the order they first did; `compose` matches each and keeps a link
+    // once, so a source that files it under the coin is not hidden by one that does not.
     let items: Vec<(&Source, Item)> = rows
         .iter()
-        .filter_map(|r| {
-            // The source it was first read from, if asked for; else the first of the others
-            // that carried it and are.
-            let picked = |id: &String| {
-                feeds
+        .flat_map(|r| {
+            r.carriers.iter().filter_map(move |c| {
+                let source = feeds
                     .iter()
-                    .find(|s| &s.id == id && s.language == r.language)
-            };
-            let source = picked(&r.source).or_else(|| r.carried_by.iter().find_map(picked))?;
-            let item = Item {
-                title: r.title.clone(),
-                url: r.url.clone(),
-                published: r.published,
-                from_updated: r.from_updated,
-                categories: r.categories.clone(),
-                author: r.author.clone().unwrap_or_default(),
-            };
-            Some((*source, item))
+                    .find(|s| s.id == c.source && s.language == c.language)?;
+                let item = Item {
+                    title: r.title.clone(),
+                    url: r.url.clone(),
+                    published: r.published,
+                    from_updated: r.from_updated,
+                    categories: c.categories.clone(),
+                    author: r.author.clone().unwrap_or_default(),
+                };
+                Some((*source, item))
+            })
         })
         .collect();
     let found = items.iter().map(|(o, i)| (*o, i)).collect();
     let (mut read_ok, mut failed) = (Vec::new(), Vec::new());
     for feed in feeds {
-        match states.iter().find(|s| s.id == feed.id) {
-            Some(s) if s.failures == 0 => read_ok.push(feed.name.as_str()),
-            Some(s) => {
+        match state_of(feed) {
+            Some(s) if s.failures == 0 && s.last_success.is_some() => {
+                read_ok.push(feed.name.as_str())
+            }
+            Some(s) if s.failures > 0 => {
                 let mut f = json!({
                     "source": feed.name,
                     "error": s.last_error.as_deref().unwrap_or("failed"),
@@ -287,7 +318,7 @@ pub(super) fn answer(
                 }
                 failed.push(f);
             }
-            None => failed.push(json!({ "source": feed.name, "error": "not read yet" })),
+            _ => failed.push(json!({ "source": feed.name, "error": "not read yet" })),
         }
     }
     read_ok.dedup();

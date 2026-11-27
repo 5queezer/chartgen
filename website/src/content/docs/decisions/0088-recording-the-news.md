@@ -7,8 +7,11 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-25
-**Amends:** [ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/) (five feeds,
-read on demand and held in memory only)
+**Supersedes in part:** [ADR-0086](/chartgen/decisions/0086-news-per-symbol-from-public-feeds/):
+its list of five feeds (now sources as configuration, below), "nothing is kept" (now a record of a
+year) and its table of about 30 coins' names (now about 130, and ordinary-word names in Title Case
+only with the ticker). Its tool, its fields, its matching otherwise and its reading of the feeds
+when asked stand, the last as the path when the record is not current.
 
 ## Context and Problem Statement
 
@@ -180,25 +183,33 @@ CREATE TABLE news_items (
     author       TEXT               -- dc:creator, author, an Atom author's name
 ) WITHOUT ROWID;
 CREATE INDEX news_items_published ON news_items (published);
--- Every source that carried a link, and when it first did.
+-- Every source that carried a link: when it first did, its language, its categories for it.
 CREATE TABLE news_item_sources (url TEXT NOT NULL, source TEXT NOT NULL,
-    first_seen INTEGER NOT NULL, PRIMARY KEY (url, source)) WITHOUT ROWID;
+    first_seen INTEGER NOT NULL, language TEXT NOT NULL, categories TEXT NOT NULL,
+    PRIMARY KEY (url, source)) WITHOUT ROWID;
 CREATE TABLE news_feeds (id TEXT PRIMARY KEY, url TEXT NOT NULL, name TEXT NOT NULL, etag TEXT,
     last_modified TEXT, last_success INTEGER, last_error TEXT, failing_since INTEGER,
-    failures INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0);
+    failures INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0,
+    kept_days INTEGER NOT NULL DEFAULT 0);  -- the retention its validators were saved under
 ```
 
 - **Each headline once**, by its link: a link read again (a later round, an edited title)
   leaves the row as it was first read. Every recorded headline has a link, since an item without
   one is not read (ADR-0086), so the outlet and title are never needed as the key. A link that a
   second source carries too (two feeds of one outlet, an aggregator) keeps its one row and adds
-  that source to `news_item_sources`, with when it first carried it, so a call that names only
-  the second source still finds it, and grouping (ADR-0089) can count who carried a story and
-  when.
+  that source to `news_item_sources`, with when it first carried it, its language and its own
+  categories for it. An answer matches each asked-for source that carried a link by what that
+  source said of it, then shows the link once: a call that names only the second source finds
+  it as the feed read now would, and one source that files a story under the coin is not hidden
+  by another that recorded it first without. Grouping (ADR-0089) can count who carried a story
+  and when.
 - **Recorded before it counts as read:** a source's `ETag`, `Last-Modified` and last success
   move on only once its new headlines are in the store. A store that fails is a failure of that
   source, tried again with the backoff, and the next try reads the feed whole, rather than being
-  told "not modified" about headlines that were never kept.
+  told "not modified" about headlines that were never kept. Likewise a longer retention than
+  the one its validators were saved under reads it whole once, as it now keeps what it left out.
+- **A source's state is its URL's:** one given another URL starts afresh, is not current and
+  is "not read yet" until the new URL is read.
 - **The coins** are ADR-0086's heuristic applied when the headline is read: each coin of its
   table of about 30 that the title or a category names, then each cashtag in the title
   (`$PEPE`); for a source about certain coins, those. They are kept so a later change to the table does not rewrite what was matched
@@ -240,18 +251,26 @@ feeds share a host). Each request:
   (`If-Modified-Since`), and a `304 Not Modified` is a read with nothing new. They are kept only
   from a response that was a feed, so a challenge page cannot make the next request answer "not
   modified".
-- has the limits of ADR-0086: 8 s, 4 MB, and the user agent `chartgen/<version>` with the
-  project's URL.
+- has ADR-0086's limits, now strict: **8 s from its start to the last byte**, read against one
+  deadline, as reqwest's own timeout applies to each read and a feed sent a few bytes at a time
+  would otherwise hold the round; and **4 MB**, a larger feed failing (`larger than 4 MB`) rather
+  than being cut, since a cut feed parses and its `ETag` would then stand for headlines never
+  read. The user agent is `chartgen/<version>` with the project's URL. The same applies to the
+  feeds read when asked.
+- counts a feed with no items (Atom allows one) as read; only a page with no RSS or Atom root
+  at all (a challenge page) is `no headlines in it`.
 - records the items published within the retention, each new one with the time of the read as its
   first seen.
 
 **A feed that fails** (an HTTP error, a time-out, a page that is not a feed, a store that cannot
 record) is tried again after 5 minutes, then 10, 20, 40, and so on up to 6 hours between tries,
-or after its `Retry-After` if that is longer (up to a day), never before it. Its state says why it last failed and since when; the log says when
+or after its `Retry-After` if that is longer (up to a day; seconds or an HTTP date), never before it. Its state says why it last failed and since when; the log says when
 a feed starts failing and when it is read again, and once an hour how many headlines came in.
 
-**Retention:** `CHARTGEN_NEWS_RECORD_DAYS`, default 365; a headline published longer ago is
-dropped, and one that old is not recorded. `0` records nothing. A year lets a coin's normal be
+**Retention:** `CHARTGEN_NEWS_RECORD_DAYS`, default 365, at most 36,500 (a larger value is an
+error, and the cutoff is computed so it can never land after now and drop what is current); a
+headline published longer ago is dropped, and one that old is not recorded. `0` records
+nothing. A year lets a coin's normal be
 taken over many weeks and leaves the record small (below).
 
 **`get_news` reads the record** when the store has a source read within the last 30 minutes,
@@ -416,6 +435,13 @@ Measured with SQLite 3.50 on a branch build reading the 34 sources from a deskto
   measured. A feed's `Cache-Control: max-age` or RSS `<ttl>` is not read: the conditional
   request already costs an unchanged feed no body, and reading them is left until a feed asks
   for more than 5 minutes.
+- **The store's lock:** an answer from the record reads only the asked-for sources' headlines.
+  On a week of about 820 headlines a day (5,740, a tenth carried by a second source), a read of
+  `hours: 168` held the store's lock for 24 ms (slowest of 20: 31 ms) for every source, 5.5 ms
+  for four (the default set) and 3 ms for one; a feed's write of 30 headlines 0.2 ms (an
+  optimised build on a desktop; an ARM board takes a few times as long, a debug build about
+  four). Every other user of the store (sign-in, setups, alerts) waits that long at most, once
+  per `get_news` call; reading every source's week is the case to keep rare.
 - **A restart** lost nothing and recorded nothing twice: 872 rows before it, 872 after the first
   round after it, which asked each source with what it had sent before.
 - **Failures seen:** CryptoSlate and CryptoPotato answered `429` once each in the first 15

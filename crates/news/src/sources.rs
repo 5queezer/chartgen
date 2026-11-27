@@ -195,7 +195,9 @@ fn parse(text: &str) -> Result<Vec<Source>, String> {
                 s.id, s.url
             ));
         }
-        if s.name.trim().is_empty() || s.language.trim().is_empty() {
+        // Stored as a caller asks for it: `" de "` is `de`.
+        s.language = s.language.trim().to_string();
+        if s.name.trim().is_empty() || s.language.is_empty() {
             return Err(format!("source {:?} needs a name and a language", s.id));
         }
         for coin in &mut s.coins {
@@ -224,14 +226,20 @@ fn from_feeds(list: &str) -> Result<Vec<Source>, String> {
             .map(str::to_string)
             .or_else(|| parsed.host_str().map(str::to_string))
             .unwrap_or_else(|| url.to_string());
-        let base = name
+        let words = name
             .to_lowercase()
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|w| !w.is_empty())
             .collect::<Vec<_>>()
             .join("-");
-        // Two names of one id ("Desk A", "Desk-A"): the second is `desk-a-2`.
-        let taken = |id: &str| sources.iter().any(|s: &Source| s.id == id);
+        // A name of no letters or digits is `feed`. Two names of one id ("Desk A",
+        // "Desk-A"): the second is `desk-a-2`; `all` is a pick, so a source named All is
+        // `all-2`.
+        let base = match words.is_empty() {
+            true => "feed".to_string(),
+            false => words,
+        };
+        let taken = |id: &str| id == "all" || sources.iter().any(|s: &Source| s.id == id);
         let id = std::iter::once(base.clone())
             .chain((2..).map(|n| format!("{base}-{n}")))
             .find(|id| !taken(id))
@@ -263,23 +271,30 @@ pub fn select<'a>(
                 false => marked,
             }
         }
-        Pick::Ids(ids) => ids
-            .iter()
-            .enumerate()
-            // An id named twice is one source.
-            .filter(|(at, id)| !ids[..*at].contains(id))
-            .map(|(_, id)| match all.iter().find(|s| &s.id == id) {
-                Some(s) if s.enabled => Ok(s),
-                Some(_) => Err(format!("source {id:?} is switched off")),
-                None => Err(format!(
-                    "{id:?} is not a source; the sources are {}",
-                    enabled()
-                        .map(|s| s.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            })
-            .collect::<Result<_, _>>()?,
+        Pick::Ids(ids) => {
+            let listed = || {
+                enabled()
+                    .map(|s| s.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            ids.iter()
+                .enumerate()
+                // An id named twice is one source.
+                .filter(|(at, id)| !ids[..*at].contains(id))
+                .map(|(_, id)| match all.iter().find(|s| &s.id == id) {
+                    Some(s) if s.enabled => Ok(s),
+                    Some(_) => Err(format!(
+                        "source {id:?} is switched off; the sources are {}",
+                        listed()
+                    )),
+                    None => Err(format!(
+                        "{id:?} is not a source; the sources are {}",
+                        listed()
+                    )),
+                })
+                .collect::<Result<_, _>>()?
+        }
     };
     Ok(picked
         .into_iter()
@@ -315,7 +330,7 @@ mod tests {
     fn a_source_has_defaults_and_a_bad_one_is_refused() {
         let all = parse(
             r#"[{"id": "r-solana", "name": "r/solana", "kind": "reddit",
-            "url": "https://www.reddit.com/r/solana/.rss", "coins": ["sol"]}]"#,
+            "url": "https://www.reddit.com/r/solana/.rss", "coins": ["sol"], "language": " en "}]"#,
         )
         .unwrap();
         assert_eq!(
@@ -365,9 +380,11 @@ mod tests {
         );
         let twice = Pick::Ids(vec!["b".into(), "a".into(), "b".into()]);
         assert_eq!(ids(twice, "en").unwrap(), ["b", "a"]);
-        assert!(ids(Pick::Ids(vec!["c".into()]), "en")
-            .unwrap_err()
-            .contains("switched off"));
+        let off = ids(Pick::Ids(vec!["c".into()]), "en").unwrap_err();
+        assert!(
+            off.contains("switched off") && off.contains("the sources are a, b, d"),
+            "{off}"
+        );
         assert!(ids(Pick::Ids(vec!["x".into()]), "en")
             .unwrap_err()
             .contains("not a source"));
@@ -405,13 +422,13 @@ mod tests {
                 .map(|s| s.id)
                 .collect();
         assert_eq!(ids, ["desk-a", "desk-a-2"]);
-        let ids: Vec<String> =
-            from_feeds("Desk A=https://a.example/rss,Desk-A=https://b.example/rss")
-                .unwrap()
-                .into_iter()
-                .map(|s| s.id)
-                .collect();
-        assert_eq!(ids, ["desk-a", "desk-a-2"]);
+        // A source named All is not the pick `all`; one of no letters is `feed`.
+        let ids: Vec<String> = from_feeds("All=https://a.example/rss,!!!=https://b.example/rss")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, ["all-2", "feed"]);
         assert!(from_feeds("Old=ftp://a.example/rss").is_err());
     }
 

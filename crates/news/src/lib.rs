@@ -300,18 +300,34 @@ impl From<String> for Failed {
     }
 }
 
+/// One feed's request, from its start to the last byte.
+const TIMEOUT: Duration = Duration::from_secs(8);
+/// The most of a feed that is read; the largest default is under 2 MB. A larger one fails
+/// rather than being cut: a cut feed parses, and its `ETag` would then stand for headlines
+/// never read.
+const MAX_BYTES: usize = 4 << 20;
+
 /// Read a feed; conditionally, when `etag` or `last_modified` is given. Blocking.
 fn request(url: &str, etag: Option<&str>, last_modified: Option<&str>) -> Result<Got, Failed> {
+    request_within(url, etag, last_modified, TIMEOUT)
+}
+
+/// `request`, failing when the whole of it, from the start to the last byte of the body,
+/// takes longer than `limit`. A body sent slowly a little at a time counts: reqwest's own
+/// timeout applies to each read, so the body is read against one deadline. The last read
+/// may wait up to `limit` more before the deadline is seen.
+fn request_within(
+    url: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    limit: Duration,
+) -> Result<Got, Failed> {
     use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RETRY_AFTER};
     use std::io::Read;
-    /// One feed's request, connection to last byte.
-    const TIMEOUT: Duration = Duration::from_secs(8);
-    /// The most of a feed that is read; the largest default is under 2 MB.
-    const MAX_BYTES: u64 = 4 << 20;
+    let deadline = Instant::now() + limit;
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     let client = CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
-            .timeout(TIMEOUT)
             .user_agent(concat!(
                 "chartgen/",
                 env!("CARGO_PKG_VERSION"),
@@ -320,18 +336,17 @@ fn request(url: &str, etag: Option<&str>, last_modified: Option<&str>) -> Result
             .build()
             .unwrap_or_else(|_| reqwest::blocking::Client::new())
     });
-    let mut req = client.get(url);
+    let mut req = client.get(url).timeout(limit);
     if let Some(etag) = etag {
         req = req.header(IF_NONE_MATCH, etag);
     }
     if let Some(at) = last_modified {
         req = req.header(IF_MODIFIED_SINCE, at);
     }
-    let response = req.send().map_err(|e| {
-        Failed::from(match e.is_timeout() {
-            true => "timed out".to_string(),
-            false => "unreachable".to_string(),
-        })
+    let timed_out = || Failed::from("timed out".to_string());
+    let mut response = req.send().map_err(|e| match e.is_timeout() {
+        true => timed_out(),
+        false => Failed::from("unreachable".to_string()),
     })?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_MODIFIED {
@@ -345,21 +360,47 @@ fn request(url: &str, etag: Option<&str>, last_modified: Option<&str>) -> Result
             .map(str::to_string)
     };
     if !status.is_success() {
+        let now = chrono::Utc::now().timestamp();
         return Err(Failed {
             error: format!("HTTP {}", status.as_u16()),
-            retry_after: header(RETRY_AFTER).and_then(|v| v.trim().parse().ok()),
+            retry_after: header(RETRY_AFTER).and_then(|v| retry_after_of(&v, now)),
         });
     }
     let (etag, last_modified) = (header(ETAG), header(LAST_MODIFIED));
     let mut body = Vec::new();
-    response
-        .take(MAX_BYTES)
-        .read_to_end(&mut body)
-        .map_err(|_| Failed::from("read failed".to_string()))?;
+    let mut chunk = [0u8; 16 << 10];
+    loop {
+        if Instant::now() > deadline {
+            return Err(timed_out());
+        }
+        let n = match response.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) if Instant::now() > deadline => return Err(timed_out()),
+            Err(_) => return Err(Failed::from("read failed".to_string())),
+        };
+        body.extend_from_slice(&chunk[..n]);
+        if body.len() > MAX_BYTES {
+            return Err(Failed::from(format!("larger than {} MB", MAX_BYTES >> 20)));
+        }
+    }
+    if Instant::now() > deadline {
+        return Err(timed_out());
+    }
     Ok(Got::Feed {
         xml: String::from_utf8_lossy(&body).into_owned(),
         etag,
         last_modified,
+    })
+}
+
+/// A `Retry-After` value as seconds from `now`: a number of seconds, or an HTTP date.
+fn retry_after_of(value: &str, now: i64) -> Option<i64> {
+    let value = value.trim();
+    value.parse().ok().or_else(|| {
+        chrono::DateTime::parse_from_rfc2822(value)
+            .ok()
+            .map(|at| (at.timestamp() - now).max(0))
     })
 }
 
@@ -391,6 +432,8 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
     let mut field: Option<Field> = None;
     // Inside an Atom author's child other than its `name` (`email`, `uri`).
     let mut skip = false;
+    // An RSS or Atom root was seen: a feed, though perhaps one without items.
+    let mut a_feed = false;
     let mut text = String::new();
     loop {
         let event = reader
@@ -399,6 +442,9 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
         match event {
             Event::Start(e) => {
                 let name = e.name();
+                if item.is_none() && matches!(name.as_ref(), "rss" | "feed" | "rdf:RDF") {
+                    a_feed = true;
+                }
                 if let Some(it) = item.as_mut() {
                     depth += 1;
                     if depth == 1 {
@@ -422,6 +468,9 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
                 }
             }
             Event::Empty(e) => {
+                if item.is_none() && matches!(e.name().as_ref(), "rss" | "feed" | "rdf:RDF") {
+                    a_feed = true;
+                }
                 if let Some(it) = item.as_mut() {
                     if depth == 0 {
                         atom_attributes(it, &e, &base);
@@ -484,9 +533,9 @@ fn parse(xml: &str, feed_url: &str) -> Result<Vec<Item>, String> {
             _ => {}
         }
     }
-    // A feed always carries headlines; none is a page that is not the feed, such as a
-    // challenge page.
-    if items.is_empty() {
+    // A feed with no headlines is a feed (Atom allows one without entries); no feed element
+    // at all is a page that is not the feed, such as a challenge page.
+    if items.is_empty() && !a_feed {
         return Err("no headlines in it".into());
     }
     Ok(items)
@@ -535,15 +584,14 @@ fn clean_url(link: &str, base: &url::Url) -> Option<String> {
         .join(link)
         .ok()
         .filter(|u| matches!(u.scheme(), "http" | "https"))?;
-    let kept: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(k, _)| !k.starts_with("utm_"))
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-    if kept.is_empty() {
-        url.set_query(None);
-    } else {
-        url.query_pairs_mut().clear().extend_pairs(kept);
+    // Only the `utm_` components go; the others stay as written (`?preview` is not
+    // `?preview=`).
+    if let Some(query) = url.query().map(str::to_string) {
+        let kept: Vec<&str> = query
+            .split('&')
+            .filter(|c| !c.is_empty() && !c.starts_with("utm_"))
+            .collect();
+        url.set_query((!kept.is_empty()).then(|| kept.join("&")).as_deref());
     }
     Some(url.to_string())
 }
@@ -821,9 +869,10 @@ pub struct Recorded {
     pub url: String,
     /// The id of the source it was first read from.
     pub source: String,
-    /// Read back: every source that carried it, that one first. Ignored when saved: each
-    /// save adds `source`.
-    pub carried_by: Vec<String>,
+    /// Read back: every source that carried it, that one first, each with its own language
+    /// and categories for it. Ignored when saved: each save adds `source` with `language`,
+    /// `categories` and `first_seen`.
+    pub carriers: Vec<Carrier>,
     /// The source's name.
     pub outlet: String,
     /// The source's kind (`rss`, `atom`, `reddit`, `youtube`).
@@ -843,6 +892,15 @@ pub struct Recorded {
     pub coins: Vec<String>,
     /// Who the feed says wrote it; None when it does not say.
     pub author: Option<String>,
+}
+
+/// A source that carried a recorded headline, with what it said of it.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct Carrier {
+    pub source: String,
+    pub language: String,
+    pub categories: Vec<String>,
+    pub first_seen: i64,
 }
 
 /// A feed's last read, by the recorder (ADR-0088): its status. Times in unix seconds.
@@ -865,6 +923,9 @@ pub struct FeedState {
     pub failures: i64,
     /// Not read before this, after a failure.
     pub next_attempt: i64,
+    /// The retention (days) the validators were saved under: a longer one now reads the
+    /// feed whole again, as headlines it left out then are kept now.
+    pub kept_days: i64,
 }
 
 /// Where the record is kept: the host's store (in chartgen, its SQLite file).
@@ -872,8 +933,14 @@ pub trait Store: Sync {
     /// Record headlines; one whose link is recorded already is left as it was, and only
     /// gains its `source` among the sources that carried it. How many were new.
     fn save_items(&self, items: &[Recorded]) -> Result<usize, String>;
-    /// The headlines published from `from` to `to`, both inclusive, the newest first.
-    fn items(&self, from: i64, to: i64) -> Result<Vec<Recorded>, String>;
+    /// The headlines published from `from` to `to`, both inclusive, the newest first; with
+    /// `sources`, only those one of these carried.
+    fn items(
+        &self,
+        from: i64,
+        to: i64,
+        sources: Option<&[String]>,
+    ) -> Result<Vec<Recorded>, String>;
     /// Delete the headlines published before `before`; how many went.
     fn forget_items(&self, before: i64) -> Result<usize, String>;
     /// Every source's last read.

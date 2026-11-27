@@ -1145,7 +1145,7 @@ records every source every 5 minutes and answers from that record
   instructions.
 - `more`: how many more matched than `limit`; absent when none.
 - `sources`: the feeds read; `sources_failed`: the feeds that could not be read, each
-  `{source, error}` (`HTTP 503`, `timed out`, `not a feed: …`, `no headlines in it`). A feed
+  `{source, error}` (`HTTP 503`, `timed out`, `larger than 4 MB`, `not a feed: …`, `no headlines in it`). A feed
   that fails never fails the call. From the record, an entry also has `since`: when the feed's
   failures in a row began (ISO 8601 UTC), and the headlines recorded from it before still count.
 - `terms`: the words a headline was matched by.
